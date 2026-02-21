@@ -2,6 +2,7 @@ package twitter
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 )
 
@@ -176,4 +177,44 @@ func (c *Client) SearchTimeline(ctx context.Context, query string, count int) ([
 		return nil, fmt.Errorf("SearchTimeline: %w", err)
 	}
 	return parseSearchTimeline(body)
+}
+
+// CreateTweet posts a tweet from a specific account.
+// Returns the tweet ID on success.
+func (c *Client) CreateTweet(ctx context.Context, acc *Account, text string) (string, error) {
+	variables := map[string]any{
+		"tweet_text":              text,
+		"dark_request":            false,
+		"media":                   map[string]any{"media_entities": []any{}, "possibly_sensitive": false},
+		"semantic_annotation_ids": []any{},
+	}
+
+	ep := Endpoints["CreateTweet"]
+	payload, err := json.Marshal(map[string]any{
+		"variables": variables,
+		"features":  ep.Features,
+		"queryId":   ep.ID,
+	})
+	if err != nil {
+		return "", fmt.Errorf("marshal CreateTweet payload: %w", err)
+	}
+
+	body, err := c.doPOST(ctx, acc, "CreateTweet", ep.URL(), payload)
+	if err != nil {
+		return "", fmt.Errorf("CreateTweet: %w", err)
+	}
+	return parseCreateTweet(body)
+}
+
+// PostWithAccount posts a tweet from a named account (by username).
+// Returns the tweet ID on success.
+func (c *Client) PostWithAccount(ctx context.Context, username, text string) (string, error) {
+	acc := c.AccountByUsername(username)
+	if acc == nil {
+		return "", fmt.Errorf("account %q not found in pool", username)
+	}
+	if !acc.IsActive() {
+		return "", fmt.Errorf("account %q is not active", username)
+	}
+	return c.CreateTweet(ctx, acc, text)
 }

@@ -1,6 +1,7 @@
 package twitter
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -319,10 +320,143 @@ func (c *Client) doGET(ctx context.Context, endpoint, url string) ([]byte, map[s
 	return body, respHdrs, nil
 }
 
+// doPOST executes a POST mutation with a specific account.
+// Unlike doGET, it does not rotate accounts from the pool — the caller provides the account.
+// Handles CSRF rotation, auth expiry, and retries on transient errors.
+func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string, payload []byte) ([]byte, error) {
+	if err := stealth.DefaultJitter.Sleep(ctx); err != nil {
+		return nil, err
+	}
+
+	var lastErr error
+	for attempt := range maxRetries {
+		if attempt > 0 {
+			delay := stealth.DefaultBackoff.Duration(attempt)
+			select {
+			case <-time.After(delay):
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+
+		// Proactive ct0 rotation
+		if acc.CT0Age() > ct0MaxAge {
+			acc.RotateCT0()
+			authTok, ct0, _ := acc.Credentials()
+			_ = saveSession(c.cfg.SessionDir, acc.Username, authTok, ct0)
+		}
+
+		bc := c.clientForAccount(acc)
+		authTok, ct0, ua := acc.Credentials()
+		body, respHdrs, status, err := c.doRequestWithBody(bc, "POST", url, twitterHeaders(authTok, ct0, ua), bytes.NewReader(payload))
+		if err != nil {
+			if acc.Proxy != "" && isProxyError(err) {
+				c.markProxyDown(acc)
+			} else {
+				acc.RecordFailure()
+			}
+			lastErr = err
+			continue
+		}
+
+		// Reset proxy consecutive failures on any HTTP response
+		acc.mu.Lock()
+		acc.proxyConsecFails = 0
+		acc.mu.Unlock()
+
+		switch {
+		case status == 429:
+			c.recordAPICall(endpoint, false, true)
+			acc.MarkEndpointRateLimited(endpoint, parseRateLimitReset(respHdrs["x-rate-limit-reset"]))
+			lastErr = fmt.Errorf("429 rate limited")
+			continue
+
+		case status == 401 || status == 403:
+			c.recordAPICall(endpoint, false, false)
+			errClass := classifyError(body, respHdrs)
+			switch errClass {
+			case errCSRF:
+				slog.Warn("doPOST: CSRF error 353, rotating ct0", slog.String("user", acc.Username))
+				acc.RotateCT0()
+				authTok2, ct02, ua2 := acc.Credentials()
+				_ = saveSession(c.cfg.SessionDir, acc.Username, authTok2, ct02)
+				body2, _, status2, err2 := c.doRequestWithBody(bc, "POST", url, twitterHeaders(authTok2, ct02, ua2), bytes.NewReader(payload))
+				if err2 == nil && (status2 == 200 || status2 == 201) {
+					c.recordAPICall(endpoint, true, false)
+					acc.RecordSuccess()
+					return body2, nil
+				}
+				acc.RecordFailure()
+				lastErr = fmt.Errorf("CSRF retry failed")
+				continue
+			case errAuthExpired:
+				slog.Warn("doPOST: auth expired, attempting relogin", slog.String("user", acc.Username))
+				if reErr := c.relogin(acc); reErr != nil {
+					lastErr = fmt.Errorf("relogin failed: %w", reErr)
+					continue
+				}
+				authTok2, ct02, ua2 := acc.Credentials()
+				body2, _, status2, err2 := c.doRequestWithBody(bc, "POST", url, twitterHeaders(authTok2, ct02, ua2), bytes.NewReader(payload))
+				if err2 == nil && (status2 == 200 || status2 == 201) {
+					c.recordAPICall(endpoint, true, false)
+					acc.RecordSuccess()
+					return body2, nil
+				}
+				lastErr = fmt.Errorf("post-relogin request failed")
+				continue
+			default:
+				acc.RecordFailure()
+				return nil, fmt.Errorf("%s HTTP %d: %s", endpoint, status, truncateBytes(body, 200))
+			}
+
+		case status != 200:
+			c.recordAPICall(endpoint, false, false)
+			acc.RecordFailure()
+			return nil, fmt.Errorf("%s HTTP %d: %s", endpoint, status, truncateBytes(body, 200))
+		}
+
+		// HTTP 200 — check for error codes in response body
+		errClass := classifyError(body, respHdrs)
+		switch errClass {
+		case errNone:
+			if newCT0 := extractCT0FromHeaders(respHdrs); newCT0 != "" && newCT0 != ct0 {
+				acc.SetCT0(newCT0)
+				authTok2, ct02, _ := acc.Credentials()
+				_ = saveSession(c.cfg.SessionDir, acc.Username, authTok2, ct02)
+			}
+			c.recordAPICall(endpoint, true, false)
+			acc.RecordSuccess()
+			return body, nil
+		case errCSRF:
+			slog.Warn("doPOST: CSRF in 200, rotating ct0", slog.String("user", acc.Username))
+			acc.RotateCT0()
+			authTok2, ct02, ua2 := acc.Credentials()
+			_ = saveSession(c.cfg.SessionDir, acc.Username, authTok2, ct02)
+			body2, _, status2, err2 := c.doRequestWithBody(bc, "POST", url, twitterHeaders(authTok2, ct02, ua2), bytes.NewReader(payload))
+			if err2 == nil && (status2 == 200 || status2 == 201) && classifyError(body2, nil) == errNone {
+				c.recordAPICall(endpoint, true, false)
+				acc.RecordSuccess()
+				return body2, nil
+			}
+			lastErr = fmt.Errorf("CSRF retry failed")
+			continue
+		default:
+			c.recordAPICall(endpoint, false, false)
+			acc.RecordFailure()
+			return nil, fmt.Errorf("%s error class %d: %s", endpoint, errClass, truncateBytes(body, 200))
+		}
+	}
+
+	if lastErr != nil {
+		return nil, fmt.Errorf("%s failed after %d attempts: %w", endpoint, maxRetries, lastErr)
+	}
+	return nil, fmt.Errorf("%s failed after %d attempts", endpoint, maxRetries)
+}
+
 // requiresAuth returns true for endpoints that need a real authenticated account.
 func requiresAuth(endpoint string) bool {
 	switch endpoint {
-	case "Following", "Followers", "Retweeters":
+	case "Following", "Followers", "Retweeters", "CreateTweet":
 		return true
 	}
 	return false

@@ -325,6 +325,35 @@ func parseTweetResult(r tweetResult, defaultAuthorID string) (*Tweet, error) {
 	}, nil
 }
 
+// parseCreateTweet extracts the tweet ID from a CreateTweet mutation response.
+func parseCreateTweet(body []byte) (string, error) {
+	var raw struct {
+		Data struct {
+			CreateTweet struct {
+				TweetResults struct {
+					Result struct {
+						RestID string `json:"rest_id"`
+					} `json:"result"`
+				} `json:"tweet_results"`
+			} `json:"create_tweet"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return "", fmt.Errorf("unmarshal CreateTweet: %w", err)
+	}
+	if len(raw.Errors) > 0 {
+		return "", fmt.Errorf("CreateTweet API error: %s", raw.Errors[0].Message)
+	}
+	tweetID := raw.Data.CreateTweet.TweetResults.Result.RestID
+	if tweetID == "" {
+		return "", fmt.Errorf("CreateTweet returned empty tweet ID: %s", truncateBytes(body, 300))
+	}
+	return tweetID, nil
+}
+
 func extractTokenMentions(text string) []string {
 	matches := tokenMentionRe.FindAllStringSubmatch(strings.ToUpper(text), -1)
 	seen := make(map[string]bool)

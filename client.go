@@ -3,8 +3,10 @@ package twitter
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -120,8 +122,13 @@ func (c *Client) clientForAccount(acc *Account) *stealth.BrowserClient {
 	return c.client
 }
 
-// doRequest executes a request with xtid header injection.
+// doRequest executes a request with xtid header injection (no body).
 func (c *Client) doRequest(bc *stealth.BrowserClient, method, urlStr string, headers map[string]string) ([]byte, map[string]string, int, error) {
+	return c.doRequestWithBody(bc, method, urlStr, headers, nil)
+}
+
+// doRequestWithBody executes a request with xtid header injection and an optional body.
+func (c *Client) doRequestWithBody(bc *stealth.BrowserClient, method, urlStr string, headers map[string]string, body io.Reader) ([]byte, map[string]string, int, error) {
 	urlPath := urlStr
 	if u, parseErr := url.Parse(urlStr); parseErr == nil {
 		urlPath = u.Path
@@ -132,12 +139,23 @@ func (c *Client) doRequest(bc *stealth.BrowserClient, method, urlStr string, hea
 		slog.Debug("xtid: failed to generate transaction id", slog.Any("error", txErr))
 	}
 
-	return bc.DoWithHeaderOrder(method, urlStr, headers, nil, twitterHeaderOrder)
+	return bc.DoWithHeaderOrder(method, urlStr, headers, body, twitterHeaderOrder)
 }
 
 // Pool returns the underlying account pool.
 func (c *Client) Pool() *pool.Pool[*Account] {
 	return c.pool
+}
+
+// AccountByUsername returns the pool account matching the given username (case-insensitive).
+// Returns nil if not found.
+func (c *Client) AccountByUsername(username string) *Account {
+	for _, acc := range c.pool.Items() {
+		if strings.EqualFold(acc.Username, username) {
+			return acc
+		}
+	}
+	return nil
 }
 
 // AccountHealth describes the health state of a single pool account.

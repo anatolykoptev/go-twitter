@@ -47,6 +47,7 @@ var Endpoints = map[string]Endpoint{
 	"SearchTimeline":   {ID: "AIdc203rPpK_k_2KWSdm7g", Name: "SearchTimeline", Features: gqlFeatures()},
 	"TweetDetail":      {ID: "_8aYOgEDz35BrBcBal1-_w", Name: "TweetDetail", Features: gqlFeatures()},
 	"Retweeters":       {ID: "i-CI8t2pJD15euZJErEDrg", Name: "Retweeters", Features: gqlFeatures()},
+	"CreateTweet":      {ID: "7TKRKCPuAGsmYde0CudbVg", Name: "CreateTweet", Features: gqlFeatures()},
 }
 
 // gqlFeatures returns the canonical Twitter GraphQL feature flags.
