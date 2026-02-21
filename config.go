@@ -46,6 +46,10 @@ type ClientConfig struct {
 
 	// ProxyBackoffMax is the maximum backoff for proxy failures.
 	ProxyBackoffMax time.Duration
+
+	// PoolAlertHook is called when the pool emits alerts (account deactivation, proxy failures, etc.).
+	// topic is the alert type (e.g. "pool.deactivated"), payload contains details.
+	PoolAlertHook func(topic string, payload any)
 }
 
 // defaults fills in zero-value config fields with sensible defaults.

@@ -51,10 +51,14 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		slog.Warn("xtid: init failed, x-client-transaction-id will be missing", slog.Any("error", err))
 	}
 
-	poolCfg := pool.Config{
-		AlertHook: func(topic string, payload any) {
+	alertHook := cfg.PoolAlertHook
+	if alertHook == nil {
+		alertHook = func(topic string, payload any) {
 			slog.Warn("pool alert", slog.String("topic", topic), slog.Any("payload", payload))
-		},
+		}
+	}
+	poolCfg := pool.Config{
+		AlertHook: alertHook,
 		ProxyBackoff: pool.BackoffConfig{
 			InitialWait: cfg.ProxyBackoffInitial,
 			MaxWait:     cfg.ProxyBackoffMax,
@@ -134,6 +138,32 @@ func (c *Client) doRequest(bc *stealth.BrowserClient, method, urlStr string, hea
 // Pool returns the underlying account pool.
 func (c *Client) Pool() *pool.Pool[*Account] {
 	return c.pool
+}
+
+// AccountHealth describes the health state of a single pool account.
+type AccountHealth struct {
+	Username    string
+	Active      bool
+	Total       int
+	Failed      int
+	ConsecFails int
+}
+
+// HealthReport returns health stats for all accounts in the pool.
+func (c *Client) HealthReport() []AccountHealth {
+	items := c.pool.Items()
+	report := make([]AccountHealth, 0, len(items))
+	for _, acc := range items {
+		total, failed, consecFails := acc.Stats()
+		report = append(report, AccountHealth{
+			Username:    acc.Username,
+			Active:      acc.IsActive(),
+			Total:       total,
+			Failed:      failed,
+			ConsecFails: consecFails,
+		})
+	}
+	return report
 }
 
 // recordAPICall calls the metrics hook if configured.
