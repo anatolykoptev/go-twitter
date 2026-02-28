@@ -39,14 +39,14 @@ func EndpointURL(operation string) (string, error) {
 
 // Endpoints maps operation names to their current GraphQL IDs and feature flags.
 var Endpoints = map[string]Endpoint{
-	"UserByScreenName": {ID: "1VOOyvKkiI3FMmkeDNxM9A", Name: "UserByScreenName", Features: gqlFeatures()},
-	"UserByRestId":     {ID: "WJ7rCtezBVT6nk6VM5R8Bw", Name: "UserByRestId", Features: gqlFeatures()},
-	"Followers":        {ID: "Elc_-qTARceHpztqhI9PQA", Name: "Followers", Features: gqlFeatures()},
-	"Following":        {ID: "C1qZ6bs-L3oc_TKSZyxkXQ", Name: "Following", Features: gqlFeatures()},
-	"UserTweets":       {ID: "HeWHY26ItCfUmm1e6ITjeA", Name: "UserTweets", Features: gqlFeatures()},
-	"SearchTimeline":   {ID: "AIdc203rPpK_k_2KWSdm7g", Name: "SearchTimeline", Features: gqlFeatures()},
-	"TweetDetail":      {ID: "_8aYOgEDz35BrBcBal1-_w", Name: "TweetDetail", Features: gqlFeatures()},
-	"Retweeters":       {ID: "i-CI8t2pJD15euZJErEDrg", Name: "Retweeters", Features: gqlFeatures()},
+	"UserByScreenName": {ID: "sLVLhk0bGj3MVFEKTdax1w", Name: "UserByScreenName", Features: gqlFeatures()},
+	"UserByRestId":     {ID: "GazOglcBvgLigl3ywt6b3Q", Name: "UserByRestId", Features: gqlFeatures()},
+	"Followers":        {ID: "pd8Tt1qUz1YWrICegqZ8cw", Name: "Followers", Features: gqlFeatures()},
+	"Following":        {ID: "wjvx62Hye2dGVvnvVco0xA", Name: "Following", Features: gqlFeatures()},
+	"UserTweets":       {ID: "HuTx74BxAnezK1gWvYY7zg", Name: "UserTweets", Features: gqlFeatures()},
+	"SearchTimeline":   {ID: "nK1dw4oV3k4w5TdtcAdSww", Name: "SearchTimeline", Features: gqlFeatures()},
+	"TweetDetail":      {ID: "zXaXQgfyR4GxE21uwYQSyA", Name: "TweetDetail", Features: gqlFeatures()},
+	"Retweeters":       {ID: "0BoJlKAxoNPQUHRftlwZ2w", Name: "Retweeters", Features: gqlFeatures()},
 	"CreateTweet":      {ID: "7TKRKCPuAGsmYde0CudbVg", Name: "CreateTweet", Features: gqlFeatures()},
 }
 
