@@ -99,12 +99,17 @@ func (c *Client) fetchTweetUserList(ctx context.Context, operation, tweetID stri
 		}
 
 		variables := map[string]any{
-			"tweetId":                   tweetID,
-			"count":                     min(20, maxCount-len(users)),
-			"includePromotedContent":    true,
-			"withDownvotePerspective":   false,
-			"withReactionsMetadata":     false,
-			"withReactionsPerspective":  false,
+			"tweetId":                       tweetID,
+			"count":                         min(20, maxCount-len(users)),
+			"includePromotedContent":        true,
+			"withDownvotePerspective":       false,
+			"withReactionsMetadata":         false,
+			"withReactionsPerspective":      false,
+			"withSuperFollowsTweetFields":   true,
+			"withSuperFollowsUserFields":    true,
+			"withVoice":                     true,
+			"withBirdwatchNotes":            true,
+			"withCommunity":                 true,
 		}
 		if cursor != "" {
 			variables["cursor"] = cursor
