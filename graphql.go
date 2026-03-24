@@ -151,6 +151,11 @@ func (c *Client) GetTweetByID(ctx context.Context, tweetID string) (*Tweet, erro
 		"withQuickPromoteEligibilityTweetFields": true,
 		"withBirdwatchNotes":                     true,
 		"withVoice":                              true,
+		"withDownvotePerspective":                false,
+		"withReactionsMetadata":                  false,
+		"withReactionsPerspective":               false,
+		"withSuperFollowsTweetFields":            true,
+		"withSuperFollowsUserFields":             true,
 	}
 	url, err := EndpointURL("TweetDetail")
 	if err != nil {
