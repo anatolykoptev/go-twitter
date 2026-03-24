@@ -355,6 +355,8 @@ func parseTweetResult(r tweetResult, defaultAuthorID string) (*Tweet, error) {
 	return &Tweet{
 		ID:            r.RestID,
 		AuthorID:      authorID,
+		AuthorHandle:  r.Core.UserResults.Result.Legacy.ScreenName,
+		AuthorName:    r.Core.UserResults.Result.Legacy.Name,
 		Text:          text,
 		CreatedAt:     createdAt,
 		Views:         views,

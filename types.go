@@ -22,6 +22,8 @@ type TwitterUser struct {
 type Tweet struct {
 	ID            string
 	AuthorID      string
+	AuthorHandle  string // @screen_name (from core.user_results)
+	AuthorName    string // display name (from core.user_results)
 	Text          string
 	CreatedAt     time.Time
 	Views         int
