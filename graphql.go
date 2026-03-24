@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 )
 
 // GetUserByScreenName fetches a user profile by Twitter handle.
@@ -169,9 +170,13 @@ func (c *Client) GetTweetByID(ctx context.Context, tweetID string) (*Tweet, erro
 	}
 	tweets, err := parseTweetDetail(body)
 	if err != nil {
+		// If parsing fails, log the raw response for debugging
+		slog.Debug("TweetDetail parse failed", slog.String("body_prefix", string(body[:min(500, len(body))])))
 		return nil, fmt.Errorf("parse TweetDetail: %w", err)
 	}
+	slog.Debug("TweetDetail parsed", slog.Int("count", len(tweets)), slog.String("target", tweetID))
 	for _, t := range tweets {
+		slog.Debug("TweetDetail tweet", slog.String("id", t.ID), slog.String("text_prefix", t.Text[:min(50, len(t.Text))]))
 		if t.ID == tweetID {
 			return t, nil
 		}
@@ -179,6 +184,8 @@ func (c *Client) GetTweetByID(ctx context.Context, tweetID string) (*Tweet, erro
 	if len(tweets) > 0 {
 		return tweets[0], nil
 	}
+	// Log raw body prefix to understand why parsing returned empty
+	slog.Warn("TweetDetail no tweets", slog.String("body_prefix", string(body[:min(1000, len(body))])))
 	return nil, fmt.Errorf("tweet %s not found in response", tweetID)
 }
 
