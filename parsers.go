@@ -71,6 +71,38 @@ func parseRetweeterList(body []byte) ([]*TwitterUser, string, error) {
 	return extractUsersFromTimeline(tl)
 }
 
+// parseTweetDetail parses TweetDetail GraphQL response.
+// The response wraps tweets in a threaded conversation timeline.
+func parseTweetDetail(body []byte) ([]*Tweet, error) {
+	var raw struct {
+		Data struct {
+			ThreadedConversation struct {
+				Instructions []struct {
+					Entries []struct {
+						Content struct {
+							ItemContent json.RawMessage `json:"itemContent"`
+						} `json:"content"`
+					} `json:"entries"`
+				} `json:"instructions"`
+			} `json:"threaded_conversation_with_injections_v2"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, fmt.Errorf("unmarshal TweetDetail: %w", err)
+	}
+	tl := timelineObj{Instructions: make([]timelineInstruction, 0)}
+	for _, instr := range raw.Data.ThreadedConversation.Instructions {
+		entries := make([]timelineEntry, 0, len(instr.Entries))
+		for _, e := range instr.Entries {
+			entries = append(entries, timelineEntry{
+				Content: timelineContent{ItemContent: e.Content.ItemContent},
+			})
+		}
+		tl.Instructions = append(tl.Instructions, timelineInstruction{Entries: entries})
+	}
+	return extractTweetsFromTimeline(tl, "")
+}
+
 // parseTweetTimeline parses UserTweets timeline response.
 func parseTweetTimeline(body []byte, authorID string) ([]*Tweet, error) {
 	var raw struct {

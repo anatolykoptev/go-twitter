@@ -99,17 +99,17 @@ func (c *Client) fetchTweetUserList(ctx context.Context, operation, tweetID stri
 		}
 
 		variables := map[string]any{
-			"tweetId":                       tweetID,
-			"count":                         min(20, maxCount-len(users)),
-			"includePromotedContent":        true,
-			"withDownvotePerspective":       false,
-			"withReactionsMetadata":         false,
-			"withReactionsPerspective":      false,
-			"withSuperFollowsTweetFields":   true,
-			"withSuperFollowsUserFields":    true,
-			"withVoice":                     true,
-			"withBirdwatchNotes":            true,
-			"withCommunity":                 true,
+			"tweetId":                     tweetID,
+			"count":                       min(20, maxCount-len(users)),
+			"includePromotedContent":      true,
+			"withDownvotePerspective":     false,
+			"withReactionsMetadata":       false,
+			"withReactionsPerspective":    false,
+			"withSuperFollowsTweetFields": true,
+			"withSuperFollowsUserFields":  true,
+			"withVoice":                   true,
+			"withBirdwatchNotes":          true,
+			"withCommunity":               true,
 		}
 		if cursor != "" {
 			variables["cursor"] = cursor
@@ -138,6 +138,43 @@ func (c *Client) fetchTweetUserList(ctx context.Context, operation, tweetID stri
 		cursor = nextCursor
 	}
 	return users, nil
+}
+
+// GetTweetByID fetches a single tweet by its ID.
+func (c *Client) GetTweetByID(ctx context.Context, tweetID string) (*Tweet, error) {
+	variables := map[string]any{
+		"focalTweetId":                           tweetID,
+		"with_rux_injections":                    false,
+		"rankingMode":                            "Relevance",
+		"includePromotedContent":                 true,
+		"withCommunity":                          true,
+		"withQuickPromoteEligibilityTweetFields": true,
+		"withBirdwatchNotes":                     true,
+		"withVoice":                              true,
+	}
+	url, err := EndpointURL("TweetDetail")
+	if err != nil {
+		return nil, err
+	}
+	url = addGraphQLParams(url, variables, Endpoints["TweetDetail"].Features)
+
+	body, _, err := c.doGET(ctx, "TweetDetail", url)
+	if err != nil {
+		return nil, fmt.Errorf("TweetDetail: %w", err)
+	}
+	tweets, err := parseTweetDetail(body)
+	if err != nil {
+		return nil, fmt.Errorf("parse TweetDetail: %w", err)
+	}
+	for _, t := range tweets {
+		if t.ID == tweetID {
+			return t, nil
+		}
+	}
+	if len(tweets) > 0 {
+		return tweets[0], nil
+	}
+	return nil, fmt.Errorf("tweet %s not found in response", tweetID)
 }
 
 // GetUserTweets fetches recent tweets for a user.
