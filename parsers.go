@@ -74,24 +74,32 @@ func parseRetweeterList(body []byte) ([]*TwitterUser, string, error) {
 // parseTweetDetail parses TweetDetail GraphQL response.
 // The response wraps tweets in a threaded conversation timeline.
 func parseTweetDetail(body []byte) ([]*Tweet, error) {
+	type conversationData struct {
+		Instructions []struct {
+			Entries []struct {
+				Content struct {
+					ItemContent json.RawMessage `json:"itemContent"`
+				} `json:"content"`
+			} `json:"entries"`
+		} `json:"instructions"`
+	}
 	var raw struct {
 		Data struct {
-			ThreadedConversation struct {
-				Instructions []struct {
-					Entries []struct {
-						Content struct {
-							ItemContent json.RawMessage `json:"itemContent"`
-						} `json:"content"`
-					} `json:"entries"`
-				} `json:"instructions"`
-			} `json:"threaded_conversation_with_injections_v2"`
+			// Twitter uses both keys depending on the endpoint version
+			V2 conversationData `json:"threaded_conversation_with_injections_v2"`
+			V1 conversationData `json:"threaded_conversation_with_injections"`
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, fmt.Errorf("unmarshal TweetDetail: %w", err)
 	}
+	// Use v2 if it has instructions, otherwise fall back to v1
+	conv := raw.Data.V2
+	if len(conv.Instructions) == 0 {
+		conv = raw.Data.V1
+	}
 	tl := timelineObj{Instructions: make([]timelineInstruction, 0)}
-	for _, instr := range raw.Data.ThreadedConversation.Instructions {
+	for _, instr := range conv.Instructions {
 		entries := make([]timelineEntry, 0, len(instr.Entries))
 		for _, e := range instr.Entries {
 			entries = append(entries, timelineEntry{
