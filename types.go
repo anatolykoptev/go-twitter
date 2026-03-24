@@ -30,6 +30,7 @@ type Tweet struct {
 	Likes         int
 	Retweets      int
 	Quotes        int
+	ReplyCount    int
 	TokenMentions []string // extracted $TICKER patterns, e.g. ["BTC", "ETH"]
 }
 

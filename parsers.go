@@ -213,6 +213,7 @@ type tweetResult struct {
 		FavoriteCount int    `json:"favorite_count"`
 		RetweetCount  int    `json:"retweet_count"`
 		QuoteCount    int    `json:"quote_count"`
+		ReplyCount    int    `json:"reply_count"`
 		UserIDStr     string `json:"user_id_str"`
 	} `json:"legacy"`
 	Views struct {
@@ -363,6 +364,7 @@ func parseTweetResult(r tweetResult, defaultAuthorID string) (*Tweet, error) {
 		Likes:         r.Legacy.FavoriteCount,
 		Retweets:      r.Legacy.RetweetCount,
 		Quotes:        r.Legacy.QuoteCount,
+		ReplyCount:    r.Legacy.ReplyCount,
 		TokenMentions: mentions,
 	}, nil
 }
