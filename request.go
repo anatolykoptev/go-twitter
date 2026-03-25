@@ -107,7 +107,24 @@ func (c *Client) doGET(ctx context.Context, endpoint, url string) ([]byte, map[s
 					return body2, respHdrs2, nil
 				}
 				acc.RecordFailure()
-				lastErr = fmt.Errorf("CSRF retry failed")
+				// CSRF retry failed — attempt relogin as session may be expired
+				slog.Warn("CSRF retry failed, attempting relogin", slog.String("user", acc.Username))
+				if reErr := c.relogin(acc); reErr != nil {
+					slog.Warn("relogin after CSRF failed", slog.String("user", acc.Username), slog.Any("error", reErr))
+					c.pool.SoftDeactivate(acc, c.cfg.AuthCooldown)
+					lastErr = reErr
+					continue
+				}
+				// Retry with fresh credentials after relogin
+				authTok3, ct03, ua3 := acc.Credentials()
+				body3, respHdrs3, status3, err3 := c.doRequest(bc, "GET", url, twitterHeaders(authTok3, ct03, ua3))
+				if err3 == nil && status3 == 200 {
+					c.recordAPICall(endpoint, true, false)
+					acc.RecordSuccess()
+					return body3, respHdrs3, nil
+				}
+				c.pool.SoftDeactivate(acc, c.cfg.AuthCooldown)
+				lastErr = fmt.Errorf("post-relogin CSRF request failed")
 				continue
 			case errAuthExpired:
 				slog.Warn("auth expired (code 32), attempting relogin", slog.String("user", acc.Username))
@@ -177,7 +194,23 @@ func (c *Client) doGET(ctx context.Context, endpoint, url string) ([]byte, map[s
 				acc.RecordSuccess()
 				return body2, respHdrs2, nil
 			}
-			lastErr = fmt.Errorf("CSRF retry failed")
+			// CSRF retry failed — attempt relogin
+			slog.Warn("CSRF retry failed, attempting relogin", slog.String("user", acc.Username))
+			if reErr := c.relogin(acc); reErr != nil {
+				slog.Warn("relogin after CSRF failed", slog.String("user", acc.Username), slog.Any("error", reErr))
+				c.pool.SoftDeactivate(acc, c.cfg.AuthCooldown)
+				lastErr = reErr
+				continue
+			}
+			authTok3, ct03, ua3 := acc.Credentials()
+			body3, respHdrs3, status3, err3 := c.doRequest(bc, "GET", url, twitterHeaders(authTok3, ct03, ua3))
+			if err3 == nil && status3 == 200 {
+				c.recordAPICall(endpoint, true, false)
+				acc.RecordSuccess()
+				return body3, respHdrs3, nil
+			}
+			c.pool.SoftDeactivate(acc, c.cfg.AuthCooldown)
+			lastErr = fmt.Errorf("post-relogin CSRF request failed")
 			continue
 
 		case errAuthExpired:
