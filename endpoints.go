@@ -45,7 +45,7 @@ var Endpoints = map[string]Endpoint{
 	"Following":        {ID: "wjvx62Hye2dGVvnvVco0xA", Name: "Following", Features: gqlFeatures()},
 	"UserTweets":       {ID: "HuTx74BxAnezK1gWvYY7zg", Name: "UserTweets", Features: gqlFeatures()},
 	"SearchTimeline":   {ID: "nK1dw4oV3k4w5TdtcAdSww", Name: "SearchTimeline", Features: gqlFeatures()},
-	"TweetDetail":      {ID: "zXaXQgfyR4GxE21uwYQSyA", Name: "TweetDetail", Features: gqlFeatures()},
+	"TweetDetail":      {ID: "VWFGPVAGkZMGRKGe3GFFnA", Name: "TweetDetail", Features: gqlFeatures()},
 	"Retweeters":       {ID: "0BoJlKAxoNPQUHRftlwZ2w", Name: "Retweeters", Features: gqlFeatures()},
 	"CreateTweet":      {ID: "7TKRKCPuAGsmYde0CudbVg", Name: "CreateTweet", Features: gqlFeatures()},
 }
@@ -64,7 +64,7 @@ func gqlFeatures() map[string]any {
 		"longform_notetweets_inline_media_enabled":                                true,
 		"longform_notetweets_rich_text_read_enabled":                              true,
 		"premium_content_api_read_enabled":                                        false,
-		"profile_label_improvements_pcf_label_in_post_enabled":                   false,
+		"profile_label_improvements_pcf_label_in_post_enabled":                    false,
 		"responsive_web_edit_tweet_api_enabled":                                   true,
 		"responsive_web_enhance_cards_enabled":                                    false,
 		"responsive_web_graphql_exclude_directive_enabled":                        true,
