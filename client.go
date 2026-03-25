@@ -33,6 +33,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	cfg.defaults()
 
 	for _, acc := range cfg.Accounts {
+		acc.active = true
 		acc.rateLimiter = ratelimit.NewLimiter(cfg.RateLimit)
 		acc.HealthTracker = pool.DefaultHealthTracker()
 	}
