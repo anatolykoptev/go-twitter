@@ -32,15 +32,13 @@ func floatToHex(x float64) string {
 	fraction := x - float64(quotient)
 
 	for quotient > 0 {
-		quotient = int(x / 16)
-		remainder := int(x - float64(quotient)*16)
-
+		remainder := quotient % 16
 		if remainder > 9 {
-			result = append([]string{string(rune(remainder + 55))}, result...)
+			result = append([]string{string(rune(remainder + 87))}, result...) // lowercase hex
 		} else {
 			result = append([]string{fmt.Sprintf("%d", remainder)}, result...)
 		}
-		x = float64(quotient)
+		quotient /= 16
 	}
 
 	if fraction == 0 {
@@ -49,13 +47,13 @@ func floatToHex(x float64) string {
 
 	result = append(result, ".")
 
-	for fraction > 0 {
+	for i := 0; fraction > 0 && i < 6; i++ { // limit iterations to avoid infinite loop
 		fraction *= 16
 		integer := int(fraction)
 		fraction -= float64(integer)
 
 		if integer > 9 {
-			result = append(result, string(rune(integer+55)))
+			result = append(result, string(rune(integer+87))) // lowercase hex
 		} else {
 			result = append(result, fmt.Sprintf("%d", integer))
 		}

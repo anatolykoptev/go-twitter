@@ -38,7 +38,7 @@ func (c *Cubic) getValue(t float64) float64 {
 	for start < end {
 		mid = (start + end) / 2
 		xEst := cubicCalc(c.curves[0], c.curves[2], mid)
-		if math.Abs(t-xEst) < 0.00001 {
+		if math.Abs(t-xEst) < 0.000001 {
 			return cubicCalc(c.curves[1], c.curves[3], mid)
 		}
 		if xEst < t {

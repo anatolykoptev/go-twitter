@@ -7,8 +7,11 @@ import (
 )
 
 var (
-	onDemandFileRegex = regexp.MustCompile(`['|"]{1}ondemand\.s['|"]{1}:\s*['|"]{1}([\w]*)['|"]{1}`)
-	indicesRegex      = regexp.MustCompile(`\(\w{1}\[(\d{1,2})\],\s*16\)`)
+	// Legacy format: "ondemand.s":"<hash>"
+	onDemandLegacyRegex = regexp.MustCompile(`['|"]{1}ondemand\.s['|"]{1}:\s*['|"]{1}([\w]*)['|"]{1}`)
+	// New webpack format: chunk_id:"ondemand.s" (name map)
+	onDemandChunkRegex = regexp.MustCompile(`(\d+)\s*:\s*["']ondemand\.s["']`)
+	indicesRegex       = regexp.MustCompile(`\(\w{1}\[(\d{1,2})\],\s*16\)`)
 )
 
 func getVerificationKey(html string) string {
@@ -26,10 +29,26 @@ func getVerificationKey(html string) string {
 }
 
 func getOnDemandFileURL(html string) string {
-	matches := onDemandFileRegex.FindStringSubmatch(html)
-	if len(matches) > 1 {
-		filename := matches[1]
-		return "https://abs.twimg.com/responsive-web/client-web/ondemand.s." + filename + "a.js"
+	// Try legacy format first: "ondemand.s":"<hash>"
+	matches := onDemandLegacyRegex.FindStringSubmatch(html)
+	if len(matches) > 1 && matches[1] != "" {
+		return "https://abs.twimg.com/responsive-web/client-web/ondemand.s." + matches[1] + "a.js"
+	}
+
+	// New webpack format: find chunk ID, then look up hash
+	chunkMatch := onDemandChunkRegex.FindStringSubmatch(html)
+	if len(chunkMatch) < 2 {
+		return ""
+	}
+	chunkID := chunkMatch[1]
+
+	// Find hash for this chunk ID (matches like 20113:"117abc8")
+	hashRegex := regexp.MustCompile(chunkID + `\s*:\s*["']([a-f0-9]+)["']`)
+	allMatches := hashRegex.FindAllStringSubmatch(html, -1)
+	for _, m := range allMatches {
+		if len(m) > 1 && m[1] != "ondemand.s" {
+			return "https://abs.twimg.com/responsive-web/client-web/ondemand.s." + m[1] + "a.js"
+		}
 	}
 	return ""
 }
