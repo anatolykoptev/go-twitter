@@ -1,6 +1,9 @@
 package twitter
 
-import "fmt"
+import (
+	"fmt"
+	"os"
+)
 
 const (
 	twitterBase   = "https://x.com/i/api/graphql"
@@ -48,6 +51,35 @@ var Endpoints = map[string]Endpoint{
 	"TweetDetail":      {ID: "VWFGPVAGkZMGRKGe3GFFnA", Name: "TweetDetail", Features: gqlFeatures()},
 	"Retweeters":       {ID: "0BoJlKAxoNPQUHRftlwZ2w", Name: "Retweeters", Features: gqlFeatures()},
 	"CreateTweet":      {ID: "7TKRKCPuAGsmYde0CudbVg", Name: "CreateTweet", Features: gqlFeatures()},
+}
+
+// envOverrides maps endpoint names to their env var names for queryId overrides.
+var envOverrides = map[string]string{
+	"TweetDetail":      "TWITTER_QID_TWEET_DETAIL",
+	"UserByScreenName": "TWITTER_QID_USER_BY_SCREEN_NAME",
+	"UserTweets":       "TWITTER_QID_USER_TWEETS",
+	"SearchTimeline":   "TWITTER_QID_SEARCH_TIMELINE",
+	"Followers":        "TWITTER_QID_FOLLOWERS",
+	"Following":        "TWITTER_QID_FOLLOWING",
+	"Retweeters":       "TWITTER_QID_RETWEETERS",
+	"CreateTweet":      "TWITTER_QID_CREATE_TWEET",
+}
+
+// ApplyEnvOverrides reads TWITTER_QID_* env vars and overrides queryIds in Endpoints.
+// Called automatically by init(); can also be called manually in tests.
+func ApplyEnvOverrides() {
+	for name, envKey := range envOverrides {
+		if qid := os.Getenv(envKey); qid != "" {
+			if ep, ok := Endpoints[name]; ok {
+				ep.ID = qid
+				Endpoints[name] = ep
+			}
+		}
+	}
+}
+
+func init() {
+	ApplyEnvOverrides()
 }
 
 // gqlFeatures returns the canonical Twitter GraphQL feature flags.
