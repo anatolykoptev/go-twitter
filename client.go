@@ -13,6 +13,7 @@ import (
 	stealth "github.com/anatolykoptev/go-stealth"
 	"github.com/anatolykoptev/go-stealth/pool"
 	"github.com/anatolykoptev/go-stealth/ratelimit"
+	"github.com/anatolykoptev/go-twitter/xpff"
 	"github.com/anatolykoptev/go-twitter/xtid"
 )
 
@@ -21,6 +22,7 @@ type Client struct {
 	client  *stealth.BrowserClient
 	pool    *pool.Pool[*Account]
 	xtidMgr *xtid.Manager
+	xpffGen *xpff.Generator
 	cfg     ClientConfig
 
 	mu                sync.Mutex
@@ -71,10 +73,13 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	}
 	p := pool.New(cfg.Accounts, poolCfg)
 
+	xpffGen := xpff.New(xpff.GenerateGuestID(), defaultUserAgent)
+
 	c := &Client{
 		client:  bc,
 		pool:    p,
 		xtidMgr: mgr,
+		xpffGen: xpffGen,
 		cfg:     cfg,
 	}
 
@@ -138,6 +143,12 @@ func (c *Client) doRequestWithBody(bc *stealth.BrowserClient, method, urlStr str
 		headers["x-client-transaction-id"] = txID
 	} else {
 		slog.Debug("xtid: failed to generate transaction id", slog.Any("error", txErr))
+	}
+
+	if xpffVal, xpffErr := c.xpffGen.Generate(); xpffErr == nil {
+		headers["x-xp-forwarded-for"] = xpffVal
+	} else {
+		slog.Debug("xpff: failed to generate header", slog.Any("error", xpffErr))
 	}
 
 	return bc.DoWithHeaderOrder(method, urlStr, headers, body, twitterHeaderOrder)

@@ -81,6 +81,7 @@ var twitterHeaderOrder = []string{
 	"x-twitter-active-user",
 	"x-twitter-client-language",
 	"x-client-transaction-id",
+	"x-xp-forwarded-for",
 	"sec-ch-ua",
 	"sec-ch-ua-mobile",
 	"sec-ch-ua-platform",
