@@ -73,7 +73,11 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	}
 	p := pool.New(cfg.Accounts, poolCfg)
 
-	xpffGen := xpff.New(xpff.GenerateGuestID(), defaultUserAgent)
+	xpffGuestID := mgr.GuestID()
+	if xpffGuestID == "" {
+		xpffGuestID = xpff.GenerateGuestID()
+	}
+	xpffGen := xpff.New(xpffGuestID, defaultUserAgent)
 
 	c := &Client{
 		client:  bc,

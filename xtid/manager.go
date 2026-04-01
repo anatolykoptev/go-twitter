@@ -14,6 +14,7 @@ import (
 type Manager struct {
 	mu              sync.RWMutex
 	ct              *ClientTransaction
+	guestID         string
 	lastRefresh     time.Time
 	refreshInterval time.Duration
 	client          *http.Client
@@ -32,7 +33,7 @@ func NewManager() *Manager {
 // Initialize fetches x.com and the ondemand.s JS file, then builds the ClientTransaction.
 // Must be called at least once before GenerateID.
 func (m *Manager) Initialize() error {
-	homeHTML, err := m.fetchURL("https://x.com")
+	homeHTML, guestID, err := m.fetchHome()
 	if err != nil {
 		return fmt.Errorf("fetch x.com: %w", err)
 	}
@@ -54,6 +55,9 @@ func (m *Manager) Initialize() error {
 
 	m.mu.Lock()
 	m.ct = ct
+	if guestID != "" {
+		m.guestID = guestID
+	}
 	m.lastRefresh = time.Now()
 	m.mu.Unlock()
 
@@ -63,6 +67,47 @@ func (m *Manager) Initialize() error {
 	}
 	slog.Info("xtid: initialized", slog.String("anim_key", prefix+"..."))
 	return nil
+}
+
+// GuestID returns the guest_id extracted from x.com set-cookie headers.
+func (m *Manager) GuestID() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.guestID
+}
+
+// fetchHome fetches x.com and extracts the guest_id from set-cookie headers.
+func (m *Manager) fetchHome() (html, guestID string, err error) {
+	req, err := http.NewRequest("GET", "https://x.com", nil)
+	if err != nil {
+		return "", "", err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
+
+	resp, err := m.client.Do(req)
+	if err != nil {
+		return "", "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return "", "", fmt.Errorf("HTTP %d", resp.StatusCode)
+	}
+
+	for _, c := range resp.Cookies() {
+		if c.Name == "guest_id" && c.Value != "" {
+			guestID = c.Value
+			break
+		}
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return "", "", err
+	}
+	return string(body), guestID, nil
 }
 
 func (m *Manager) fetchURL(url string) (string, error) {
@@ -118,4 +163,3 @@ func (m *Manager) GenerateID(method, path string) (string, error) {
 	}
 	return m.ct.GenerateID(method, path), nil
 }
-
