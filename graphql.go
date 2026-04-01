@@ -213,6 +213,7 @@ func (c *Client) GetUserTweets(ctx context.Context, userID string, count int) ([
 }
 
 // SearchTimeline searches for tweets matching a query.
+// Uses POST (Twitter migrated this endpoint from GET in March 2026).
 func (c *Client) SearchTimeline(ctx context.Context, query string, count int) ([]*Tweet, error) {
 	variables := map[string]any{
 		"rawQuery":    query,
@@ -227,9 +228,16 @@ func (c *Client) SearchTimeline(ctx context.Context, query string, count int) ([
 	if err != nil {
 		return nil, err
 	}
-	url = addGraphQLParams(url, variables, Endpoints["SearchTimeline"].Features, fieldToggles)
+	payload, err := json.Marshal(map[string]any{
+		"variables":    variables,
+		"features":     Endpoints["SearchTimeline"].Features,
+		"fieldToggles": fieldToggles,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("SearchTimeline: marshal payload: %w", err)
+	}
 
-	body, _, err := c.doGET(ctx, "SearchTimeline", url)
+	body, _, err := c.doPoolPOST(ctx, "SearchTimeline", url, payload)
 	if err != nil {
 		return nil, fmt.Errorf("SearchTimeline: %w", err)
 	}

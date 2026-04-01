@@ -1,6 +1,7 @@
 package twitter
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -132,6 +133,15 @@ func (c *Client) clientForAccount(acc *Account) *stealth.BrowserClient {
 		return acc.client
 	}
 	return c.client
+}
+
+// doPoolReq is a helper for doPoolRequest: executes method+payload via doRequestWithBody.
+func (c *Client) doPoolReq(bc *stealth.BrowserClient, method, urlStr string, payload []byte, headers map[string]string) ([]byte, map[string]string, int, error) {
+	var body io.Reader
+	if len(payload) > 0 {
+		body = bytes.NewReader(payload)
+	}
+	return c.doRequestWithBody(bc, method, urlStr, headers, body)
 }
 
 // doRequest executes a request with xtid header injection (no body).
