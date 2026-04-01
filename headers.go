@@ -22,8 +22,8 @@ func twitterHeaders(authToken, ct0, userAgent string) map[string]string {
 		"accept":                    "*/*",
 		"accept-language":           "en-US,en;q=0.9",
 		"accept-encoding":           "gzip, deflate, br",
-		"referer":                   "https://twitter.com/",
-		"origin":                    "https://twitter.com",
+		"referer":                   "https://x.com/",
+		"origin":                    "https://x.com",
 		"sec-fetch-dest":            "empty",
 		"sec-fetch-mode":            "cors",
 		"sec-fetch-site":            "same-origin",
@@ -48,8 +48,8 @@ func guestHeaders(guestToken string) map[string]string {
 		"accept":                    "*/*",
 		"accept-language":           "en-US,en;q=0.9",
 		"accept-encoding":           "gzip, deflate, br",
-		"referer":                   "https://twitter.com/",
-		"origin":                    "https://twitter.com",
+		"referer":                   "https://x.com/",
+		"origin":                    "https://x.com",
 	}
 }
 
@@ -64,8 +64,8 @@ func loginFlowHeaders(guestToken, ct0 string) map[string]string {
 		"user-agent":                defaultUserAgent,
 		"accept":                    "*/*",
 		"accept-language":           "en-US,en;q=0.9",
-		"referer":                   "https://twitter.com/",
-		"origin":                    "https://twitter.com",
+		"referer":                   "https://x.com/",
+		"origin":                    "https://x.com",
 	}
 	if ct0 != "" {
 		h["x-csrf-token"] = ct0
