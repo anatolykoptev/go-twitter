@@ -100,6 +100,8 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		if err := c.loadOrLogin(acc, c.clientForAccount(acc)); err != nil {
 			slog.Warn("account login failed", slog.String("user", acc.Username), slog.Any("error", err))
 			acc.SetActive(false)
+		} else {
+			acc.SetActive(true)
 		}
 	}
 
