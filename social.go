@@ -10,7 +10,7 @@ import (
 	"github.com/anatolykoptev/go-twitter/social"
 )
 
-const maxSocialRetries = 3
+const maxSocialRetries = 6
 
 // SearchWithSocial acquires accounts from go-social and searches Twitter,
 // retrying with different accounts on failure. go-social rotates accounts
