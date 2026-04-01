@@ -489,7 +489,7 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 // requiresAuth returns true for endpoints that need a real authenticated account.
 func requiresAuth(endpoint string) bool {
 	switch endpoint {
-	case "TweetDetail", "Following", "Followers", "Retweeters", "CreateTweet":
+	case "TweetDetail", "SearchTimeline", "Following", "Followers", "Retweeters", "CreateTweet":
 		return true
 	}
 	return false
