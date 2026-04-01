@@ -22,6 +22,7 @@ func TestSearchWithSocial_AcquireError(t *testing.T) {
 	sc := social.NewClient(srv.URL, "tok", "test")
 	_, err := SearchWithSocial(context.Background(), sc, "golang", 10)
 	require.Error(t, err)
+	assert.ErrorContains(t, err, "all 3 accounts failed")
 	assert.ErrorContains(t, err, "acquire account")
 }
 
@@ -54,5 +55,6 @@ func TestSearchWithSocial_ReportsErrorOnFailure(t *testing.T) {
 	sc := social.NewClient(srv.URL, "tok", "test")
 	_, err := SearchWithSocial(ctx, sc, "test", 5)
 	assert.Error(t, err)
+	assert.ErrorContains(t, err, "all 3 accounts failed")
 	assert.Equal(t, "auth_error", reportedStatus)
 }
