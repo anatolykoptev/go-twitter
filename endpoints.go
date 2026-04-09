@@ -8,6 +8,11 @@ import (
 const (
 	twitterBase   = "https://x.com/i/api/graphql"
 	twitterAPIURL = "https://api.twitter.com"
+
+	// accountSettingsURL is the authenticated REST endpoint used by
+	// ValidateAccount to check whether an account's credentials are still
+	// alive. Returns 200 on success, 401 on expired auth, 403 on suspension.
+	accountSettingsURL = "https://api.twitter.com/1.1/account/settings.json"
 )
 
 // bearerTokens is the list of known Twitter web-app bearer tokens.

@@ -50,6 +50,13 @@ type ClientConfig struct {
 	// PoolAlertHook is called when the pool emits alerts (account deactivation, proxy failures, etc.).
 	// topic is the alert type (e.g. "pool.deactivated"), payload contains details.
 	PoolAlertHook func(topic string, payload any)
+
+	// DisableGuestFallback disables the guest-token fallback path entirely.
+	// When true, endpoints that would normally fall back to guest mode after
+	// pool exhaustion will return an error instead. Recommended in production
+	// where guest tokens from datacenter IPs return persistent 403 errors.
+	// Default: false (guest fallback enabled for backward compatibility).
+	DisableGuestFallback bool
 }
 
 // defaults fills in zero-value config fields with sensible defaults.

@@ -29,6 +29,8 @@ type Client struct {
 	mu                sync.Mutex
 	guestToken        string
 	guestLimitedUntil time.Time
+	guestConsecFails  int
+	guestBlockedUntil time.Time
 }
 
 // NewClient creates a fully-wired Twitter client.
@@ -235,9 +237,13 @@ func (c *Client) markGuestTokenRateLimited(until time.Time) {
 }
 
 // getGuestTokenCached returns the current guest token and whether it is usable.
+// Returns (_, false) if the guest-token circuit breaker is currently open.
 func (c *Client) getGuestTokenCached() (string, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if time.Now().Before(c.guestBlockedUntil) {
+		return "", false
+	}
 	if c.guestToken == "" || time.Now().Before(c.guestLimitedUntil) {
 		return "", false
 	}

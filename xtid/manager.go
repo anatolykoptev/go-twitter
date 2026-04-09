@@ -65,7 +65,9 @@ func (m *Manager) Initialize() error {
 	if len(prefix) > 8 {
 		prefix = prefix[:8]
 	}
-	slog.Info("xtid: initialized", slog.String("anim_key", prefix+"..."))
+	slog.Info("xtid: initialized",
+		slog.String("anim_key", prefix+"..."),
+		slog.String("sample_key", "xtid_init"))
 	return nil
 }
 
@@ -110,7 +112,33 @@ func (m *Manager) fetchHome() (html, guestID string, err error) {
 	return string(body), guestID, nil
 }
 
+// fetchMaxAttempts is the number of attempts for transient network failures.
+const fetchMaxAttempts = 3
+
+// fetchBackoffBase is the initial backoff between retry attempts.
+const fetchBackoffBase = 500 * time.Millisecond
+
 func (m *Manager) fetchURL(url string) (string, error) {
+	var lastErr error
+	for attempt := 1; attempt <= fetchMaxAttempts; attempt++ {
+		body, err := m.fetchOnce(url)
+		if err == nil {
+			return body, nil
+		}
+		lastErr = err
+		if isPermanentFetchErr(err) || attempt == fetchMaxAttempts {
+			break
+		}
+		slog.Warn("xtid: fetch retry",
+			slog.String("url", url),
+			slog.Int("attempt", attempt),
+			slog.Any("error", err))
+		time.Sleep(fetchBackoffBase * time.Duration(1<<(attempt-1)))
+	}
+	return "", lastErr
+}
+
+func (m *Manager) fetchOnce(url string) (string, error) {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return "", err
@@ -134,6 +162,21 @@ func (m *Manager) fetchURL(url string) (string, error) {
 		return "", err
 	}
 	return string(body), nil
+}
+
+// isPermanentFetchErr returns true for errors that should not be retried (HTTP 4xx).
+// Network errors, timeouts, and 5xx are retried.
+func isPermanentFetchErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	for _, code := range []string{"HTTP 400", "HTTP 401", "HTTP 403", "HTTP 404", "HTTP 410", "HTTP 451"} {
+		if len(msg) >= len(code) && msg[:len(code)] == code {
+			return true
+		}
+	}
+	return false
 }
 
 // GenerateID returns a new x-client-transaction-id for the given HTTP method and URL path.

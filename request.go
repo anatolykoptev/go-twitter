@@ -314,6 +314,16 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 		return nil, nil, fmt.Errorf("%s requires authenticated account", endpoint)
 	}
 
+	// Global guest fallback kill-switch. In production, guest tokens from
+	// datacenter IPs are unreliable (persistent 403 Bad guest token). Enabling
+	// this flag forces all endpoints to require an authenticated account.
+	if c.cfg.DisableGuestFallback {
+		if lastErr != nil {
+			return nil, nil, fmt.Errorf("pool exhausted for %s (guest fallback disabled): %w", endpoint, lastErr)
+		}
+		return nil, nil, fmt.Errorf("%s: no authenticated account and guest fallback disabled", endpoint)
+	}
+
 	gt, ok := c.getGuestTokenCached()
 	if !ok {
 		token, err := c.acquireGuestToken(ctx, c.client)
@@ -499,9 +509,12 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 }
 
 // requiresAuth returns true for endpoints that need a real authenticated account.
+// UserByScreenName/UserTweets were added to prevent silent guest-token fallback,
+// which is unreliable in production and hides authentication errors.
 func requiresAuth(endpoint string) bool {
 	switch endpoint {
-	case "TweetDetail", "SearchTimeline", "Following", "Followers", "Retweeters", "CreateTweet":
+	case "TweetDetail", "SearchTimeline", "Following", "Followers", "Retweeters",
+		"CreateTweet", "UserByScreenName", "UserTweets":
 		return true
 	}
 	return false
