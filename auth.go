@@ -80,6 +80,13 @@ func loadSession(dir, username string, ttl time.Duration) (authToken, ct0 string
 
 // relogin clears auth credentials and performs a fresh login.
 func (c *Client) relogin(acc *Account) error {
+	if c.reloginGate != nil {
+		if ok, reason := c.reloginGate.Allowed(context.Background(), acc.Username); !ok {
+			slog.Warn("twitter: auto-relogin blocked by gate",
+				slog.String("user", acc.Username), slog.String("reason", reason))
+			return fmt.Errorf("relogin blocked: %s", reason)
+		}
+	}
 	slog.Info("attempting relogin", slog.String("user", acc.Username))
 
 	bc := c.clientForAccount(acc)
