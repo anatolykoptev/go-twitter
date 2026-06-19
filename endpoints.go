@@ -83,8 +83,26 @@ func ApplyEnvOverrides() {
 	}
 }
 
+// applyGeneratedOverrides applies the cmd/gql-sync-generated queryIDs (in
+// queryids_gen.go) over the committed literals in Endpoints. It runs before
+// ApplyEnvOverrides so the final priority is env > generated > committed. Ops
+// absent from generatedQueryIDs keep their committed literal; empty generated
+// IDs are skipped (a partial/blank sync never blanks an endpoint).
+func applyGeneratedOverrides() {
+	for name, id := range generatedQueryIDs {
+		if id == "" {
+			continue
+		}
+		if ep, ok := Endpoints[name]; ok {
+			ep.ID = id
+			Endpoints[name] = ep
+		}
+	}
+}
+
 func init() {
-	ApplyEnvOverrides()
+	applyGeneratedOverrides() // generated overrides committed literal
+	ApplyEnvOverrides()       // env overrides generated (highest priority)
 }
 
 // gqlFeatures returns the canonical Twitter GraphQL feature flags.

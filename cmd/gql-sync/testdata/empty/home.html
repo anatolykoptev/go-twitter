@@ -1,0 +1,15 @@
+<!doctype html>
+<html lang="en">
+<head>
+<title>X</title>
+<script nonce="fixture">
+// Valid chunk map (so bundle.Build succeeds) pointing at one op-less bundle —
+// exercises the "Build OK but 0 ops extracted" path for -fail-on-empty.
+var __chunkNames = {1:"main"};
+__webpack_require__.u = function (e) {
+  return "responsive-web/client-web/" + ({1:"1111111"})[e] + "a.js";
+};
+</script>
+</head>
+<body></body>
+</html>

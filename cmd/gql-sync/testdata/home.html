@@ -1,0 +1,16 @@
+<!doctype html>
+<html lang="en">
+<head>
+<title>X</title>
+<script nonce="fixture">
+// webpack chunk-id -> module-name dict (trimmed). "main" and "ondemand.s" are
+// decoys carrying no operations; "api.endpoints" holds the queryID registry.
+var __chunkNames = {1:"main",2:"api.endpoints",3:"ondemand.s"};
+// webpack chunk-id -> content-hash dict; BundleURL joins name+hash per chunkID.
+__webpack_require__.u = function (e) {
+  return "responsive-web/client-web/" + ({1:"1111111",2:"2222222",3:"3333333"})[e] + "a.js";
+};
+</script>
+</head>
+<body></body>
+</html>
