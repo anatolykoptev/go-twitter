@@ -15,10 +15,26 @@ var (
 	// snapshots still resolve. Do NOT drop this without confirming the embed is
 	// gone from every served snapshot.
 	legacyOnDemandRegex = regexp.MustCompile(`["']ondemand\.s["']\s*:\s*["']([0-9a-f]{6,})["']`)
-	// indicesRegex extracts the key-byte indices (`[N], 16`). Loosened per twikit
-	// PR #411 (was `\(\w{1}\[(\d{1,2})\],\s*16\)`) so post-Mar-2026 bundles with
-	// 3+ digit indices and no wrapping `(x[…])` still match.
-	indicesRegex = regexp.MustCompile(`\[(\d+)\],\s*16`)
+	// indicesRegex extracts the key-byte indices from the ondemand.s
+	// key-derivation expression. Each index appears as a parenthesized radix-16
+	// parse of a key-bytes element, e.g. `(n[27],16)` inside
+	// `o[l(...)](n[27],16)`. Verified against the real ondemand.s captured
+	// 2026-06-19 (hash 91612d9a): the genuine derivation is
+	//   let[C,G]=[o[l(...)](n[27],16), ... (n[47],16), (n[47],16), (n[42],16)]
+	// so the indices are 27,47,47,42 (rowIndex 27, key-byte indices 47,47,42).
+	//
+	// The format did NOT change since the upstream form — only the bundle
+	// LOCATION moved (now resolved via internal/bundle). The T1 loosening to
+	// `\[(\d+)\],\s*16` dropped both discriminators (the wrapping `(...)` and the
+	// leading variable char) and OVER-MATCHED: any stray `[N],16` elsewhere in
+	// the minified bundle (e.g. `f([5],16)`, a bare `[9],16`, or a 3+ digit
+	// non-index) polluted the match list and corrupted rowIndex -> a well-formed
+	// but WRONG x-client-transaction-id -> silent 404s. We re-anchor on the
+	// observed structure: a `(` open paren, a `\w+` key-bytes variable, the
+	// `[index]` access, and the literal `,16` radix, all closed by `)`. `\d{1,3}`
+	// caps indices at a real key-byte position while still admitting the longer
+	// indices a future bundle could use. See parser_test.go's real-bundle golden.
+	indicesRegex = regexp.MustCompile(`\(\w+\[(\d{1,3})\]\s*,\s*16\)`)
 )
 
 // onDemandURLTemplate builds the ondemand.s bundle URL from a 7-ish-char hash.

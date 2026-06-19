@@ -87,10 +87,15 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 
 	// The guest_id cookie is set by the warm-page fetches above; read it from the
 	// stealth client's jar (xtid no longer surfaces it). Fall back to a generated
-	// id when the fetch was bot-walled.
+	// id when the fetch was bot-walled. Log which branch fired so a silent
+	// downgrade to a synthetic id (the warm-page fetch was walled and never set a
+	// real cookie) is observable rather than masked behind a well-formed header.
 	xpffGuestID := bc.GetCookieValue("https://x.com", "guest_id")
 	if xpffGuestID == "" {
 		xpffGuestID = xpff.GenerateGuestID()
+		slog.Warn("xpff: guest_id cookie absent, using synthetic GenerateGuestID fallback (warm-page fetch likely bot-walled)")
+	} else {
+		slog.Info("xpff: using server-set guest_id cookie")
 	}
 	xpffGen := xpff.New(xpffGuestID, defaultUserAgent)
 

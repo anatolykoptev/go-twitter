@@ -14,9 +14,14 @@ import (
 	"time"
 )
 
-// defaultUserAgent matches the desktop Chrome UA the rest of go-twitter sends so
-// warm pages serve the same bundle graph the real client sees.
-const defaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+// DefaultUserAgent is the single source of truth for the desktop Chrome UA
+// go-twitter presents to x.com. It MUST stay consistent with the go-stealth
+// Chrome JA3 the BrowserClient emits — a UA major version that disagrees with the
+// TLS ClientHello is a trivially fingerprintable bot tell. The twitter package's
+// header builder aliases this (see headers.go's defaultUserAgent) so a
+// StealthFetcher or HTTPFetcher built without an explicit UA cannot drift to a
+// different Chrome version than the rest of the client.
+const DefaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
 const (
 	defaultFetchTimeout = 30 * time.Second
@@ -56,7 +61,7 @@ func NewHTTPFetcher(proxyURL string) (*HTTPFetcher, error) {
 	}
 	return &HTTPFetcher{
 		Client:    &http.Client{Timeout: defaultFetchTimeout, Transport: transport},
-		UserAgent: defaultUserAgent,
+		UserAgent: DefaultUserAgent,
 	}, nil
 }
 
@@ -87,7 +92,7 @@ func (f *HTTPFetcher) Fetch(ctx context.Context, rawURL string) ([]byte, error) 
 func (f *HTTPFetcher) setHeaders(req *http.Request) {
 	ua := f.UserAgent
 	if ua == "" {
-		ua = defaultUserAgent
+		ua = DefaultUserAgent
 	}
 	req.Header.Set("User-Agent", ua)
 	req.Header.Set("Accept", acceptHeader)
@@ -124,7 +129,7 @@ type StealthFetcher struct {
 func (f *StealthFetcher) Fetch(ctx context.Context, rawURL string) ([]byte, error) {
 	ua := f.UserAgent
 	if ua == "" {
-		ua = defaultUserAgent
+		ua = DefaultUserAgent
 	}
 	headers := map[string]string{
 		"User-Agent":      ua,

@@ -75,7 +75,7 @@ func TestStealthFetcher_DefaultUA(t *testing.T) {
 	if _, err := f.Fetch(context.Background(), "https://x.com"); err != nil {
 		t.Fatalf("Fetch: %v", err)
 	}
-	if doer.gotUA != defaultUserAgent {
+	if doer.gotUA != DefaultUserAgent {
 		t.Fatalf("UA = %q want the default", doer.gotUA)
 	}
 }
