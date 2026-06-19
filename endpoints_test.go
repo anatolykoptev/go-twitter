@@ -63,3 +63,61 @@ func TestApplyEnvOverrides_EmptyEnv(t *testing.T) {
 	// Should remain unchanged when env var is empty.
 	assert.Equal(t, orig, Endpoints["TweetDetail"].ID)
 }
+
+// TestGeneratedOverrideChain proves the runtime priority env > generated >
+// committed holds across applyGeneratedOverrides + ApplyEnvOverrides, for the
+// same operation under each of the three layers.
+func TestGeneratedOverrideChain(t *testing.T) {
+	const (
+		op        = "TweetDetail"
+		envKey    = "TWITTER_QID_TWEET_DETAIL"
+		committed = "committed_id"
+		genID     = "generated_id"
+		envID     = "env_id"
+	)
+
+	// Snapshot the package state we mutate, restore it after.
+	origGen, origGenOK := generatedQueryIDs[op]
+	origEp := Endpoints[op]
+	t.Cleanup(func() {
+		if origGenOK {
+			generatedQueryIDs[op] = origGen
+		} else {
+			delete(generatedQueryIDs, op)
+		}
+		Endpoints[op] = origEp
+		applyGeneratedOverrides()
+		ApplyEnvOverrides()
+	})
+
+	// setCommitted resets the endpoint's ID to the committed literal, then runs
+	// the override chain in production order.
+	resetAndApply := func() {
+		ep := Endpoints[op]
+		ep.ID = committed
+		Endpoints[op] = ep
+		applyGeneratedOverrides()
+		ApplyEnvOverrides()
+	}
+
+	t.Run("env beats generated", func(t *testing.T) {
+		generatedQueryIDs[op] = genID
+		t.Setenv(envKey, envID)
+		resetAndApply()
+		assert.Equal(t, envID, Endpoints[op].ID)
+	})
+
+	t.Run("generated beats committed", func(t *testing.T) {
+		generatedQueryIDs[op] = genID
+		t.Setenv(envKey, "")
+		resetAndApply()
+		assert.Equal(t, genID, Endpoints[op].ID)
+	})
+
+	t.Run("committed when neither generated nor env present", func(t *testing.T) {
+		delete(generatedQueryIDs, op)
+		t.Setenv(envKey, "")
+		resetAndApply()
+		assert.Equal(t, committed, Endpoints[op].ID)
+	})
+}
