@@ -100,3 +100,43 @@ func (f *HTTPFetcher) httpClient() *http.Client {
 	}
 	return http.DefaultClient
 }
+
+// stealthDoer is the subset of go-stealth's *BrowserClient that StealthFetcher
+// needs. Declaring it here keeps internal/bundle free of a hard go-stealth
+// import and makes StealthFetcher unit-testable with a stub.
+type stealthDoer interface {
+	DoCtx(ctx context.Context, method, urlStr string, headers map[string]string, body io.Reader) ([]byte, map[string]string, int, error)
+}
+
+// StealthFetcher fetches warm pages through go-stealth's BrowserClient so the
+// runtime rides the same TLS/JA3 fingerprint + proxy as the rest of go-twitter.
+// Unauthenticated (guest) is fine — warm pages are public HTML. It satisfies
+// Fetcher and is the impl xtid wires at runtime (HTTPFetcher stays the CI/codegen
+// path).
+type StealthFetcher struct {
+	Client    stealthDoer
+	UserAgent string
+}
+
+// Fetch issues a GET via the BrowserClient and returns the body, erroring on a
+// non-200 status (matching HTTPFetcher's contract). The BrowserClient applies
+// its configured header order, so no order argument is passed here.
+func (f *StealthFetcher) Fetch(ctx context.Context, rawURL string) ([]byte, error) {
+	ua := f.UserAgent
+	if ua == "" {
+		ua = defaultUserAgent
+	}
+	headers := map[string]string{
+		"User-Agent":      ua,
+		"Accept":          acceptHeader,
+		"Accept-Language": acceptLangHeader,
+	}
+	body, _, status, err := f.Client.DoCtx(ctx, http.MethodGet, rawURL, headers, nil)
+	if err != nil {
+		return nil, fmt.Errorf("stealth fetch %s: %w", rawURL, err)
+	}
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("stealth fetch %s: HTTP %d", rawURL, status)
+	}
+	return body, nil
+}

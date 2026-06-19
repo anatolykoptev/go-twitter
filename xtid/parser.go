@@ -1,18 +1,39 @@
 package xtid
 
 import (
+	"fmt"
 	"regexp"
 	"strconv"
 	"strings"
 )
 
 var (
-	// Legacy format: "ondemand.s":"<hash>"
-	onDemandLegacyRegex = regexp.MustCompile(`['|"]{1}ondemand\.s['|"]{1}:\s*['|"]{1}([\w]*)['|"]{1}`)
-	// New webpack format: chunk_id:"ondemand.s" (name map)
-	onDemandChunkRegex = regexp.MustCompile(`(\d+)\s*:\s*["']ondemand\.s["']`)
-	indicesRegex       = regexp.MustCompile(`\(\w{1}\[(\d{1,2})\],\s*16\)`)
+	// legacyOnDemandRegex matches the pre-chunk-map direct embed
+	// `"ondemand.s":"<hash>"` still present on some x.com snapshots. T1 moved the
+	// webpack chunk-map location into internal/bundle, but this direct embed has
+	// no chunk map to walk, so xtid keeps it as a fast-path so legacy-only
+	// snapshots still resolve. Do NOT drop this without confirming the embed is
+	// gone from every served snapshot.
+	legacyOnDemandRegex = regexp.MustCompile(`["']ondemand\.s["']\s*:\s*["']([0-9a-f]{6,})["']`)
+	// indicesRegex extracts the key-byte indices (`[N], 16`). Loosened per twikit
+	// PR #411 (was `\(\w{1}\[(\d{1,2})\],\s*16\)`) so post-Mar-2026 bundles with
+	// 3+ digit indices and no wrapping `(x[…])` still match.
+	indicesRegex = regexp.MustCompile(`\[(\d+)\],\s*16`)
 )
+
+// onDemandURLTemplate builds the ondemand.s bundle URL from a 7-ish-char hash.
+const onDemandURLTemplate = "https://abs.twimg.com/responsive-web/client-web/ondemand.s.%sa.js"
+
+// onDemandLegacyURL returns the ondemand.s bundle URL from the legacy direct
+// embed in the warm HTML, or "" when no such embed is present (the modern
+// chunk-map case, which Initialize resolves via internal/bundle instead).
+func onDemandLegacyURL(html string) string {
+	m := legacyOnDemandRegex.FindStringSubmatch(html)
+	if len(m) < 2 || m[1] == "" {
+		return ""
+	}
+	return fmt.Sprintf(onDemandURLTemplate, m[1])
+}
 
 func getVerificationKey(html string) string {
 	re := regexp.MustCompile(`<meta[^>]+name=["']twitter-site-verification["'][^>]+content=["']([^"']+)["']`)
@@ -24,31 +45,6 @@ func getVerificationKey(html string) string {
 	matches = re2.FindStringSubmatch(html)
 	if len(matches) > 1 {
 		return matches[1]
-	}
-	return ""
-}
-
-func getOnDemandFileURL(html string) string {
-	// Try legacy format first: "ondemand.s":"<hash>"
-	matches := onDemandLegacyRegex.FindStringSubmatch(html)
-	if len(matches) > 1 && matches[1] != "" {
-		return "https://abs.twimg.com/responsive-web/client-web/ondemand.s." + matches[1] + "a.js"
-	}
-
-	// New webpack format: find chunk ID, then look up hash
-	chunkMatch := onDemandChunkRegex.FindStringSubmatch(html)
-	if len(chunkMatch) < 2 {
-		return ""
-	}
-	chunkID := chunkMatch[1]
-
-	// Find hash for this chunk ID (matches like 20113:"117abc8")
-	hashRegex := regexp.MustCompile(chunkID + `\s*:\s*["']([a-f0-9]+)["']`)
-	allMatches := hashRegex.FindAllStringSubmatch(html, -1)
-	for _, m := range allMatches {
-		if len(m) > 1 && m[1] != "ondemand.s" {
-			return "https://abs.twimg.com/responsive-web/client-web/ondemand.s." + m[1] + "a.js"
-		}
 	}
 	return ""
 }
