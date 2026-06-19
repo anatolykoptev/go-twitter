@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="en">
+<head>
+<title>X</title>
+<meta name="twitter-site-verification" content="abc123FixtureKey">
+<script nonce="fixture">
+window.__INITIAL_STATE__ = {};
+// webpack chunk-id -> module-name dict (trimmed; only the few entries the
+// parser test cares about, plus a couple of decoys to mimic real bundles).
+var __chunkNames = {1:"main",20113:"ondemand.s",30021:"bundle.UserByScreenName",44002:"i18n"};
+// webpack chunk-id -> 7-hex content-hash dict, consumed by require.u(e).
+__webpack_require__.u = function (e) {
+  return "responsive-web/client-web/" + ({1:"deadbe0",20113:"117abc8",30021:"a1b2c3d",44002:"0fedcba"})[e] + "a.js";
+};
+</script>
+</head>
+<body></body>
+</html>
