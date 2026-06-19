@@ -75,6 +75,41 @@ func TestExtractor_RankOrder(t *testing.T) {
 	}
 }
 
+// TestExtractor_BoundedToObjectBoundaries proves the bounded regexes never let
+// one op's queryId bind to a different op's operationName on a single-line
+// minified bundle. It packs, on ONE line: (a) an op in operationName-before-
+// queryId order, (b) an orphan queryId whose object carries no operationName,
+// and (c) a params op in name-before-id order. Each op must resolve to its OWN
+// id, the orphan must neither steal nor lend an id across an object boundary,
+// and no op may be dropped. RED against the old unbounded `.+?` regexes (which
+// bind ALPHA111->OpBeta, swallow BETA222, and drop the name-first OpGamma).
+func TestExtractor_BoundedToObjectBoundaries(t *testing.T) {
+	body := []byte(
+		`{operationName:"OpAlpha",queryId:"ALPHA111"},` +
+			`{queryId:"ORPHAN999",foo:"bar"},` +
+			`{queryId:"BETA222",operationName:"OpBeta"};` +
+			`e.exports={n:{params:{name:"OpGamma",id:"GAMMA333",operationKind:"query"}}}`)
+
+	ext := quietExtractor()
+	ext.consume(rwAPI, body)
+
+	got := ext.result()
+	want := map[string]string{
+		"OpAlpha": "ALPHA111",
+		"OpBeta":  "BETA222",
+		"OpGamma": "GAMMA333",
+	}
+	if !maps.Equal(got, want) {
+		t.Fatalf("result = %v, want %v", got, want)
+	}
+	// The orphan queryId must not have leaked in as any op's id.
+	for name, id := range got {
+		if id == "ORPHAN999" {
+			t.Fatalf("orphan queryId leaked: %s -> ORPHAN999", name)
+		}
+	}
+}
+
 func TestSourceTag(t *testing.T) {
 	cases := map[string]string{
 		rwAPI:    srcResponsiveWeb,

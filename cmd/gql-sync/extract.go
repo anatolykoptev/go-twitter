@@ -6,14 +6,35 @@ import (
 	"strings"
 )
 
-// Extraction regexes (twscrape reference — exact). Run over every bundle body
-// fetched by bundle.Map.WalkImports.
+// Extraction regexes. Run over every bundle body fetched by
+// bundle.Map.WalkImports.
 //
-//   - opRe matches the modern { queryId, operationName } op-definition shape.
-//   - paramsRe matches the persisted-query params:{id,name,…operationKind} shape.
+// Basis: bounded community queryID extractors. (twscrape itself hardcodes its
+// queryIDs and ships no extraction regex, so it is NOT the reference.) Every
+// pattern bridges fields only WITHIN a single object via braceSpan — never
+// across the object-closing `}` — so on a real single-line minified bundle one
+// op's queryId can never bind to a different op's operationName. That mis-bind
+// is invisible to the dedupe (it's a wrong name->id, not a same-name collision).
+//
+//   - opReFwd/opReRev match the { queryId, operationName } op-definition shape
+//     in EITHER field order (real bundles vary), so no op is dropped on order.
+//   - paramsReIDFirst/paramsReNameFirst match the persisted-query
+//     params:{id,name,…operationKind} shape in EITHER id/name order.
+//
+// braceSpan bridges fields inside one object: any run of non-brace chars,
+// optionally crossing a nested single-level object (e.g. metadata:{}), but never
+// the object-closing `}`. A nested `metadata:{}` legitimately sits between id
+// and name in real params objects, so a flat `[^}]*?` would wrongly drop those
+// ops; braceSpan tolerates the nested braces while still refusing to bleed past
+// the boundary.
+const braceSpan = `(?:[^{}]|\{[^{}]*\})*?`
+
 var (
-	opRe     = regexp.MustCompile(`queryId:["'](.+?)["'].+?operationName:["'](.+?)["']`)
-	paramsRe = regexp.MustCompile(`params:\{id:["']([^"']+)["'].+?name:["']([^"']+)["'].+?operationKind`)
+	opReFwd = regexp.MustCompile(`queryId:["']([^"']+)["']` + braceSpan + `operationName:["']([^"']+)["']`)
+	opReRev = regexp.MustCompile(`operationName:["']([^"']+)["']` + braceSpan + `queryId:["']([^"']+)["']`)
+
+	paramsReIDFirst   = regexp.MustCompile(`params:\{id:["']([^"']+)["']` + braceSpan + `name:["']([^"']+)["']` + braceSpan + `operationKind`)
+	paramsReNameFirst = regexp.MustCompile(`params:\{name:["']([^"']+)["']` + braceSpan + `id:["']([^"']+)["']` + braceSpan + `operationKind`)
 )
 
 // Source-priority ranks. When the same operationName resolves to different
@@ -82,11 +103,20 @@ func (e *extractor) consume(bundleURL string, body []byte) {
 	rank := sourceRank(tag)
 	text := string(body)
 
-	for _, m := range opRe.FindAllStringSubmatch(text, -1) {
+	// opRe runs before paramsRe so that, at equal source rank, an op-definition
+	// hit wins ties over a params hit (add() keeps the first hit per rank). This
+	// tiebreak is intentional.
+	for _, m := range opReFwd.FindAllStringSubmatch(text, -1) {
 		e.add(m[2], m[1], tag, rank) // m[1]=queryId, m[2]=operationName
 	}
-	for _, m := range paramsRe.FindAllStringSubmatch(text, -1) {
+	for _, m := range opReRev.FindAllStringSubmatch(text, -1) {
+		e.add(m[1], m[2], tag, rank) // m[1]=operationName, m[2]=queryId
+	}
+	for _, m := range paramsReIDFirst.FindAllStringSubmatch(text, -1) {
 		e.add(m[2], m[1], tag, rank) // m[1]=id, m[2]=name
+	}
+	for _, m := range paramsReNameFirst.FindAllStringSubmatch(text, -1) {
+		e.add(m[1], m[2], tag, rank) // m[1]=name, m[2]=id
 	}
 }
 
