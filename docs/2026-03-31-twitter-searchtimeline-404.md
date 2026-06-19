@@ -1,7 +1,7 @@
 # Twitter SearchTimeline 404 — Root Cause Analysis
 
 **Date:** 2026-03-31
-**Status:** RESOLVED — root cause is GET→POST migration
+**Status:** RESOLVED — root cause is GET→POST migration; fix shipped in go-twitter v0.4.0 (current release v0.5.3)
 **Affected:** go-twitter, go-job, go-hully (any service using SearchTimeline)
 
 ## Timeline
@@ -95,7 +95,7 @@ curl -s -X POST -d '{"variables":...,"features":...}' "https://x.com/i/api/graph
 | v0.3.0 | XPFF header generator (xpff/ package) |
 | v0.3.1 | SetActive(true) after successful loadOrLogin |
 | v0.3.2 | Real guest_id extraction from x.com cookies |
-| **v0.4.0** | **TODO: Switch SearchTimeline from GET to POST** |
+| **v0.4.0** | **Switch SearchTimeline from GET to POST** — ✅ shipped (commit 2e26529) |
 
 ## Changes Made (go-job)
 
@@ -120,7 +120,7 @@ curl -s -X POST -d '{"variables":...,"features":...}' "https://x.com/i/api/graph
 
 ## Next Steps
 
-1. **Implement POST for SearchTimeline in go-twitter** — the actual fix
+1. ~~**Implement POST for SearchTimeline in go-twitter** — the actual fix~~ — ✅ **DONE**, shipped v0.4.0 (commit 2e26529)
 2. Consider adding POST support for other endpoints Twitter may migrate
-3. Add auto-extraction of query IDs from JS bundles (reduce manual updates)
+3. Add auto-extraction of query IDs from JS bundles (reduce manual updates) — still OPEN; main recurring-maintenance source
 4. Monitor twikit/twscrape/gallery-dl for future Twitter API changes
