@@ -163,6 +163,93 @@ func TestBuild_FallsBackToStaleCacheOnFailure(t *testing.T) {
 	}
 }
 
+func TestBuild_FetchFailureNoCacheReturnsErrFetchFailed(t *testing.T) {
+	broken := &stubFetcher{failErr: errors.New("boom")}
+	opts := Options{WarmPages: []string{homeURL}, CacheDir: t.TempDir()}
+
+	m, err := Build(context.Background(), broken, opts)
+	if m != nil {
+		t.Fatalf("expected nil map on fetch failure, got %v", m)
+	}
+	// Callers route on this sentinel to keep their committed-literal values.
+	if !errors.Is(err, ErrFetchFailed) {
+		t.Fatalf("expected ErrFetchFailed, got %v", err)
+	}
+}
+
+func TestBuild_EmptyParseDoesNotServeStaleCache(t *testing.T) {
+	dir := t.TempDir()
+	// A well-formed cache on disk, but stale relative to the TTL — so the TTL
+	// short-circuit won't serve it and the stale-fallback path is exercised.
+	cached := &Map{
+		Names:     map[string]string{"20113": "ondemand.s"},
+		Hashes:    map[string]string{"20113": "117abc8"},
+		FetchedAt: time.Now().Add(-48 * time.Hour),
+	}
+	if err := (&diskCache{dir: dir, ttl: defaultCacheTTL}).store(cached); err != nil {
+		t.Fatalf("seed cache: %v", err)
+	}
+
+	// HTTP 200 + login HTML → empty parse → ErrEmptyChunkMap. Fix #3 must NOT
+	// mask the bot-wall by serving the stale cache.
+	wall := &stubFetcher{fixed: []byte("<html><body>Log in to X</body></html>")}
+	opts := Options{WarmPages: []string{homeURL}, CacheDir: dir, CacheTTL: time.Hour}
+
+	m, err := Build(context.Background(), wall, opts)
+	if !errors.Is(err, ErrEmptyChunkMap) {
+		t.Fatalf("expected ErrEmptyChunkMap on a login-wall body, got %v", err)
+	}
+	if m != nil {
+		t.Fatalf("stale cache must NOT be served on empty parse, got %v", m)
+	}
+}
+
+func TestMap_LookupMisses(t *testing.T) {
+	m := &Map{
+		Names:  map[string]string{"20113": "ondemand.s"},
+		Hashes: map[string]string{}, // name present but no hash for its chunkID
+	}
+
+	if id, ok := m.ChunkIDByName("nope"); ok {
+		t.Fatalf("ChunkIDByName(nope) = %q,true want \"\",false", id)
+	}
+	if u, ok := m.BundleURL("nope"); ok {
+		t.Fatalf("BundleURL(nope) = %q,true want \"\",false", u)
+	}
+	// Name resolves to a chunkID, but Hashes has no entry for it.
+	if u, ok := m.BundleURL("ondemand.s"); ok {
+		t.Fatalf("BundleURL(ondemand.s) = %q,true want \"\",false (missing hash)", u)
+	}
+}
+
+func TestDiskCache_StoreErrors(t *testing.T) {
+	m := &Map{Names: map[string]string{"1": "x"}, Hashes: map[string]string{"1": "deadbe0"}}
+
+	t.Run("mkdir fails when the dir path is a file", func(t *testing.T) {
+		file := filepath.Join(t.TempDir(), "not-a-dir")
+		if err := os.WriteFile(file, []byte("x"), cacheFilePerm); err != nil {
+			t.Fatalf("seed file: %v", err)
+		}
+		c := &diskCache{dir: filepath.Join(file, "sub"), ttl: defaultCacheTTL}
+		if err := c.store(m); err == nil {
+			t.Fatal("expected store to fail when the cache dir cannot be created")
+		}
+	})
+
+	t.Run("rename fails when the target path is a directory", func(t *testing.T) {
+		dir := t.TempDir()
+		// A directory at the final cache path blocks the atomic rename; the temp
+		// file must still be cleaned up by store's deferred Remove.
+		if err := os.Mkdir(filepath.Join(dir, cacheFileName), cacheDirPerm); err != nil {
+			t.Fatalf("seed blocking dir: %v", err)
+		}
+		c := &diskCache{dir: dir, ttl: defaultCacheTTL}
+		if err := c.store(m); err == nil {
+			t.Fatal("expected store to fail when the rename target is a directory")
+		}
+	})
+}
+
 func TestParseChunkMap_SkipsHashShapedNames(t *testing.T) {
 	body := `var n={1:"main",20113:"ondemand.s"};u={1:"deadbe0",20113:"117abc8"}`
 	names, hashes := parseChunkMap(body)

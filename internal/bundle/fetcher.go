@@ -22,6 +22,10 @@ const (
 	defaultFetchTimeout = 30 * time.Second
 	acceptHeader        = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
 	acceptLangHeader    = "en-US,en;q=0.9"
+	// maxBundleBytes caps the body read — these are adversarial third-party
+	// responses. Legitimate warm pages / bundles are a few MB; 32 MiB is safe
+	// headroom against a memory-exhaustion body.
+	maxBundleBytes = 32 << 20
 )
 
 // Fetcher fetches a URL and returns the body. The runtime wires a stealth-backed
@@ -73,7 +77,7 @@ func (f *HTTPFetcher) Fetch(ctx context.Context, rawURL string) ([]byte, error) 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("fetch %s: HTTP %d", rawURL, resp.StatusCode)
 	}
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBundleBytes))
 	if err != nil {
 		return nil, fmt.Errorf("read body %s: %w", rawURL, err)
 	}

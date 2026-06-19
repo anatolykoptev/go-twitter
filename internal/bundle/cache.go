@@ -51,6 +51,9 @@ func (c *diskCache) read() (*Map, bool) {
 	return &m, true
 }
 
+// store writes the snapshot atomically: a unique temp file in the same dir is
+// fully written then os.Rename'd over the final path. A torn write or two
+// concurrent Builds can never leave a partial chunkmap.json behind.
 func (c *diskCache) store(m *Map) error {
 	if err := os.MkdirAll(c.dir, cacheDirPerm); err != nil {
 		return fmt.Errorf("create cache dir: %w", err)
@@ -59,8 +62,26 @@ func (c *diskCache) store(m *Map) error {
 	if err != nil {
 		return fmt.Errorf("marshal chunk map: %w", err)
 	}
-	if err := os.WriteFile(c.path(), data, cacheFilePerm); err != nil {
-		return fmt.Errorf("write cache file: %w", err)
+
+	tmp, err := os.CreateTemp(c.dir, cacheFileName+".*.tmp")
+	if err != nil {
+		return fmt.Errorf("create temp cache file: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }() // no-op once the rename succeeds
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write temp cache file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp cache file: %w", err)
+	}
+	if err := os.Chmod(tmpName, cacheFilePerm); err != nil {
+		return fmt.Errorf("chmod temp cache file: %w", err)
+	}
+	if err := os.Rename(tmpName, c.path()); err != nil {
+		return fmt.Errorf("rename cache file: %w", err)
 	}
 	return nil
 }

@@ -51,10 +51,11 @@ func (o *Options) applyDefaults() {
 }
 
 // Build fetches the warm pages with f, reassembles the webpack chunk map, and
-// caches it on disk. A fresh on-disk cache short-circuits the network. On fetch
-// or reassembly failure it falls back to a stale cache when one exists,
-// otherwise returns a wrapped ErrFetchFailed / ErrEmptyChunkMap so the caller
-// can keep its committed-literal values.
+// caches it on disk. A fresh on-disk cache short-circuits the network. On a hard
+// fetch failure (ErrFetchFailed) it falls back to a stale cache when one exists.
+// An empty parse (ErrEmptyChunkMap — e.g. a bot-wall serving HTTP 200 + login
+// HTML) is NOT masked with stale data: it returns the error so the caller falls
+// back to its committed-literal values rather than silently serving stale.
 func Build(ctx context.Context, f Fetcher, opts Options) (*Map, error) {
 	opts.applyDefaults()
 	cache := &diskCache{dir: opts.CacheDir, ttl: opts.CacheTTL}
@@ -65,9 +66,11 @@ func Build(ctx context.Context, f Fetcher, opts Options) (*Map, error) {
 
 	m, err := fetchAndReassemble(ctx, f, opts)
 	if err != nil {
-		if stale, ok := cache.loadStale(); ok {
-			slog.Warn("bundle: using stale cache after fetch failure", slog.Any("error", err))
-			return stale, nil
+		if errors.Is(err, ErrFetchFailed) {
+			if stale, ok := cache.loadStale(); ok {
+				slog.Warn("bundle: using stale cache after fetch failure", slog.Any("error", err))
+				return stale, nil
+			}
 		}
 		return nil, err
 	}

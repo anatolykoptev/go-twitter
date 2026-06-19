@@ -6,14 +6,16 @@ import (
 	"time"
 )
 
-// Chunk-map regexes (twscrape reference — exact). nameRe also matches
-// hash-shaped values because a 7-hex hash is a valid [\w.\-]+; parseChunkMap
-// drops those (via hashOnly) so Names holds module names only.
+// Chunk-map regexes (twscrape reference). nameRe also matches hash-shaped
+// values because a hex hash is a valid [\w.\-]+; parseChunkMap drops those (via
+// hashOnly) so Names holds module names only. Twitter hashes are NOT fixed
+// length — hashRe and hashOnly accept 6-8 hex and MUST stay in lockstep so the
+// name/hash disambiguation holds.
 var (
-	nameRe   = regexp.MustCompile(`(\d+):"([\w.\-]+)"`)    // chunkID -> name
-	hashRe   = regexp.MustCompile(`(\d+):"([0-9a-f]{7})"`) // chunkID -> 7-hex hash
+	nameRe   = regexp.MustCompile(`(\d+):"([\w.\-]+)"`)      // chunkID -> name
+	hashRe   = regexp.MustCompile(`(\d+):"([0-9a-f]{6,8})"`) // chunkID -> hex hash
 	importRe = regexp.MustCompile(`import\(\s*["']\.\/([\w.\-]+\.js)["']`)
-	hashOnly = regexp.MustCompile(`^[0-9a-f]{7}$`)
+	hashOnly = regexp.MustCompile(`^[0-9a-f]{6,8}$`)
 )
 
 const bundleURLTemplate = "https://abs.twimg.com/responsive-web/client-web/%s.%sa.js"
@@ -21,9 +23,11 @@ const bundleURLTemplate = "https://abs.twimg.com/responsive-web/client-web/%s.%s
 // Map is one reassembled snapshot of x.com's webpack chunk map.
 type Map struct {
 	Names     map[string]string `json:"names"`  // chunkID -> module name (e.g. "20113" -> "ondemand.s")
-	Hashes    map[string]string `json:"hashes"` // chunkID -> 7-hex content hash
+	Hashes    map[string]string `json:"hashes"` // chunkID -> hex content hash
 	FetchedAt time.Time         `json:"fetched_at"`
 }
+
+// NOTE: legacy direct-embed ondemand.s fast-path handled in xtid (T1)
 
 // ChunkIDByName finds the chunkID whose module name == name (e.g. "ondemand.s").
 func (m *Map) ChunkIDByName(name string) (string, bool) {
