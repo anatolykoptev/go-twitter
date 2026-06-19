@@ -33,6 +33,10 @@ const (
 	// defaultMediaPollInterval is used when Twitter does not supply check_after_secs.
 	defaultMediaPollInterval = 1 * time.Second
 
+	// maxMediaPollWait clamps the per-poll wait so a hostile or buggy
+	// server-supplied check_after_secs cannot pin the call for a long time.
+	maxMediaPollWait = 30 * time.Second
+
 	// epUploadMedia is the metrics/rate-limit endpoint label for media uploads.
 	epUploadMedia = "UploadMedia"
 )
@@ -66,7 +70,15 @@ func (c *Client) UploadMedia(ctx context.Context, acc *Account, data []byte, med
 	do := func(ctx context.Context, method, urlStr string, body []byte, contentType string) ([]byte, error) {
 		return c.doMediaRequest(ctx, acc, method, urlStr, body, contentType)
 	}
-	return runMediaUpload(ctx, do, time.Sleep, mediaUploadURL, data, mediaType, mediaChunkSize)
+	sleep := func(ctx context.Context, d time.Duration) error {
+		select {
+		case <-time.After(d):
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return runMediaUpload(ctx, do, sleep, mediaUploadURL, data, mediaType, mediaChunkSize)
 }
 
 // UploadMediaFile reads a file from disk, infers its MIME type, and uploads it.
@@ -80,7 +92,7 @@ func (c *Client) UploadMediaFile(ctx context.Context, acc *Account, path string)
 
 // runMediaUpload drives the chunked upload state machine:
 // INIT -> APPEND (per segment) -> FINALIZE -> STATUS poll (async media only).
-func runMediaUpload(ctx context.Context, do uploadDoFunc, sleep func(time.Duration), uploadURL string, data []byte, mediaType string, chunkSize int) (string, error) {
+func runMediaUpload(ctx context.Context, do uploadDoFunc, sleep func(context.Context, time.Duration) error, uploadURL string, data []byte, mediaType string, chunkSize int) (string, error) {
 	if len(data) == 0 {
 		return "", fmt.Errorf("media upload: empty data")
 	}
@@ -153,7 +165,12 @@ func runMediaUpload(ctx context.Context, do uploadDoFunc, sleep func(time.Durati
 		if wait <= 0 {
 			wait = defaultMediaPollInterval
 		}
-		sleep(wait)
+		if wait > maxMediaPollWait {
+			wait = maxMediaPollWait
+		}
+		if err := sleep(ctx, wait); err != nil {
+			return "", err
+		}
 
 		stQ := url.Values{}
 		stQ.Set("command", "STATUS")

@@ -3,6 +3,7 @@ package twitter
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -247,7 +248,7 @@ func TestRunMediaUpload_ImageNoPolling(t *testing.T) {
 		return nil, fmt.Errorf("unexpected command")
 	}
 
-	id, err := runMediaUpload(context.Background(), do, func(time.Duration) {}, "https://upload.example/x", []byte("imgbytes"), "image/jpeg", 4)
+	id, err := runMediaUpload(context.Background(), do, func(context.Context, time.Duration) error { return nil }, "https://upload.example/x", []byte("imgbytes"), "image/jpeg", 4)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -278,7 +279,7 @@ func TestRunMediaUpload_VideoPolling(t *testing.T) {
 		}
 		return nil, fmt.Errorf("unexpected command")
 	}
-	sleep := func(time.Duration) { sleeps++ }
+	sleep := func(context.Context, time.Duration) error { sleeps++; return nil }
 
 	id, err := runMediaUpload(context.Background(), do, sleep, "https://upload.example/x", bytes.Repeat([]byte("v"), 10), "video/mp4", 4)
 	if err != nil {
@@ -307,8 +308,49 @@ func TestRunMediaUpload_Failed(t *testing.T) {
 		}
 		return nil, fmt.Errorf("unexpected command")
 	}
-	if _, err := runMediaUpload(context.Background(), do, func(time.Duration) {}, "https://upload.example/x", []byte("x"), "video/mp4", 4); err == nil {
+	if _, err := runMediaUpload(context.Background(), do, func(context.Context, time.Duration) error { return nil }, "https://upload.example/x", []byte("x"), "video/mp4", 4); err == nil {
 		t.Fatal("expected error on failed processing")
+	}
+}
+
+// TestRunMediaUpload_PollContextCanceled verifies that a context cancelled
+// during the STATUS poll makes runMediaUpload return ctx.Err() promptly,
+// without exhausting the maxMediaPollAttempts (60) loop.
+func TestRunMediaUpload_PollContextCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	var statusCalls int
+	do := func(_ context.Context, _, urlStr string, _ []byte, _ string) ([]byte, error) {
+		switch commandOf(urlStr) {
+		case "INIT":
+			return []byte(`{"media_id_string":"42"}`), nil
+		case "APPEND":
+			return nil, nil
+		case "FINALIZE":
+			return []byte(`{"processing_info":{"state":"in_progress","check_after_secs":0}}`), nil
+		case "STATUS":
+			statusCalls++
+			return []byte(`{"processing_info":{"state":"in_progress","check_after_secs":0}}`), nil
+		}
+		return nil, fmt.Errorf("unexpected command")
+	}
+	// Cancel on the first poll wait, then honor the context like the
+	// production sleeper does.
+	sleep := func(ctx context.Context, d time.Duration) error {
+		cancel()
+		select {
+		case <-time.After(d):
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	_, err := runMediaUpload(ctx, do, sleep, "https://upload.example/x", []byte("vid"), "video/mp4", 4)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("expected context.Canceled, got %v", err)
+	}
+	if statusCalls != 0 {
+		t.Fatalf("expected no STATUS polls after cancellation, got %d", statusCalls)
 	}
 }
 
@@ -376,7 +418,7 @@ func TestRunMediaUpload_HTTPEndToEnd(t *testing.T) {
 	}
 
 	data := []byte("abcdefghijklmnopqrstuvwxyz0123") // 30 bytes
-	id, err := runMediaUpload(context.Background(), do, func(time.Duration) {}, srv.URL, data, "video/mp4", 7)
+	id, err := runMediaUpload(context.Background(), do, func(context.Context, time.Duration) error { return nil }, srv.URL, data, "video/mp4", 7)
 	if err != nil {
 		t.Fatal(err)
 	}
