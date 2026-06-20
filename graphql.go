@@ -52,6 +52,10 @@ func (c *Client) fetchUserList(ctx context.Context, operation, userID string, ma
 			"userId":                 userID,
 			"count":                  min(100, maxCount-len(users)),
 			"includePromotedContent": false,
+			// withGrokTranslatedBio is sent by the live x.com Followers/Following
+			// request (captured 2026-06-20). Omitting it together with the legacy
+			// feature set returned HTTP 404.
+			"withGrokTranslatedBio": true,
 		}
 		if cursor != "" {
 			variables["cursor"] = cursor

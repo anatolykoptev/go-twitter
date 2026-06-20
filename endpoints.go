@@ -65,12 +65,12 @@ func EndpointURL(operation string) (string, error) {
 var Endpoints = map[string]Endpoint{
 	"UserByScreenName": {ID: "IGgvgiOx4QZndDHuD3x9TQ", Name: "UserByScreenName", Features: gqlFeatures()},
 	"UserByRestId":     {ID: "VQfQ9wwYdk6j_u2O4vt64Q", Name: "UserByRestId", Features: gqlFeatures()},
-	"Followers":        {ID: "FpGYzBsUxUOecYYfso0yA", Name: "Followers", Features: gqlFeatures()},
-	"Following":        {ID: "UCFedrkjMz7PeEAWCWhqFw", Name: "Following", Features: gqlFeatures()},
+	"Followers":        {ID: "9jsVJ9l2uXUIKslHvJqIhw", Name: "Followers", Features: followersFeatures()}, // live-captured 2026-06-20; requires followersFeatures() not gqlFeatures()
+	"Following":        {ID: "OLm4oHZBfqWx8jbcEhWoFw", Name: "Following", Features: followersFeatures()}, // live-captured 2026-06-20; same feature set as Followers
 	"UserTweets":       {ID: "FOlovQsiHGDls3c0Q_HaSQ", Name: "UserTweets", Features: gqlFeatures()},
 	"SearchTimeline":   {ID: "GcXk9vN_d1jUfHNqLacXQA", Name: "SearchTimeline", Features: gqlFeatures()},
 	"TweetDetail":      {ID: "VWFGPVAGkZMGRKGe3GFFnA", Name: "TweetDetail", Features: gqlFeatures()},
-	"Retweeters":       {ID: "0BoJlKAxoNPQUHRftlwZ2w", Name: "Retweeters", Features: gqlFeatures()},
+	"Retweeters":       {ID: "FeoLYPQ-q4bmjGLTZTGs0g", Name: "Retweeters", Features: gqlFeatures()}, // live-verified 2026-06-20
 	"CreateTweet":      {ID: "7TKRKCPuAGsmYde0CudbVg", Name: "CreateTweet", Features: gqlFeatures()},
 
 	// T5 read cluster. queryIDs below are SEEDS — auto-maintained by gql-sync once
@@ -206,6 +206,59 @@ func bookmarkFeatures() map[string]any {
 	f := gqlFeatures()
 	f["graphql_timeline_v2_bookmark_timeline"] = true
 	return f
+}
+
+// followersFeatures returns the feature set x.com requires for the Followers and
+// Following GraphQL ops as of the 2026-06-20 live capture. These two profile
+// list ops validate a DIFFERENT feature set than the shared gqlFeatures()
+// baseline: the live browser request OMITS responsive_web_graphql_exclude_directive_enabled
+// and INCLUDES rweb_cashtags_enabled / rweb_cashtags_composer_attachment_enabled /
+// rweb_conversational_replies_downvote_enabled. Sending the shared baseline
+// returns HTTP 404 (feature-set mismatch, NOT a stale queryId alone). Captured
+// live via an authenticated /<user>/followers network request. Refresh by
+// re-capturing the live Followers request URL.
+func followersFeatures() map[string]any {
+	return map[string]any{
+		"articles_preview_enabled":                                                true,
+		"c9s_tweet_anatomy_moderator_badge_enabled":                               true,
+		"communities_web_enable_tweet_community_results_fetch":                    true,
+		"content_disclosure_ai_generated_indicator_enabled":                       true,
+		"content_disclosure_indicator_enabled":                                    true,
+		"creator_subscriptions_tweet_preview_api_enabled":                         true,
+		"freedom_of_speech_not_reach_fetch_enabled":                               true,
+		"graphql_is_translatable_rweb_tweet_is_translatable_enabled":              true,
+		"longform_notetweets_consumption_enabled":                                 true,
+		"longform_notetweets_inline_media_enabled":                                false,
+		"longform_notetweets_rich_text_read_enabled":                              true,
+		"post_ctas_fetch_enabled":                                                 false,
+		"premium_content_api_read_enabled":                                        false,
+		"profile_label_improvements_pcf_label_in_post_enabled":                    true,
+		"responsive_web_edit_tweet_api_enabled":                                   true,
+		"responsive_web_enhance_cards_enabled":                                    false,
+		"responsive_web_graphql_skip_user_profile_image_extensions_enabled":       false,
+		"responsive_web_graphql_timeline_navigation_enabled":                      true,
+		"responsive_web_grok_analysis_button_from_backend":                        true,
+		"responsive_web_grok_analyze_button_fetch_trends_enabled":                 false,
+		"responsive_web_grok_analyze_post_followups_enabled":                      true,
+		"responsive_web_grok_annotations_enabled":                                 true,
+		"responsive_web_grok_community_note_auto_translation_is_enabled":          true,
+		"responsive_web_grok_image_annotation_enabled":                            true,
+		"responsive_web_grok_imagine_annotation_enabled":                          true,
+		"responsive_web_grok_share_attachment_enabled":                            true,
+		"responsive_web_grok_show_grok_translated_post":                           true,
+		"responsive_web_jetfuel_frame":                                            true,
+		"responsive_web_profile_redirect_enabled":                                 false,
+		"responsive_web_twitter_article_tweet_consumption_enabled":                true,
+		"rweb_cashtags_composer_attachment_enabled":                               true,
+		"rweb_cashtags_enabled":                                                   true,
+		"rweb_conversational_replies_downvote_enabled":                            false,
+		"rweb_tipjar_consumption_enabled":                                         false,
+		"rweb_video_screen_enabled":                                               false,
+		"standardized_nudges_misinfo":                                             true,
+		"tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled": true,
+		"verified_phone_label_enabled":                                            false,
+		"view_counts_everywhere_api_enabled":                                      true,
+	}
 }
 
 // committedFeatures is the hand-maintained baseline feature set, used when no
