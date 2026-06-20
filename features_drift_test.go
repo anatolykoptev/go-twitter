@@ -19,6 +19,10 @@ var featureDriftAllowlist = map[string]struct{}{}
 // cover those).
 func TestFeatureDrift_CommittedVsGenerated(t *testing.T) {
 	committed := committedFeatures()
+	if len(generatedFeatures) == 0 {
+		t.Fatal("generatedFeatures is empty — drift guard would pass vacuously; " +
+			"regenerate features_gen.go via gql-sync or restore committedFeatures()")
+	}
 	for name, gen := range generatedFeatures {
 		com, ok := committed[name]
 		if !ok {
