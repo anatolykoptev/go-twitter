@@ -129,6 +129,11 @@ func TestApplyEnvOverrides_AllEndpoints(t *testing.T) {
 		"ListLatestTweetsTimeline": "TWITTER_QID_LIST_LATEST_TWEETS_TIMELINE",
 		"CommunityTweetsTimeline":  "TWITTER_QID_COMMUNITY_TWEETS_TIMELINE",
 		"BlueVerifiedFollowers":    "TWITTER_QID_BLUE_VERIFIED_FOLLOWERS",
+		// T5.5 engagement mutations.
+		"FavoriteTweet":   "TWITTER_QID_FAVORITE_TWEET",
+		"UnfavoriteTweet": "TWITTER_QID_UNFAVORITE_TWEET",
+		"CreateRetweet":   "TWITTER_QID_CREATE_RETWEET",
+		"DeleteRetweet":   "TWITTER_QID_DELETE_RETWEET",
 	}
 
 	origIDs := make(map[string]string, len(cases))
@@ -170,6 +175,30 @@ func TestReadClusterEndpointsRegistered(t *testing.T) {
 	for _, op := range []string{
 		"Bookmarks", "HomeTimeline", "HomeLatestTimeline",
 		"ListLatestTweetsTimeline", "CommunityTweetsTimeline", "BlueVerifiedFollowers",
+	} {
+		ep, ok := Endpoints[op]
+		assert.True(t, ok, "op %q must be registered in Endpoints", op)
+		assert.NotEmpty(t, ep.ID, "op %q must have a seed queryID", op)
+		assert.Equal(t, op, ep.Name, "op %q Name must match its key", op)
+	}
+}
+
+// TestRequiresAuth_EngagementMutations proves every T5.5 engagement mutation
+// requires a real authenticated account (writes never fall back to a guest
+// token). ReplyTweet routes through the CreateTweet op, already covered.
+func TestRequiresAuth_EngagementMutations(t *testing.T) {
+	for _, op := range []string{
+		"FavoriteTweet", "UnfavoriteTweet", "CreateRetweet", "DeleteRetweet", "CreateTweet",
+	} {
+		assert.True(t, requiresAuth(op), "engagement op %q must require auth (no guest fallback)", op)
+	}
+}
+
+// TestEngagementEndpointsRegistered proves each new engagement op has an
+// Endpoints entry (non-empty seed ID + matching Name) so EndpointURL resolves it.
+func TestEngagementEndpointsRegistered(t *testing.T) {
+	for _, op := range []string{
+		"FavoriteTweet", "UnfavoriteTweet", "CreateRetweet", "DeleteRetweet",
 	} {
 		ep, ok := Endpoints[op]
 		assert.True(t, ok, "op %q must be registered in Endpoints", op)

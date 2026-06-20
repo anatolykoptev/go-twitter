@@ -271,6 +271,97 @@ func (c *Client) CreateTweet(ctx context.Context, acc *Account, text string) (st
 	return parseCreateTweet(body)
 }
 
+// --- T5.5 engagement mutations (account-pinned POST, mirror CreateTweet) ---
+
+// postMutation marshals {variables,features,queryId} for op and issues an
+// account-pinned POST via doPOST (NOT doPoolPOST — these mutate a specific
+// account's state). It mirrors CreateTweet's payload shape; the engagement
+// methods below share it.
+func (c *Client) postMutation(ctx context.Context, acc *Account, op string, variables map[string]any) ([]byte, error) {
+	ep := Endpoints[op]
+	payload, err := json.Marshal(map[string]any{
+		"variables": variables,
+		"features":  ep.Features,
+		"queryId":   ep.ID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("marshal %s payload: %w", op, err)
+	}
+	body, err := c.doPOST(ctx, acc, op, ep.URL(), payload)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", op, err)
+	}
+	return body, nil
+}
+
+// LikeTweet favorites a tweet from a specific account. Returns nil on the
+// "Done" ack, else an error.
+func (c *Client) LikeTweet(ctx context.Context, acc *Account, tweetID string) error {
+	body, err := c.postMutation(ctx, acc, "FavoriteTweet", map[string]any{"tweet_id": tweetID})
+	if err != nil {
+		return err
+	}
+	return parseAck(body, "FavoriteTweet", "favorite_tweet")
+}
+
+// UnlikeTweet un-favorites a tweet from a specific account. Returns nil on the
+// "Done" ack, else an error.
+func (c *Client) UnlikeTweet(ctx context.Context, acc *Account, tweetID string) error {
+	body, err := c.postMutation(ctx, acc, "UnfavoriteTweet", map[string]any{"tweet_id": tweetID})
+	if err != nil {
+		return err
+	}
+	return parseAck(body, "UnfavoriteTweet", "unfavorite_tweet")
+}
+
+// Retweet retweets a tweet from a specific account. Returns the new retweet ID.
+func (c *Client) Retweet(ctx context.Context, acc *Account, tweetID string) (string, error) {
+	body, err := c.postMutation(ctx, acc, "CreateRetweet", map[string]any{
+		"tweet_id":     tweetID,
+		"dark_request": false,
+	})
+	if err != nil {
+		return "", err
+	}
+	return parseCreateRetweet(body)
+}
+
+// Unretweet removes a retweet from a specific account. Returns the source tweet ID.
+func (c *Client) Unretweet(ctx context.Context, acc *Account, tweetID string) (string, error) {
+	body, err := c.postMutation(ctx, acc, "DeleteRetweet", map[string]any{
+		"tweet_id":     tweetID,
+		"dark_request": false,
+	})
+	if err != nil {
+		return "", err
+	}
+	return parseDeleteRetweet(body)
+}
+
+// ReplyTweet posts a reply to tweetID from a specific account. Returns the reply
+// tweet ID. It routes through the CreateTweet op (reply.in_reply_to_tweet_id set)
+// and reuses parseCreateTweet for the result.
+func (c *Client) ReplyTweet(ctx context.Context, acc *Account, tweetID, text string) (string, error) {
+	body, err := c.postMutation(ctx, acc, "CreateTweet", replyTweetVariables(text, tweetID, nil))
+	if err != nil {
+		return "", err
+	}
+	return parseCreateTweet(body)
+}
+
+// replyTweetVariables builds CreateTweet variables for a reply: the same
+// media-pluggable base as createTweetVariables plus the reply slot pointing at
+// the parent tweet. mediaIDs flows into media.media_entities, so a future
+// ReplyWithMedia can attach media without changing this shape (plan acceptance #5).
+func replyTweetVariables(text, inReplyToTweetID string, mediaIDs []string) map[string]any {
+	v := createTweetVariables(text, mediaIDs)
+	v["reply"] = map[string]any{
+		"in_reply_to_tweet_id":   inReplyToTweetID,
+		"exclude_reply_user_ids": []any{},
+	}
+	return v
+}
+
 // tweetPageSize bounds the per-request count for paginated tweet-timeline reads.
 // Twitter caps these server-side; 20 mirrors fetchTweetUserList's page size.
 const tweetPageSize = 20

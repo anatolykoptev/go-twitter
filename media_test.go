@@ -231,6 +231,44 @@ func TestCreateTweetVariables(t *testing.T) {
 	}
 }
 
+func TestReplyTweetVariables(t *testing.T) {
+	// Reply slot points at the parent tweet, with an empty exclude list.
+	v := replyTweetVariables("re: hello", "1500000000000000003", nil)
+	reply, ok := v["reply"].(map[string]any)
+	if !ok {
+		t.Fatal("expected reply slot present on reply variables")
+	}
+	if reply["in_reply_to_tweet_id"] != "1500000000000000003" {
+		t.Fatalf("expected in_reply_to_tweet_id set, got %v", reply["in_reply_to_tweet_id"])
+	}
+	if _, ok := reply["exclude_reply_user_ids"].([]any); !ok {
+		t.Fatal("expected exclude_reply_user_ids slice present")
+	}
+
+	// Media slot stays present and pluggable (not removed) — empty by default so a
+	// future ReplyWithMedia can populate media_entities (plan acceptance #5).
+	media, ok := v["media"].(map[string]any)
+	if !ok {
+		t.Fatal("expected media slot present (pluggable) on reply variables")
+	}
+	if entities := media["media_entities"].([]any); len(entities) != 0 {
+		t.Fatalf("expected 0 media entities by default, got %d", len(entities))
+	}
+	if v["tweet_text"] != "re: hello" {
+		t.Fatalf("expected tweet_text preserved, got %v", v["tweet_text"])
+	}
+
+	// Media IDs flow into the same media slot (proves the slot is pluggable).
+	v = replyTweetVariables("re: pic", "999", []string{"7777"})
+	entities := v["media"].(map[string]any)["media_entities"].([]any)
+	if len(entities) != 1 {
+		t.Fatalf("expected 1 media entity, got %d", len(entities))
+	}
+	if entities[0].(map[string]any)["media_id"] != "7777" {
+		t.Fatalf("expected media_id 7777 attached to reply, got %v", entities[0])
+	}
+}
+
 func TestRunMediaUpload_ImageNoPolling(t *testing.T) {
 	var statusCalls int
 	do := func(_ context.Context, _, urlStr string, _ []byte, _ string) ([]byte, error) {

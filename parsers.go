@@ -616,6 +616,95 @@ func parseCreateTweet(body []byte) (string, error) {
 	return tweetID, nil
 }
 
+// parseAck validates a bare "Done" acknowledgement from a like/unlike mutation
+// response. op is the op name for error context; key is the data field carrying
+// the ack ("favorite_tweet" / "unfavorite_tweet"). Mirrors parseCreateTweet's
+// handling: surface API errors[] first, then on a missing or non-"Done" ack
+// return an error with a truncated body (never a silent success).
+func parseAck(body []byte, op, key string) error {
+	var raw struct {
+		Data   map[string]json.RawMessage `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return fmt.Errorf("unmarshal %s: %w", op, err)
+	}
+	if len(raw.Errors) > 0 {
+		return fmt.Errorf("%s API error: %s", op, raw.Errors[0].Message)
+	}
+	var ack string
+	if v, ok := raw.Data[key]; ok {
+		_ = json.Unmarshal(v, &ack)
+	}
+	if ack != "Done" {
+		return fmt.Errorf("%s did not return \"Done\": %s", op, truncateBytes(body, 300))
+	}
+	return nil
+}
+
+// parseCreateRetweet extracts the new retweet's rest_id from a CreateRetweet
+// mutation response. Mirrors parseCreateTweet's error+empty handling.
+func parseCreateRetweet(body []byte) (string, error) {
+	var raw struct {
+		Data struct {
+			CreateRetweet struct {
+				RetweetResults struct {
+					Result struct {
+						RestID string `json:"rest_id"`
+					} `json:"result"`
+				} `json:"retweet_results"`
+			} `json:"create_retweet"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return "", fmt.Errorf("unmarshal CreateRetweet: %w", err)
+	}
+	if len(raw.Errors) > 0 {
+		return "", fmt.Errorf("CreateRetweet API error: %s", raw.Errors[0].Message)
+	}
+	id := raw.Data.CreateRetweet.RetweetResults.Result.RestID
+	if id == "" {
+		return "", fmt.Errorf("CreateRetweet returned empty retweet ID: %s", truncateBytes(body, 300))
+	}
+	return id, nil
+}
+
+// parseDeleteRetweet extracts the source tweet's rest_id from a DeleteRetweet
+// mutation response (the op key is "unretweet"). Mirrors parseCreateTweet's
+// error+empty handling.
+func parseDeleteRetweet(body []byte) (string, error) {
+	var raw struct {
+		Data struct {
+			Unretweet struct {
+				SourceTweetResults struct {
+					Result struct {
+						RestID string `json:"rest_id"`
+					} `json:"result"`
+				} `json:"source_tweet_results"`
+			} `json:"unretweet"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return "", fmt.Errorf("unmarshal DeleteRetweet: %w", err)
+	}
+	if len(raw.Errors) > 0 {
+		return "", fmt.Errorf("DeleteRetweet API error: %s", raw.Errors[0].Message)
+	}
+	id := raw.Data.Unretweet.SourceTweetResults.Result.RestID
+	if id == "" {
+		return "", fmt.Errorf("DeleteRetweet returned empty source tweet ID: %s", truncateBytes(body, 300))
+	}
+	return id, nil
+}
+
 func extractTokenMentions(text string) []string {
 	matches := tokenMentionRe.FindAllStringSubmatch(strings.ToUpper(text), -1)
 	seen := make(map[string]bool)

@@ -2,6 +2,7 @@ package twitter
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -401,6 +402,76 @@ func TestParseBlueVerifiedFollowers(t *testing.T) {
 	}
 }
 
+// --- T5.5 engagement mutation parsers ---
+
+func TestParseAck_Favorite(t *testing.T) {
+	// Success: bare "Done" ack.
+	if err := parseAck([]byte(`{"data":{"favorite_tweet":"Done"}}`), "FavoriteTweet", "favorite_tweet"); err != nil {
+		t.Fatalf("expected nil on Done ack, got %v", err)
+	}
+	// Success: unfavorite key.
+	if err := parseAck([]byte(`{"data":{"unfavorite_tweet":"Done"}}`), "UnfavoriteTweet", "unfavorite_tweet"); err != nil {
+		t.Fatalf("expected nil on Done ack, got %v", err)
+	}
+	// API error surfaced.
+	err := parseAck([]byte(`{"errors":[{"message":"already favorited"}]}`), "FavoriteTweet", "favorite_tweet")
+	if err == nil {
+		t.Fatal("expected error from errors[]")
+	}
+	if !strings.Contains(err.Error(), "already favorited") {
+		t.Fatalf("expected API message surfaced, got %v", err)
+	}
+	// Missing / non-"Done" ack -> error (not silent success).
+	if err := parseAck([]byte(`{"data":{}}`), "FavoriteTweet", "favorite_tweet"); err == nil {
+		t.Fatal("expected error on missing ack")
+	}
+	if err := parseAck([]byte(`{"data":{"favorite_tweet":"Nope"}}`), "FavoriteTweet", "favorite_tweet"); err == nil {
+		t.Fatal("expected error on non-Done ack")
+	}
+}
+
+func TestParseCreateRetweet(t *testing.T) {
+	// Success-shape -> retweet rest_id.
+	body := `{"data":{"create_retweet":{"retweet_results":{"result":{"rest_id":"1700000000000000001"}}}}}`
+	id, err := parseCreateRetweet([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "1700000000000000001" {
+		t.Fatalf("expected retweet id, got %q", id)
+	}
+	// errors[] surfaced.
+	_, err = parseCreateRetweet([]byte(`{"errors":[{"message":"rate limited"}]}`))
+	if err == nil || !strings.Contains(err.Error(), "rate limited") {
+		t.Fatalf("expected API error surfaced, got %v", err)
+	}
+	// Empty/missing result -> error.
+	if _, err := parseCreateRetweet([]byte(`{"data":{"create_retweet":{}}}`)); err == nil {
+		t.Fatal("expected error on empty retweet result")
+	}
+}
+
+func TestParseDeleteRetweet(t *testing.T) {
+	// Success-shape -> source tweet rest_id (op key "unretweet").
+	body := `{"data":{"unretweet":{"source_tweet_results":{"result":{"rest_id":"1600000000000000002"}}}}}`
+	id, err := parseDeleteRetweet([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "1600000000000000002" {
+		t.Fatalf("expected source tweet id, got %q", id)
+	}
+	// errors[] surfaced.
+	_, err = parseDeleteRetweet([]byte(`{"errors":[{"message":"not found"}]}`))
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("expected API error surfaced, got %v", err)
+	}
+	// Empty/missing result -> error.
+	if _, err := parseDeleteRetweet([]byte(`{"data":{"unretweet":{}}}`)); err == nil {
+		t.Fatal("expected error on empty source result")
+	}
+}
+
 func TestExtractTokenMentions(t *testing.T) {
 	tests := []struct {
 		text     string
@@ -429,5 +500,26 @@ func TestCT0(t *testing.T) {
 	ct02 := GenerateCT0()
 	if ct0 == ct02 {
 		t.Fatal("expected different ct0 values")
+	}
+}
+
+func TestParseCreateTweet(t *testing.T) {
+	// Success-shape -> tweet rest_id (ReplyTweet reuses this parser).
+	body := `{"data":{"create_tweet":{"tweet_results":{"result":{"rest_id":"1800000000000000001"}}}}}`
+	id, err := parseCreateTweet([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "1800000000000000001" {
+		t.Fatalf("expected tweet id, got %q", id)
+	}
+	// errors[] surfaced.
+	_, err = parseCreateTweet([]byte(`{"errors":[{"message":"duplicate"}]}`))
+	if err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("expected API error surfaced, got %v", err)
+	}
+	// Empty/missing result -> error (the silent-no-op trap for the reply path).
+	if _, err := parseCreateTweet([]byte(`{"data":{"create_tweet":{}}}`)); err == nil {
+		t.Fatal("expected error on empty tweet result")
 	}
 }
