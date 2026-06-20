@@ -502,3 +502,24 @@ func TestCT0(t *testing.T) {
 		t.Fatal("expected different ct0 values")
 	}
 }
+
+func TestParseCreateTweet(t *testing.T) {
+	// Success-shape -> tweet rest_id (ReplyTweet reuses this parser).
+	body := `{"data":{"create_tweet":{"tweet_results":{"result":{"rest_id":"1800000000000000001"}}}}}`
+	id, err := parseCreateTweet([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id != "1800000000000000001" {
+		t.Fatalf("expected tweet id, got %q", id)
+	}
+	// errors[] surfaced.
+	_, err = parseCreateTweet([]byte(`{"errors":[{"message":"duplicate"}]}`))
+	if err == nil || !strings.Contains(err.Error(), "duplicate") {
+		t.Fatalf("expected API error surfaced, got %v", err)
+	}
+	// Empty/missing result -> error (the silent-no-op trap for the reply path).
+	if _, err := parseCreateTweet([]byte(`{"data":{"create_tweet":{}}}`)); err == nil {
+		t.Fatal("expected error on empty tweet result")
+	}
+}
