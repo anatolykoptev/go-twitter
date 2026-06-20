@@ -2,6 +2,7 @@ package twitter
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 )
 
@@ -31,9 +32,11 @@ type Endpoint struct {
 	Features map[string]any
 }
 
-// URL returns the full URL for this endpoint.
+// URL returns the full URL for this endpoint. The variable ID segment is
+// path-escaped as defense-in-depth: a poisoned queryID must never break out of
+// its path segment. e.Name is a hardcoded const, so it is left verbatim.
 func (e Endpoint) URL() string {
-	return fmt.Sprintf("%s/%s/%s", twitterBase, e.ID, e.Name)
+	return fmt.Sprintf("%s/%s/%s", twitterBase, url.PathEscape(e.ID), e.Name)
 }
 
 // EndpointURL returns the URL for a named operation, or an error if unknown.

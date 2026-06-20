@@ -439,7 +439,7 @@ func (c *Client) initLoginFlowFull(client *stealth.BrowserClient, guestToken str
 		return nil, err
 	}
 	if status != 200 {
-		return nil, fmt.Errorf("init flow: HTTP %d: %s", status, string(body))
+		return nil, fmt.Errorf("init flow: HTTP %d: %s", status, string(body[:min(300, len(body))]))
 	}
 	return parseFlowResponse(body)
 }

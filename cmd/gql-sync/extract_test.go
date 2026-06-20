@@ -4,6 +4,7 @@ import (
 	"io"
 	"log/slog"
 	"maps"
+	"strings"
 	"testing"
 )
 
@@ -107,6 +108,54 @@ func TestExtractor_BoundedToObjectBoundaries(t *testing.T) {
 		if id == "ORPHAN999" {
 			t.Fatalf("orphan queryId leaked: %s -> ORPHAN999", name)
 		}
+	}
+}
+
+// TestExtractor_DropsPoisonedQueryID proves a queryId that violates the
+// persisted-query alphabet (path-breaking `/`, an embedded quote, or one longer
+// than 64 chars) is DROPPED — never emitted — while a clean queryId is kept.
+func TestExtractor_DropsPoisonedQueryID(t *testing.T) {
+	// Note: the extraction regex alphabet is [^"'], so an embedded quote can
+	// never reach add() — it terminates the capture. The poisoning vectors that
+	// DO survive the regex and must be caught by queryIDRe are path-breaking
+	// bytes the regex tolerates (`/`, whitespace, `.`) and over-length values.
+	cases := []struct {
+		name string
+		id   string
+		kept bool
+	}{
+		{"slash", "AAA/BBB", false},
+		{"dot-traversal", "..", false},
+		{"space", "AAA BBB", false},
+		{"too-long", strings.Repeat("A", 65), false},
+		{"clean", "GoodId_123-456", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			body := []byte(`queryId:"` + tc.id + `",operationName:"PoisonOp"`)
+			ext := quietExtractor()
+			ext.consume(rwAPI, body)
+
+			got, ok := ext.result()["PoisonOp"]
+			if tc.kept {
+				if !ok || got != tc.id {
+					t.Fatalf("clean id should be kept: got %q ok=%v", got, ok)
+				}
+			} else if ok {
+				t.Fatalf("poisoned id %q should be dropped, but op resolved to %q", tc.id, got)
+			}
+		})
+	}
+}
+
+// TestExtractor_DropsPoisonedParamsID proves the same drop applies to the
+// params:{id,name,operationKind} shape, not just the op-definition shape.
+func TestExtractor_DropsPoisonedParamsID(t *testing.T) {
+	body := []byte(`e.exports={n:{params:{id:"BAD/ID",name:"ParamOp",operationKind:"query"}}}`)
+	ext := quietExtractor()
+	ext.consume(rwAPI, body)
+	if id, ok := ext.result()["ParamOp"]; ok {
+		t.Fatalf("poisoned params id should be dropped, got %q", id)
 	}
 }
 

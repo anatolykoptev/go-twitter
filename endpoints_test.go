@@ -1,10 +1,35 @@
 package twitter
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 )
+
+// TestEndpointURL_NormalID proves URL() yields the expected path for a normal
+// queryID (PathEscape is a no-op on the safe alphabet).
+func TestEndpointURL_NormalID(t *testing.T) {
+	e := Endpoint{ID: "IGgvgiOx4QZndDHuD3x9TQ", Name: "UserByScreenName"}
+	want := "https://x.com/i/api/graphql/IGgvgiOx4QZndDHuD3x9TQ/UserByScreenName"
+	assert.Equal(t, want, e.URL())
+}
+
+// TestEndpointURL_EscapesHostileID proves an ID containing a `/` or a space is
+// percent-escaped so it cannot break out of its path segment.
+func TestEndpointURL_EscapesHostileID(t *testing.T) {
+	for _, id := range []string{"AAA/../../evil", "has space", "a/b"} {
+		got := Endpoint{ID: id, Name: "Op"}.URL()
+		assert.NotContains(t, got, id, "raw hostile ID must not appear verbatim")
+		assert.True(t, strings.HasPrefix(got, "https://x.com/i/api/graphql/"),
+			"escaped URL keeps the fixed base prefix")
+		// The variable segment must contain no raw slash or space.
+		seg := strings.TrimPrefix(got, "https://x.com/i/api/graphql/")
+		seg = strings.TrimSuffix(seg, "/Op")
+		assert.NotContains(t, seg, "/")
+		assert.NotContains(t, seg, " ")
+	}
+}
 
 func TestApplyEnvOverrides(t *testing.T) {
 	orig := Endpoints["TweetDetail"].ID

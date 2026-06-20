@@ -33,6 +33,34 @@ const (
 	maxBundleBytes = 32 << 20
 )
 
+// allowedBundleHosts is the exact set of hosts the HTTP fetcher may dial or be
+// redirected to. x.com warm pages and abs.twimg.com bundles are the only
+// legitimate targets; the others are historical aliases. Anything else (a
+// compromised response returning 302 Location: http://169.254.169.254/… , a
+// link-local / cloud-metadata address, or a downgrade to http) is refused.
+var allowedBundleHosts = map[string]bool{
+	"abs.twimg.com":   true,
+	"x.com":           true,
+	"api.twitter.com": true,
+	"twitter.com":     true,
+}
+
+// allowedBundleHost reports whether host is in the bundle-fetch allowlist.
+func allowedBundleHost(host string) bool {
+	return allowedBundleHosts[host]
+}
+
+// checkBundleRedirect refuses any redirect (or initial hop) whose scheme is not
+// https or whose host is not allowlisted. Wired into the HTTP client's
+// CheckRedirect so net/http stops following before the disallowed request is
+// dialed.
+func checkBundleRedirect(req *http.Request, _ []*http.Request) error {
+	if req.URL.Scheme != "https" || !allowedBundleHost(req.URL.Hostname()) {
+		return fmt.Errorf("blocked redirect to disallowed target %s://%s", req.URL.Scheme, req.URL.Host)
+	}
+	return nil
+}
+
 // Fetcher fetches a URL and returns the body. The runtime wires a stealth-backed
 // impl (added in T1); the gql-sync CLI / CI uses HTTPFetcher.
 type Fetcher interface {
@@ -45,6 +73,11 @@ type Fetcher interface {
 type HTTPFetcher struct {
 	Client    *http.Client
 	UserAgent string
+
+	// skipInitialHostCheck disables the belt-and-suspenders initial-URL
+	// allowlist guard in Fetch. Test-only seam (the httptest harness dials
+	// 127.0.0.1 over http); the production CheckRedirect SSRF guard is unaffected.
+	skipInitialHostCheck bool
 }
 
 // NewHTTPFetcher builds an HTTPFetcher. An empty proxyURL falls back to
@@ -60,13 +93,29 @@ func NewHTTPFetcher(proxyURL string) (*HTTPFetcher, error) {
 		transport.Proxy = http.ProxyURL(u)
 	}
 	return &HTTPFetcher{
-		Client:    &http.Client{Timeout: defaultFetchTimeout, Transport: transport},
+		Client: &http.Client{
+			Timeout:       defaultFetchTimeout,
+			Transport:     transport,
+			CheckRedirect: checkBundleRedirect,
+		},
 		UserAgent: DefaultUserAgent,
 	}, nil
 }
 
 // Fetch issues a GET and returns the body, erroring on any non-200 status.
 func (f *HTTPFetcher) Fetch(ctx context.Context, rawURL string) ([]byte, error) {
+	// Belt-and-suspenders: assert the INITIAL resolved URL is https + an
+	// allowlisted host before dialing. Today BundleURL only ever yields
+	// abs.twimg.com, but a future regex change must not silently re-open SSRF.
+	// (Redirects are blocked separately via the client's CheckRedirect.)
+	if !f.skipInitialHostCheck {
+		if u, perr := url.Parse(rawURL); perr != nil {
+			return nil, fmt.Errorf("parse url %s: %w", rawURL, perr)
+		} else if u.Scheme != "https" || !allowedBundleHost(u.Hostname()) {
+			return nil, fmt.Errorf("refusing to fetch disallowed target %s://%s", u.Scheme, u.Host)
+		}
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
 		return nil, fmt.Errorf("new request %s: %w", rawURL, err)
@@ -126,6 +175,10 @@ type StealthFetcher struct {
 // Fetch issues a GET via the BrowserClient and returns the body, erroring on a
 // non-200 status (matching HTTPFetcher's contract). The BrowserClient applies
 // its configured header order, so no order argument is passed here.
+//
+// Redirect/host safety here is delegated to go-stealth's BrowserClient (its own
+// CheckRedirect / proxy policy); the allowedBundleHost guard above governs only
+// the plain net/http HTTPFetcher path.
 func (f *StealthFetcher) Fetch(ctx context.Context, rawURL string) ([]byte, error) {
 	ua := f.UserAgent
 	if ua == "" {

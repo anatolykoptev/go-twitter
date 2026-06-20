@@ -35,6 +35,13 @@ var (
 
 	paramsReIDFirst   = regexp.MustCompile(`params:\{id:["']([^"']+)["']` + braceSpan + `name:["']([^"']+)["']` + braceSpan + `operationKind`)
 	paramsReNameFirst = regexp.MustCompile(`params:\{name:["']([^"']+)["']` + braceSpan + `id:["']([^"']+)["']` + braceSpan + `operationKind`)
+
+	// queryIDRe bounds a captured queryId to the exact alphabet x.com uses for
+	// persisted-query IDs. A poisoned bundle could otherwise smuggle a value
+	// carrying `/`, a quote, or whitespace that later flows unescaped into the
+	// request path. A non-matching value is DROPPED (the op falls back to its
+	// committed ID), never overridden.
+	queryIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 )
 
 // Source-priority ranks. When the same operationName resolves to different
@@ -127,6 +134,13 @@ func (e *extractor) add(name, id, src string, rank int) {
 	if name == "" || id == "" {
 		return
 	}
+	if !queryIDRe.MatchString(id) {
+		e.log.Warn("queryid dropped: failed format validation",
+			slog.String("op", name),
+			slog.String("id_preview", truncate(id, 32)),
+			slog.String("src", src))
+		return
+	}
 	prev, seen := e.ops[name]
 	if !seen {
 		e.ops[name] = extractedOp{id: id, rank: rank, src: src}
@@ -147,6 +161,16 @@ func (e *extractor) add(name, id, src string, rank int) {
 		slog.String("op", name),
 		slog.String("kept_id", prev.id), slog.String("kept_src", prev.src),
 		slog.String("dropped_id", id), slog.String("dropped_src", src))
+}
+
+// truncate caps a string to at most n runes for safe logging of an
+// untrusted/oversized value (never log the whole bundle slice).
+func truncate(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
 }
 
 // result returns the resolved operationName -> queryId map.
