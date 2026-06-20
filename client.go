@@ -26,8 +26,9 @@ type Client struct {
 	xtidMgr              *xtid.Manager
 	xpffGen              *xpff.Generator
 	cfg                  ClientConfig
-	reloginGate          AutoReloginGate    // nil = always allow
-	nonResponsiveBackoff pool.BackoffConfig // transient-failure backoff (base from cfg, x2, cap 30m)
+	reloginGate          AutoReloginGate          // nil = always allow
+	nonResponsiveBackoff pool.BackoffConfig       // transient-failure backoff (base from cfg, x2, cap 30m)
+	domainPacer          *ratelimit.DomainLimiter // human-pace spacing per Twitter domain (nil = disabled)
 
 	mu                sync.Mutex
 	guestToken        string
@@ -107,6 +108,13 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	}
 	xpffGen := xpff.New(xpffGuestID, defaultUserAgent)
 
+	// Human-pace per-domain spacing for x.com / twitter.com. ADDITIVE to the
+	// anti-fingerprint jitter: it spaces the whole scrape workload under the
+	// per-account rate-limit ceiling so the pool self-paces over time instead of
+	// bursting through it and tripping "all accounts unavailable". The per-account
+	// rate limiter remains the authoritative ceiling.
+	domainPacer := buildDomainPacer(cfg)
+
 	c := &Client{
 		client:               bc,
 		pool:                 p,
@@ -114,6 +122,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		xpffGen:              xpffGen,
 		cfg:                  cfg,
 		nonResponsiveBackoff: nonResponsiveBackoff,
+		domainPacer:          domainPacer,
 	}
 
 	for _, acc := range cfg.Accounts {
@@ -274,4 +283,58 @@ func (c *Client) getGuestTokenCached() (string, bool) {
 		return "", false
 	}
 	return c.guestToken, true
+}
+
+// domainPaceWindowCap and domainPaceWindow keep the DomainLimiter embedded
+// window limiter from ever gating: a very high cap over a short window means the
+// MinDelay floor (>= 4.5s) is always the binding constraint, never the window.
+// This makes the DomainLimiter a pure pacer; the per-account limiter remains the
+// authoritative request ceiling. See buildDomainPacer for the full rationale.
+const (
+	domainPaceWindowCap = 1_000_000
+	domainPaceWindow    = time.Minute
+)
+
+// buildDomainPacer constructs the per-domain human-pace limiter for the Twitter
+// hosts (x.com and twitter.com, including subdomains like api.twitter.com).
+// Returns nil when pacing is disabled. MinDelay is the hard floor between
+// consecutive same-domain requests; +RandomDelay makes the realized spacing
+// variable (human-like). This is the single authority for pacer construction —
+// NewClient and the unit tests both go through here so the test exercises the
+// exact wiring production uses, not a copy.
+//
+// NOTE: go-stealth DomainLimiter.Wait polls every 50ms, so realized spacing
+// quantizes to the 50ms poll period. At our production values (>=4.5s) this is
+// negligible (~90 distinct buckets across the 4.5s jitter span) and the rhythm
+// stays human-variable; it only matters for sub-second delays.
+func buildDomainPacer(cfg ClientConfig) *ratelimit.DomainLimiter {
+	if cfg.DomainPaceDisabled {
+		return nil
+	}
+	// IMPORTANT: DomainConfig embeds a sliding-window rate limiter whose
+	// RequestsPerWindow defaults to 0 — and ratelimit.Limiter.Allow treats
+	// count<=0 as DENY, so a delay-only DomainConfig (zero window fields) would
+	// block forever. We want the DomainLimiter to be a PURE pacer here
+	// (MinDelay+RandomDelay spacing only); the per-account ratelimit.Config
+	// (50/15m x N accounts) is already the authoritative hard ceiling and we do
+	// not want a second redundant window gate. So set the embedded window
+	// permissively (effectively unbounded) and let MinDelay/RandomDelay do the
+	// spacing. domainPaceWindowCap / domainPaceWindow are large/short enough that
+	// the spacing floor is always reached long before the window cap matters.
+	return ratelimit.NewDomainLimiter(
+		ratelimit.DomainConfig{
+			Domain:            "*.x.com",
+			RequestsPerWindow: domainPaceWindowCap,
+			WindowDuration:    domainPaceWindow,
+			MinDelay:          cfg.DomainPaceMin,
+			RandomDelay:       cfg.DomainPaceRandom,
+		},
+		ratelimit.DomainConfig{
+			Domain:            "*.twitter.com",
+			RequestsPerWindow: domainPaceWindowCap,
+			WindowDuration:    domainPaceWindow,
+			MinDelay:          cfg.DomainPaceMin,
+			RandomDelay:       cfg.DomainPaceRandom,
+		},
+	)
 }
