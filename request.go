@@ -517,7 +517,10 @@ func requiresAuth(endpoint string) bool {
 		// T5 read cluster: all require a real account — no guest fallback
 		// (the Mar-2026 lesson, plan §T5 / doc §8).
 		"Bookmarks", "HomeTimeline", "HomeLatestTimeline",
-		"ListLatestTweetsTimeline", "CommunityTweetsTimeline", "BlueVerifiedFollowers":
+		"ListLatestTweetsTimeline", "CommunityTweetsTimeline", "BlueVerifiedFollowers",
+		// T5.5 engagement mutations: writes always need a real account, never a
+		// guest token. (ReplyTweet routes through the CreateTweet op, already above.)
+		"FavoriteTweet", "UnfavoriteTweet", "CreateRetweet", "DeleteRetweet":
 		return true
 	}
 	return false
