@@ -77,6 +77,8 @@ func (c *Client) GetDMInbox(ctx context.Context) ([]*DMConversation, error) {
 // FAIL-CLOSED: a 200 response with no usable message id (empty body, a DM
 // validation failure, or a surfaced API error) returns an error — never a silent
 // "sent". Mirrors parseCreateTweet's empty-result guard.
+// conversationID is a CONVERSATION id (1:1 form "<recipientID>-<selfID>", per
+// twikit), NOT a user id; there is no derive helper — the caller forms it.
 func (c *Client) SendDM(ctx context.Context, acc *Account, conversationID, text string) (string, error) {
 	if conversationID == "" {
 		return "", fmt.Errorf("SendDM: empty conversation_id")
@@ -173,6 +175,9 @@ func parseDMInbox(body []byte) ([]*DMConversation, error) {
 		if md.ID == "" {
 			continue // not a message entry (e.g. conversation_read marker)
 		}
+		if md.ConversationID == "" {
+			continue // orphan message, no conversation id — skip (avoid a ""-keyed bare conversation)
+		}
 		conv, ok := byID[md.ConversationID]
 		if !ok {
 			conv = &DMConversation{ConversationID: md.ConversationID}
@@ -224,6 +229,9 @@ func parseSendDM(body []byte) (string, error) {
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return "", fmt.Errorf("unmarshal SendDM: %w", err)
 	}
+	// Load-bearing: classifyError whitelists known codes, so DM-specific error
+	// codes (e.g. 349) reach here as errNone — this errors[] check is the only
+	// thing that catches them. Do NOT remove as "redundant with transport".
 	if len(raw.Errors) > 0 {
 		return "", fmt.Errorf("SendDM API error: %s", raw.Errors[0].Message)
 	}
