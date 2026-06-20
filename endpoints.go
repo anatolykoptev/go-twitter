@@ -87,19 +87,29 @@ var Endpoints = map[string]Endpoint{
 	"CommunityTweetsTimeline":  {ID: "Mvs5UOOEkpXVMDZtUcxR-Q", Name: "CommunityTweetsTimeline", Features: gqlFeatures()},  // seed — auto-maintained by gql-sync
 	"BlueVerifiedFollowers":    {ID: "OBBd6Dw-4qEYbsu3hGkyxg", Name: "BlueVerifiedFollowers", Features: gqlFeatures()},    // seed — auto-maintained by gql-sync
 
-	// T5.5 engagement mutations (account-pinned POST, mirror CreateTweet). queryIDs
-	// are SEEDS — auto-maintained by gql-sync once its weekly walk covers them (the
-	// engagement op chunks are not reachable from the unauthenticated x.com warm
-	// page today, same constraint as the read cluster). Seeds + op names CONFIRMED
-	// against trevorhobenshield/twitter-api-client constants.py (Operation enum).
+	// T5.5 engagement mutations (account-pinned POST, mirror CreateTweet).
+	//
+	// queryIDs here are MANUALLY MAINTAINED, NOT auto-healed by gql-sync. The
+	// 2026-06-20 v0.6.1 live arc proved that mutation GraphQL-path queryIDs are
+	// NOT present in x.com's webpack bundles in any extractable form: the only
+	// mutation identifier in the bundles is the Relay persisted-query hash (e.g.
+	// CreateRetweet -> uVUVwxxC4_1q3qQ9H3VDag), which is a DIFFERENT identifier
+	// than the GraphQL-path queryID and returns HTTP 422 GRAPHQL_VALIDATION_FAILED
+	// when used. gql-sync therefore cannot self-heal these and intentionally never
+	// emits them (it refreshes only the read ops that appear as op-definition
+	// pairs in the unauthenticated warm-page chunks). When x.com rotates a mutation
+	// queryID, refresh it from a live network capture or fa0311/TwitterInternalAPIDocument
+	// (docs/json/API.json — its FavoriteTweet/UnfavoriteTweet IDs match these
+	// working seeds, which is the cross-check), then hotfix via the TWITTER_QID_*
+	// env override (always-on) and land the new literal here.
+	//
 	// Features mirror CreateTweet (gqlFeatures()): the reply op IS CreateTweet so it
 	// needs the full set; like/retweet tolerate it (twitter-api-client sends the
-	// default feature set on these too). Env override (TWITTER_QID_*) is the
-	// always-on operator hotfix.
-	"FavoriteTweet":   {ID: "lI07N6Otwv1PhnEgXILM7A", Name: "FavoriteTweet", Features: gqlFeatures()},   // seed — auto-maintained by gql-sync
-	"UnfavoriteTweet": {ID: "ZYKSe-w7KEslx3JhSIk5LA", Name: "UnfavoriteTweet", Features: gqlFeatures()}, // seed — auto-maintained by gql-sync
-	"CreateRetweet":   {ID: "ojPdsZsimiJrUGLR1sjUtA", Name: "CreateRetweet", Features: gqlFeatures()},   // seed — auto-maintained by gql-sync
-	"DeleteRetweet":   {ID: "iQtK4dl5hBmXewYZuEOKVw", Name: "DeleteRetweet", Features: gqlFeatures()},   // seed — auto-maintained by gql-sync
+	// default feature set on these too).
+	"FavoriteTweet":   {ID: "lI07N6Otwv1PhnEgXILM7A", Name: "FavoriteTweet", Features: gqlFeatures()},   // live-verified 2026-06-20; NOT bundle-extractable — env/manual refresh only
+	"UnfavoriteTweet": {ID: "ZYKSe-w7KEslx3JhSIk5LA", Name: "UnfavoriteTweet", Features: gqlFeatures()}, // live-verified 2026-06-20; NOT bundle-extractable — env/manual refresh only
+	"CreateRetweet":   {ID: "mbRO74GrOvSfRcJnlMapnQ", Name: "CreateRetweet", Features: gqlFeatures()},   // live-verified 2026-06-20; NOT bundle-extractable (see mutation note) — env/manual refresh only
+	"DeleteRetweet":   {ID: "ZyZigVsNiFO6v1dEks1eWg", Name: "DeleteRetweet", Features: gqlFeatures()},   // live-verified 2026-06-20; variable is source_tweet_id; NOT bundle-extractable — env/manual refresh only
 }
 
 // envOverrides maps endpoint names to their env var names for queryId overrides.

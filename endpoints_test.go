@@ -1,6 +1,7 @@
 package twitter
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -273,4 +274,80 @@ func TestGeneratedOverrideChain(t *testing.T) {
 		resetAndApply()
 		assert.Equal(t, committed, Endpoints[op].ID)
 	})
+}
+
+// --- v0.6.1 stale-mutation-queryId regression guards (2026-06-20) ---
+//
+// The CreateRetweet/DeleteRetweet GraphQL-path queryIDs rotate on x.com's
+// ~2-4-week deploy cycle and are NOT extractable from the webpack bundles (the
+// only bundle identifier is the Relay persisted-query hash, which is a different
+// id and returns HTTP 422). These guards pin the live-verified values and fail
+// the build if a retired stale value ever reappears.
+
+// retiredMutationQueryIDs are queryIDs that x.com has retired and that returned
+// a hard error live. They must never reappear as a committed seed.
+var retiredMutationQueryIDs = map[string]string{
+	"CreateRetweet (pre-v0.6.1, 404)": "ojPdsZsimiJrUGLR1sjUtA",
+	"DeleteRetweet (pre-v0.6.1, 422)": "iQtK4dl5hBmXewYZuEOKVw",
+}
+
+// TestMutationQueryIDs_LiveVerified pins the 2026-06-20 live-verified CreateRetweet
+// and DeleteRetweet queryIDs. A change here is a deliberate refresh and must be
+// re-verified with a live round-trip (see project memory / PR notes).
+func TestMutationQueryIDs_LiveVerified(t *testing.T) {
+	want := map[string]string{
+		"CreateRetweet": "mbRO74GrOvSfRcJnlMapnQ",
+		"DeleteRetweet": "ZyZigVsNiFO6v1dEks1eWg",
+	}
+	for op, id := range want {
+		assert.Equal(t, id, Endpoints[op].ID,
+			"op %q queryID drifted from the live-verified value; re-verify with a live round-trip before changing", op)
+	}
+}
+
+// TestNoRetiredMutationQueryIDsInSource source-greps endpoints.go and
+// queryids_gen.go for any retired stale queryID. A reappearance (e.g. a careless
+// revert or a bad gql-sync emit) fails the build — the regression-guard per the
+// Phase-3 forbidden-pattern rule.
+func TestNoRetiredMutationQueryIDsInSource(t *testing.T) {
+	for _, f := range []string{"endpoints.go", "queryids_gen.go"} {
+		src, err := os.ReadFile(f)
+		if err != nil {
+			t.Fatalf("read %s: %v", f, err)
+		}
+		// Allow the documentation reference to the retired id inside a comment only
+		// if it is clearly annotated as retired; the guard targets the live seed.
+		for label, id := range retiredMutationQueryIDs {
+			if strings.Contains(string(src), `ID: "`+id+`"`) {
+				t.Errorf("%s: retired queryID %s reappeared as a live seed (%s)", f, id, label)
+			}
+		}
+	}
+}
+
+// TestUnretweetUsesSourceTweetIDVariable source-greps graphql.go to guard the
+// DeleteRetweet variable name. x.com's DeleteRetweet op keys the target by
+// "source_tweet_id" (the original tweet's ID); sending "tweet_id" returns HTTP
+// 422 GRAPHQL_VALIDATION_FAILED (confirmed live 2026-06-20). This guards against
+// a regression back to the bare "tweet_id" key.
+func TestUnretweetUsesSourceTweetIDVariable(t *testing.T) {
+	src, err := os.ReadFile("graphql.go")
+	if err != nil {
+		t.Fatalf("read graphql.go: %v", err)
+	}
+	// Locate the Unretweet body and assert it posts source_tweet_id.
+	text := string(src)
+	const marker = "func (c *Client) Unretweet("
+	i := strings.Index(text, marker)
+	if i < 0 {
+		t.Fatal("Unretweet method not found in graphql.go")
+	}
+	// Bound the scan to the function body (up to the next func decl).
+	rest := text[i:]
+	if j := strings.Index(rest[len(marker):], "\nfunc "); j >= 0 {
+		rest = rest[:len(marker)+j]
+	}
+	if !strings.Contains(rest, `"source_tweet_id"`) {
+		t.Error("Unretweet must POST the DeleteRetweet variable as \"source_tweet_id\" (x.com 422s on bare tweet_id)")
+	}
 }
