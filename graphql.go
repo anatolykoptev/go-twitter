@@ -70,9 +70,24 @@ func (c *Client) fetchUserList(ctx context.Context, operation, userID string, ma
 		if err != nil {
 			return users, err
 		}
-		url = addGraphQLParams(url, variables, Endpoints[operation].Features)
 
-		body, _, err := c.doGET(ctx, operation, url)
+		var body []byte
+		if operation == "Followers" || operation == "Following" {
+			// X migrated Followers/Following from GET to POST (2026-06-20).
+			// Precedent: docs/2026-03-31-twitter-searchtimeline-404.md (same migration pattern).
+			// Live-confirmed: browser returns 200; go-stealth GET returns 404 on same DC proxy.
+			payload, merr := json.Marshal(map[string]any{
+				"variables": variables,
+				"features":  Endpoints[operation].Features,
+			})
+			if merr != nil {
+				return users, fmt.Errorf("%s: marshal payload: %w", operation, merr)
+			}
+			body, _, err = c.doPoolPOST(ctx, operation, url, payload)
+		} else {
+			url = addGraphQLParams(url, variables, Endpoints[operation].Features)
+			body, _, err = c.doGET(ctx, operation, url)
+		}
 		if err != nil {
 			return users, fmt.Errorf("%s: %w", operation, err)
 		}
