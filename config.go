@@ -64,6 +64,28 @@ type ClientConfig struct {
 	// where guest tokens from datacenter IPs return persistent 403 errors.
 	// Default: false (guest fallback enabled for backward compatibility).
 	DisableGuestFallback bool
+
+	// DomainPaceMin is the minimum human-pace delay between consecutive requests
+	// to the same Twitter domain (x.com / twitter.com), applied at the
+	// pool-request site IN ADDITION TO the anti-fingerprint jitter. It spaces the
+	// whole scrape workload (Retweeters/Followers/KOL/seed) under the per-account
+	// rate-limit ceiling so the pool self-paces instead of bursting through and
+	// tripping "all accounts unavailable". The per-account rate limiter remains
+	// the hard ceiling; this is the soft, variable spacing.
+	//
+	// Together with DomainPaceRandom the realized inter-request spacing is
+	// [DomainPaceMin, DomainPaceMin+DomainPaceRandom) (variable, never below
+	// DomainPaceMin). Default: 4.5s. Set DomainPaceDisabled to turn pacing off.
+	DomainPaceMin time.Duration
+
+	// DomainPaceRandom is the random jitter added on top of DomainPaceMin for the
+	// human-pace spacing (see DomainPaceMin). Default: 4.5s.
+	DomainPaceRandom time.Duration
+
+	// DomainPaceDisabled turns off the per-domain human pace entirely. When true,
+	// no DomainLimiter is wired and only the anti-fingerprint jitter applies
+	// (legacy behaviour). Default: false (pacing enabled with safe defaults).
+	DomainPaceDisabled bool
 }
 
 // defaults fills in zero-value config fields with sensible defaults.
@@ -79,6 +101,12 @@ func (cfg *ClientConfig) defaults() {
 	}
 	if cfg.NonResponsiveCooldown == 0 {
 		cfg.NonResponsiveCooldown = 5 * time.Minute
+	}
+	if cfg.DomainPaceMin == 0 {
+		cfg.DomainPaceMin = 4500 * time.Millisecond
+	}
+	if cfg.DomainPaceRandom == 0 {
+		cfg.DomainPaceRandom = 4500 * time.Millisecond
 	}
 	if cfg.RateLimit.RequestsPerWindow == 0 {
 		cfg.RateLimit = ratelimit.DefaultConfig

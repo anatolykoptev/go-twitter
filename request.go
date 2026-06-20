@@ -34,6 +34,17 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 		return nil, nil, err
 	}
 
+	// Human-pace per-domain spacing (additive to the jitter above). Applied ONCE
+	// per logical request, before the retry loop, so transient retries (which
+	// have their own backoff) do not each re-pay the full pace. Spaces the whole
+	// Twitter workload under the per-account rate-limit ceiling so the pool
+	// self-paces instead of bursting through it. nil pacer = pacing disabled.
+	if c.domainPacer != nil {
+		if err := c.domainPacer.Wait(ctx, url); err != nil {
+			return nil, nil, err
+		}
+	}
+
 	var lastErr error
 	for attempt := range maxRetries {
 		if attempt > 0 {
