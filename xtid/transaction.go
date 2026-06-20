@@ -21,10 +21,17 @@ type ClientTransaction struct {
 	animationKey    string
 	rowIndex        int
 	keyBytesIndices []int
+	// now and randByte are injectable seams (default time.Now / rand) so a fixed
+	// seed makes GenerateID reproducible in golden tests. Production is unchanged.
+	now      func() time.Time
+	randByte func() byte
 }
 
 func newClientTransaction(homePageHTML, ondemandJS string) (*ClientTransaction, error) {
-	ct := &ClientTransaction{}
+	ct := &ClientTransaction{
+		now:      time.Now,
+		randByte: func() byte { return byte(rand.Intn(256)) },
+	}
 
 	rowIndex, keyIndices := getKeyIndices(ondemandJS)
 	ct.rowIndex = rowIndex
@@ -149,6 +156,23 @@ func (ct *ClientTransaction) buildAnimationKey(homePageHTML string) (string, err
 	return ct.animate(arr[rowIndex], targetTime), nil
 }
 
+// nowFn returns the injected clock, defaulting to time.Now so a zero-value
+// ClientTransaction (not built via newClientTransaction) is still safe.
+func (ct *ClientTransaction) nowFn() time.Time {
+	if ct.now != nil {
+		return ct.now()
+	}
+	return time.Now()
+}
+
+// randByteFn returns the injected random source, defaulting to rand.
+func (ct *ClientTransaction) randByteFn() byte {
+	if ct.randByte != nil {
+		return ct.randByte()
+	}
+	return byte(rand.Intn(256))
+}
+
 // GenerateID computes x-client-transaction-id for a given method+path.
 func (ct *ClientTransaction) GenerateID(method, path string) string {
 	// Strip query string — only path matters
@@ -156,7 +180,7 @@ func (ct *ClientTransaction) GenerateID(method, path string) string {
 		path = path[:idx]
 	}
 
-	timeNow := int(time.Now().UnixMilli()-1682924400000) / 1000
+	timeNow := int(ct.nowFn().UnixMilli()-1682924400000) / 1000
 	timeNowBytes := make([]byte, 4)
 	for i := 0; i < 4; i++ {
 		timeNowBytes[i] = byte((timeNow >> (i * 8)) & 0xFF)
@@ -172,7 +196,7 @@ func (ct *ClientTransaction) GenerateID(method, path string) string {
 	bytesArr = append(bytesArr, hashBytes...)
 	bytesArr = append(bytesArr, byte(additionalRandomNumber))
 
-	randomNum := byte(rand.Intn(256))
+	randomNum := ct.randByteFn()
 	out := make([]byte, len(bytesArr)+1)
 	out[0] = randomNum
 	for i, b := range bytesArr {

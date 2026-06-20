@@ -14,9 +14,14 @@ import (
 	"time"
 )
 
-// defaultUserAgent matches the desktop Chrome UA the rest of go-twitter sends so
-// warm pages serve the same bundle graph the real client sees.
-const defaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
+// DefaultUserAgent is the single source of truth for the desktop Chrome UA
+// go-twitter presents to x.com. It MUST stay consistent with the go-stealth
+// Chrome JA3 the BrowserClient emits — a UA major version that disagrees with the
+// TLS ClientHello is a trivially fingerprintable bot tell. The twitter package's
+// header builder aliases this (see headers.go's defaultUserAgent) so a
+// StealthFetcher or HTTPFetcher built without an explicit UA cannot drift to a
+// different Chrome version than the rest of the client.
+const DefaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
 const (
 	defaultFetchTimeout = 30 * time.Second
@@ -56,7 +61,7 @@ func NewHTTPFetcher(proxyURL string) (*HTTPFetcher, error) {
 	}
 	return &HTTPFetcher{
 		Client:    &http.Client{Timeout: defaultFetchTimeout, Transport: transport},
-		UserAgent: defaultUserAgent,
+		UserAgent: DefaultUserAgent,
 	}, nil
 }
 
@@ -87,7 +92,7 @@ func (f *HTTPFetcher) Fetch(ctx context.Context, rawURL string) ([]byte, error) 
 func (f *HTTPFetcher) setHeaders(req *http.Request) {
 	ua := f.UserAgent
 	if ua == "" {
-		ua = defaultUserAgent
+		ua = DefaultUserAgent
 	}
 	req.Header.Set("User-Agent", ua)
 	req.Header.Set("Accept", acceptHeader)
@@ -99,4 +104,44 @@ func (f *HTTPFetcher) httpClient() *http.Client {
 		return f.Client
 	}
 	return http.DefaultClient
+}
+
+// stealthDoer is the subset of go-stealth's *BrowserClient that StealthFetcher
+// needs. Declaring it here keeps internal/bundle free of a hard go-stealth
+// import and makes StealthFetcher unit-testable with a stub.
+type stealthDoer interface {
+	DoCtx(ctx context.Context, method, urlStr string, headers map[string]string, body io.Reader) ([]byte, map[string]string, int, error)
+}
+
+// StealthFetcher fetches warm pages through go-stealth's BrowserClient so the
+// runtime rides the same TLS/JA3 fingerprint + proxy as the rest of go-twitter.
+// Unauthenticated (guest) is fine — warm pages are public HTML. It satisfies
+// Fetcher and is the impl xtid wires at runtime (HTTPFetcher stays the CI/codegen
+// path).
+type StealthFetcher struct {
+	Client    stealthDoer
+	UserAgent string
+}
+
+// Fetch issues a GET via the BrowserClient and returns the body, erroring on a
+// non-200 status (matching HTTPFetcher's contract). The BrowserClient applies
+// its configured header order, so no order argument is passed here.
+func (f *StealthFetcher) Fetch(ctx context.Context, rawURL string) ([]byte, error) {
+	ua := f.UserAgent
+	if ua == "" {
+		ua = DefaultUserAgent
+	}
+	headers := map[string]string{
+		"User-Agent":      ua,
+		"Accept":          acceptHeader,
+		"Accept-Language": acceptLangHeader,
+	}
+	body, _, status, err := f.Client.DoCtx(ctx, http.MethodGet, rawURL, headers, nil)
+	if err != nil {
+		return nil, fmt.Errorf("stealth fetch %s: %w", rawURL, err)
+	}
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("stealth fetch %s: HTTP %d", rawURL, status)
+	}
+	return body, nil
 }

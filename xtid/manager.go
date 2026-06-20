@@ -1,46 +1,56 @@
 package xtid
 
 import (
+	"context"
 	"fmt"
-	"io"
 	"log/slog"
-	"net/http"
+	"strings"
 	"sync"
 	"time"
+
+	"github.com/anatolykoptev/go-twitter/internal/bundle"
 )
+
+// warmPageURL is the public x.com landing fetched for the twitter-site-verification
+// meta tag and the loading-animation SVGs. Unauthenticated/guest is fine — the
+// warm page is public HTML.
+const warmPageURL = "https://x.com"
 
 // Manager fetches x.com page/JS and caches the ClientTransaction, auto-refreshing every 30 min.
 // Thread-safe. Falls back to old keys on refresh failure.
 type Manager struct {
 	mu              sync.RWMutex
 	ct              *ClientTransaction
-	guestID         string
 	lastRefresh     time.Time
 	refreshInterval time.Duration
-	client          *http.Client
+	fetcher         bundle.Fetcher
+	// cacheDir overrides the bundle chunk-map disk cache location; empty uses
+	// the bundle package default. Set in tests for isolation.
+	cacheDir string
 }
 
-// NewManager creates a new transaction ID manager.
-func NewManager() *Manager {
+// NewManager creates a new transaction ID manager backed by the given Fetcher.
+// The runtime passes a stealth-backed Fetcher; tests pass a stub.
+func NewManager(f bundle.Fetcher) *Manager {
 	return &Manager{
 		refreshInterval: 30 * time.Minute,
-		client: &http.Client{
-			Timeout: 30 * time.Second,
-		},
+		fetcher:         f,
 	}
 }
 
-// Initialize fetches x.com and the ondemand.s JS file, then builds the ClientTransaction.
-// Must be called at least once before GenerateID.
+// Initialize fetches the warm page, locates ondemand.s, fetches it, and builds the
+// ClientTransaction. Must be called at least once before GenerateID.
 func (m *Manager) Initialize() error {
-	homeHTML, guestID, err := m.fetchHome()
+	ctx := context.Background()
+
+	homeHTML, err := m.fetchURL(warmPageURL)
 	if err != nil {
-		return fmt.Errorf("fetch x.com: %w", err)
+		return fmt.Errorf("fetch warm page: %w", err)
 	}
 
-	ondemandURL := getOnDemandFileURL(homeHTML)
-	if ondemandURL == "" {
-		return fmt.Errorf("ondemand.s URL not found in x.com HTML")
+	ondemandURL, err := m.locateOnDemand(ctx, homeHTML)
+	if err != nil {
+		return err
 	}
 
 	ondemandJS, err := m.fetchURL(ondemandURL)
@@ -55,12 +65,43 @@ func (m *Manager) Initialize() error {
 
 	m.mu.Lock()
 	m.ct = ct
-	if guestID != "" {
-		m.guestID = guestID
-	}
 	m.lastRefresh = time.Now()
 	m.mu.Unlock()
 
+	logInitialized(ct)
+	return nil
+}
+
+// locateOnDemand resolves the ondemand.s bundle URL.
+//
+// It prefers the legacy direct-embed fast-path (`"ondemand.s":"<hash>"`) that
+// still appears on some x.com snapshots — those carry no webpack chunk map to
+// walk, so the bundle-core two-step would miss them. Otherwise it falls back to
+// the bundle core's chunk-map lookup (chunkID by name -> hash -> URL).
+//
+// The webpack-location logic that used to live in xtid/parser.go now belongs to
+// internal/bundle; xtid only chooses between the legacy fast-path and the core.
+func (m *Manager) locateOnDemand(ctx context.Context, homeHTML string) (string, error) {
+	if url := onDemandLegacyURL(homeHTML); url != "" {
+		return url, nil
+	}
+
+	cm, err := bundle.Build(ctx, m.fetcher, bundle.Options{CacheDir: m.cacheDir})
+	if err != nil {
+		return "", fmt.Errorf("build chunk map: %w", err)
+	}
+	id, ok := cm.ChunkIDByName("ondemand.s")
+	if !ok {
+		return "", fmt.Errorf("ondemand.s chunk not found in chunk map")
+	}
+	url, ok := cm.BundleURL("ondemand.s")
+	if !ok {
+		return "", fmt.Errorf("ondemand.s hash missing for chunk %s", id)
+	}
+	return url, nil
+}
+
+func logInitialized(ct *ClientTransaction) {
 	prefix := ct.animationKey
 	if len(prefix) > 8 {
 		prefix = prefix[:8]
@@ -68,48 +109,6 @@ func (m *Manager) Initialize() error {
 	slog.Info("xtid: initialized",
 		slog.String("anim_key", prefix+"..."),
 		slog.String("sample_key", "xtid_init"))
-	return nil
-}
-
-// GuestID returns the guest_id extracted from x.com set-cookie headers.
-func (m *Manager) GuestID() string {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return m.guestID
-}
-
-// fetchHome fetches x.com and extracts the guest_id from set-cookie headers.
-func (m *Manager) fetchHome() (html, guestID string, err error) {
-	req, err := http.NewRequest("GET", "https://x.com", nil)
-	if err != nil {
-		return "", "", err
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36")
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-
-	resp, err := m.client.Do(req)
-	if err != nil {
-		return "", "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return "", "", fmt.Errorf("HTTP %d", resp.StatusCode)
-	}
-
-	for _, c := range resp.Cookies() {
-		if c.Name == "guest_id" && c.Value != "" {
-			guestID = c.Value
-			break
-		}
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", "", err
-	}
-	return string(body), guestID, nil
 }
 
 // fetchMaxAttempts is the number of attempts for transient network failures.
@@ -118,12 +117,14 @@ const fetchMaxAttempts = 3
 // fetchBackoffBase is the initial backoff between retry attempts.
 const fetchBackoffBase = 500 * time.Millisecond
 
+// fetchURL fetches a URL through the injected Fetcher with retry/backoff. 4xx
+// responses are treated as permanent and not retried.
 func (m *Manager) fetchURL(url string) (string, error) {
 	var lastErr error
 	for attempt := 1; attempt <= fetchMaxAttempts; attempt++ {
-		body, err := m.fetchOnce(url)
+		body, err := m.fetcher.Fetch(context.Background(), url)
 		if err == nil {
-			return body, nil
+			return string(body), nil
 		}
 		lastErr = err
 		if isPermanentFetchErr(err) || attempt == fetchMaxAttempts {
@@ -138,41 +139,16 @@ func (m *Manager) fetchURL(url string) (string, error) {
 	return "", lastErr
 }
 
-func (m *Manager) fetchOnce(url string) (string, error) {
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36")
-	req.Header.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
-	req.Header.Set("Accept-Language", "en-US,en;q=0.9")
-
-	resp, err := m.client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("HTTP %d for %s", resp.StatusCode, url)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", err
-	}
-	return string(body), nil
-}
-
 // isPermanentFetchErr returns true for errors that should not be retried (HTTP 4xx).
-// Network errors, timeouts, and 5xx are retried.
+// Network errors, timeouts, and 5xx are retried. Matches anywhere in the message
+// because Fetcher impls format the status as a suffix ("... HTTP 403").
 func isPermanentFetchErr(err error) bool {
 	if err == nil {
 		return false
 	}
 	msg := err.Error()
 	for _, code := range []string{"HTTP 400", "HTTP 401", "HTTP 403", "HTTP 404", "HTTP 410", "HTTP 451"} {
-		if len(msg) >= len(code) && msg[:len(code)] == code {
+		if strings.Contains(msg, code) {
 			return true
 		}
 	}

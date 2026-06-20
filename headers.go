@@ -1,9 +1,15 @@
 package twitter
 
-import stealth "github.com/anatolykoptev/go-stealth"
+import (
+	stealth "github.com/anatolykoptev/go-stealth"
+	"github.com/anatolykoptev/go-twitter/internal/bundle"
+)
 
-// defaultUserAgent is the fallback User-Agent when no per-account UA is set.
-const defaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+// defaultUserAgent is the fallback User-Agent when no per-account UA is set. It
+// aliases bundle.DefaultUserAgent so the header builder and the warm-page
+// fetchers share one canonical Chrome UA (kept in lockstep with the go-stealth
+// JA3); see internal/bundle/fetcher.go.
+const defaultUserAgent = bundle.DefaultUserAgent
 
 // twitterHeaders returns the base headers required by Twitter's GraphQL API.
 func twitterHeaders(authToken, ct0, userAgent string) map[string]string {

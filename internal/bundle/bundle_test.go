@@ -356,7 +356,7 @@ func TestHTTPFetcher_ZeroValueUsesDefaults(t *testing.T) {
 	if string(body) != "ok" {
 		t.Fatalf("body = %q want ok", body)
 	}
-	if gotUA != defaultUserAgent {
+	if gotUA != DefaultUserAgent {
 		t.Fatalf("User-Agent = %q want the default", gotUA)
 	}
 }
