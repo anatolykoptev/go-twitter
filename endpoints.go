@@ -14,6 +14,19 @@ const (
 	// ValidateAccount to check whether an account's credentials are still
 	// alive. Returns 200 on success, 401 on expired auth, 403 on suspension.
 	accountSettingsURL = "https://api.twitter.com/1.1/account/settings.json"
+
+	// T5.6 DM cluster — 1.1 REST endpoints (same host the lib already uses for
+	// auth/media/settings). DMs are NOT GraphQL ops here, so they live as plain
+	// URL consts (like accountSettingsURL), not in the Endpoints map.
+	//
+	// dmInboxURL: GET inbox metadata. CONFIRMED against
+	// trevorhobenshield/twitter-api-client Account.dm_inbox (v1_api =
+	// "https://api.twitter.com/1.1", path dm/inbox_initial_state.json).
+	dmInboxURL = "https://api.twitter.com/1.1/dm/inbox_initial_state.json"
+	// dmNewURL: POST a new DM into an existing conversation. CONFIRMED against
+	// d60/twikit v11.dm_new (Endpoint.DM_NEW = .../1.1/dm/new2.json), flat JSON
+	// body {conversation_id,text,...}. (NOT the public events/new.json shape.)
+	dmNewURL = "https://api.twitter.com/1.1/dm/new2.json"
 )
 
 // bearerTokens is the list of known Twitter web-app bearer tokens.

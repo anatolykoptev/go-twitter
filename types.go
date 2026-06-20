@@ -39,3 +39,23 @@ type Cursor struct {
 	Value  string
 	IsNext bool
 }
+
+// DMConversation is a single direct-message conversation from the 1.1 inbox.
+// Participants holds the user IDs in the thread (the inbox shape carries
+// participant IDs, not full user objects). Messages are the messages seen in the
+// inbox_initial_state entries for this conversation.
+type DMConversation struct {
+	ConversationID string
+	Participants   []string
+	Messages       []DMMessage
+}
+
+// DMMessage is a single direct message. Fields mirror the 1.1 inbox
+// message_data shape (id, sender_id, text, time as unix millis).
+type DMMessage struct {
+	ID             string
+	ConversationID string
+	SenderID       string
+	Text           string
+	CreatedAt      time.Time
+}

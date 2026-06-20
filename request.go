@@ -520,7 +520,10 @@ func requiresAuth(endpoint string) bool {
 		"ListLatestTweetsTimeline", "CommunityTweetsTimeline", "BlueVerifiedFollowers",
 		// T5.5 engagement mutations: writes always need a real account, never a
 		// guest token. (ReplyTweet routes through the CreateTweet op, already above.)
-		"FavoriteTweet", "UnfavoriteTweet", "CreateRetweet", "DeleteRetweet":
+		"FavoriteTweet", "UnfavoriteTweet", "CreateRetweet", "DeleteRetweet",
+		// T5.6 DM cluster: inbox is per-account state and sending is a write —
+		// both ALWAYS need a real authenticated account, no guest fallback.
+		"DMInbox", "SendDM":
 		return true
 	}
 	return false
