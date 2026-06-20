@@ -113,9 +113,26 @@ func init() {
 	ApplyEnvOverrides()       // env overrides generated (highest priority)
 }
 
-// gqlFeatures returns the canonical Twitter GraphQL feature flags.
-// Extracted from x.com main JS bundle — must be kept in sync.
+// gqlFeatures returns the canonical Twitter GraphQL feature flags. It prefers the
+// cmd/gql-sync-generated baseline (features_gen.go) when present, falling back to
+// the committed literal when generation has not run (or produced nothing). The
+// returned map is always a fresh COPY so a caller mutating per-op features can
+// never corrupt the shared package-level source.
 func gqlFeatures() map[string]any {
+	if len(generatedFeatures) > 0 {
+		out := make(map[string]any, len(generatedFeatures))
+		for k, v := range generatedFeatures {
+			out[k] = v
+		}
+		return out
+	}
+	return committedFeatures()
+}
+
+// committedFeatures is the hand-maintained baseline feature set, used when no
+// generated baseline is present. Extracted from x.com — keep roughly in sync, but
+// gql-sync's features_gen.go is the authoritative refresh path.
+func committedFeatures() map[string]any {
 	return map[string]any{
 		"articles_preview_enabled":                                                true,
 		"c9s_tweet_anatomy_moderator_badge_enabled":                               true,

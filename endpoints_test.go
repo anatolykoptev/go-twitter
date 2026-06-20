@@ -31,6 +31,73 @@ func TestEndpointURL_EscapesHostileID(t *testing.T) {
 	}
 }
 
+// TestGqlFeatures_GeneratedPreferred proves gqlFeatures() sources the generated
+// baseline when generatedFeatures is non-empty, and falls back to the committed
+// literal when it is empty.
+func TestGqlFeatures_GeneratedPreferred(t *testing.T) {
+	orig := generatedFeatures
+	t.Cleanup(func() { generatedFeatures = orig })
+
+	t.Run("generated baseline used when present", func(t *testing.T) {
+		generatedFeatures = map[string]any{"only_generated_flag": true}
+		got := gqlFeatures()
+		if _, ok := got["only_generated_flag"]; !ok {
+			t.Fatalf("expected generated flag, got %v", got)
+		}
+		if len(got) != 1 {
+			t.Fatalf("expected only the generated set, got %d flags", len(got))
+		}
+	})
+
+	t.Run("falls back to committed literal when generated empty", func(t *testing.T) {
+		generatedFeatures = map[string]any{}
+		got := gqlFeatures()
+		want := committedFeatures()
+		if len(got) != len(want) {
+			t.Fatalf("fallback len = %d, want committed len %d", len(got), len(want))
+		}
+		for k, v := range want {
+			if got[k] != v {
+				t.Errorf("fallback[%q] = %v, want %v", k, got[k], v)
+			}
+		}
+	})
+}
+
+// TestGeneratedFeatures_InitialNoOp proves the committed features_gen.go baseline
+// equals committedFeatures() verbatim, so the first ship of the generated layer is
+// a behavioural no-op (gqlFeatures() returns the same set it did before T4).
+func TestGeneratedFeatures_InitialNoOp(t *testing.T) {
+	committed := committedFeatures()
+	if len(generatedFeatures) != len(committed) {
+		t.Fatalf("generatedFeatures has %d flags, committed has %d", len(generatedFeatures), len(committed))
+	}
+	for k, v := range committed {
+		if generatedFeatures[k] != v {
+			t.Errorf("generatedFeatures[%q] = %v, want committed %v", k, generatedFeatures[k], v)
+		}
+	}
+}
+
+// TestGqlFeatures_ReturnsCopy proves the returned map is a fresh copy: mutating it
+// (as a per-op feature override might) never corrupts the shared package var.
+func TestGqlFeatures_ReturnsCopy(t *testing.T) {
+	orig := generatedFeatures
+	t.Cleanup(func() { generatedFeatures = orig })
+	generatedFeatures = map[string]any{"flag_a": true}
+
+	got := gqlFeatures()
+	got["flag_a"] = false
+	got["injected"] = true
+
+	if generatedFeatures["flag_a"] != true {
+		t.Error("mutating the returned map corrupted generatedFeatures[flag_a]")
+	}
+	if _, ok := generatedFeatures["injected"]; ok {
+		t.Error("inserting into the returned map leaked into generatedFeatures")
+	}
+}
+
 func TestApplyEnvOverrides(t *testing.T) {
 	orig := Endpoints["TweetDetail"].ID
 
