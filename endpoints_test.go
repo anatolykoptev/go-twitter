@@ -315,11 +315,15 @@ func TestNoRetiredMutationQueryIDsInSource(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read %s: %v", f, err)
 		}
-		// Allow the documentation reference to the retired id inside a comment only
-		// if it is clearly annotated as retired; the guard targets the live seed.
+		// Match the bare quoted id so BOTH source formats are covered: the
+		// endpoints.go struct literal (ID: "x") AND the queryids_gen.go map
+		// literal ("Name": "x"). The gen file is the higher-risk vector — per
+		// applyGeneratedOverrides the runtime precedence is env > generated >
+		// committed, so a stale id re-emitted into queryids_gen.go silently
+		// overrides the live-verified committed seed.
 		for label, id := range retiredMutationQueryIDs {
-			if strings.Contains(string(src), `ID: "`+id+`"`) {
-				t.Errorf("%s: retired queryID %s reappeared as a live seed (%s)", f, id, label)
+			if strings.Contains(string(src), `"`+id+`"`) {
+				t.Errorf("%s: retired queryID %s reappeared (%s)", f, id, label)
 			}
 		}
 	}

@@ -89,19 +89,23 @@ var Endpoints = map[string]Endpoint{
 
 	// T5.5 engagement mutations (account-pinned POST, mirror CreateTweet).
 	//
-	// queryIDs here are MANUALLY MAINTAINED, NOT auto-healed by gql-sync. The
-	// 2026-06-20 v0.6.1 live arc proved that mutation GraphQL-path queryIDs are
-	// NOT present in x.com's webpack bundles in any extractable form: the only
-	// mutation identifier in the bundles is the Relay persisted-query hash (e.g.
-	// CreateRetweet -> uVUVwxxC4_1q3qQ9H3VDag), which is a DIFFERENT identifier
-	// than the GraphQL-path queryID and returns HTTP 422 GRAPHQL_VALIDATION_FAILED
-	// when used. gql-sync therefore cannot self-heal these and intentionally never
-	// emits them (it refreshes only the read ops that appear as op-definition
-	// pairs in the unauthenticated warm-page chunks). When x.com rotates a mutation
-	// queryID, refresh it from a live network capture or fa0311/TwitterInternalAPIDocument
-	// (docs/json/API.json — its FavoriteTweet/UnfavoriteTweet IDs match these
-	// working seeds, which is the cross-check), then hotfix via the TWITTER_QID_*
-	// env override (always-on) and land the new literal here.
+	// queryIDs here are MANUALLY MAINTAINED. The 2026-06-20 v0.6.1 live arc found
+	// the CreateRetweet/DeleteRetweet GraphQL-path queryIDs are NOT exposed in the
+	// CURRENT unauthenticated x.com warm-page chunks that gql-sync walks: a full
+	// authed-bundle scan surfaced these ops only as Relay persisted-query hashes
+	// (e.g. a CreateRetweet Relay hash), which are a DIFFERENT identifier than the
+	// GraphQL-path queryID and return HTTP 422 GRAPHQL_VALIDATION_FAILED when used.
+	// So gql-sync does not seed these today — NOT by design but by absence from its
+	// source. CAUTION: gql-sync has no read-vs-mutation filter (emit.go writes the
+	// whole extracted map; CreateTweet, a mutation, is already in queryids_gen.go),
+	// and per applyGeneratedOverrides the precedence is env > generated > committed.
+	// If a future bundle ever exposes a params:{id,name,operationKind:"mutation"}
+	// shape for these ops, gql-sync WILL emit it and override the committed literal
+	// below — so verify any generated mutation queryID against a live round-trip.
+	// To refresh manually: capture the live GraphQL-path id (network capture or
+	// fa0311/TwitterInternalAPIDocument docs/json/API.json — its FavoriteTweet/
+	// UnfavoriteTweet IDs match these working seeds, the cross-check), hotfix via
+	// the TWITTER_QID_* env override (always-on), and land the new literal here.
 	//
 	// Features mirror CreateTweet (gqlFeatures()): the reply op IS CreateTweet so it
 	// needs the full set; like/retweet tolerate it (twitter-api-client sends the
