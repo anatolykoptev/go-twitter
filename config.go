@@ -24,6 +24,13 @@ type ClientConfig struct {
 	// BanCooldown is the soft-deactivation duration for banned/locked accounts.
 	BanCooldown time.Duration
 
+	// NonResponsiveCooldown is the BASE backoff for accounts that trip the
+	// consecutive-failure threshold against a transiently-broken endpoint. The
+	// effective cooldown grows per trip (x2, capped at 30m, +/-30% jitter) so a
+	// flapping upstream self-heals once it recovers instead of latching the pool
+	// permanently. Default: 5m.
+	NonResponsiveCooldown time.Duration
+
 	// CaptchaSolver is the optional CAPTCHA solver for locked accounts.
 	CaptchaSolver captcha.Solver
 
@@ -69,6 +76,9 @@ func (cfg *ClientConfig) defaults() {
 	}
 	if cfg.BanCooldown == 0 {
 		cfg.BanCooldown = 6 * time.Hour
+	}
+	if cfg.NonResponsiveCooldown == 0 {
+		cfg.NonResponsiveCooldown = 5 * time.Minute
 	}
 	if cfg.RateLimit.RequestsPerWindow == 0 {
 		cfg.RateLimit = ratelimit.DefaultConfig

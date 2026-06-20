@@ -166,12 +166,17 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 			slog.Warn("doGET non-200", slog.String("endpoint", endpoint), slog.Int("status", status), slog.String("body", truncateBytes(body, 500)))
 			if shouldDeactivate := acc.RecordFailure(); shouldDeactivate {
 				total, failed, consec := acc.Stats()
-				slog.Warn("account unhealthy, deactivating",
+				trip := acc.TripCount()
+				slog.Warn("account unhealthy, soft-deactivating with backoff",
 					slog.String("user", acc.Username),
 					slog.Int("total", total),
 					slog.Int("failed", failed),
-					slog.Int("consec", consec))
-				c.pool.DeactivateItem(acc)
+					slog.Int("consec", consec),
+					slog.Int("trip", trip))
+				// Transient endpoint failures must NOT latch the account permanently:
+				// use a growing-but-capped backoff so the pool self-heals once the
+				// upstream recovers. Permanent removal is reserved for errSuspended.
+				c.pool.SoftDeactivateBackoff(acc, c.nonResponsiveBackoff, trip)
 			}
 			return nil, nil, fmt.Errorf("%s HTTP %d: %s", endpoint, status, truncateBytes(body, 200))
 		}

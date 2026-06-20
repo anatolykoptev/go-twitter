@@ -1,5 +1,5 @@
-github.com/anatolykoptev/go-stealth v1.12.0 h1:bxvL0ctPxMbDFQgS2gpjZNbnEN+gH5cTSNTg8Lwyj8g=
-github.com/anatolykoptev/go-stealth v1.12.0/go.mod h1:4A6l+zJ0OEi9aPehdg4/4CospLDqFtW3bCgXdV4kwYE=
+github.com/anatolykoptev/go-stealth v1.16.0 h1:DLJ20OCb4h7MQuajeWVq5Ol7sNiH857Q8oF3Nr2YOBQ=
+github.com/anatolykoptev/go-stealth v1.16.0/go.mod h1:1Fevj8WfJDJ9h/t4Bl8MtHbuQ92ZPjIm8SR6/vnwJsQ=
 github.com/andybalholm/brotli v1.2.0 h1:ukwgCxwYrmACq68yiUqwIWnGY0cTPox/M94sVwToPjQ=
 github.com/andybalholm/brotli v1.2.0/go.mod h1:rzTDkvFWvIrjDXZHkuS16NPggd91W3kUSvPlQ1pLaKY=
 github.com/bdandy/go-errors v1.2.2 h1:WdFv/oukjTJCLa79UfkGmwX7ZxONAihKu4V0mLIs11Q=

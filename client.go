@@ -27,6 +27,7 @@ type Client struct {
 	xpffGen     *xpff.Generator
 	cfg         ClientConfig
 	reloginGate AutoReloginGate // nil = always allow
+	nonResponsiveBackoff pool.BackoffConfig // transient-failure backoff (base from cfg, x2, cap 30m)
 
 	mu                sync.Mutex
 	guestToken        string
@@ -74,6 +75,12 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		alertHook("xtid.init_failed", map[string]any{"error": err.Error()})
 	}
 
+	nonResponsiveBackoff := pool.BackoffConfig{
+		InitialWait: cfg.NonResponsiveCooldown,
+		MaxWait:     30 * time.Minute,
+		Multiplier:  2.0,
+		JitterPct:   0.3,
+	}
 	poolCfg := pool.Config{
 		AlertHook: alertHook,
 		ProxyBackoff: pool.BackoffConfig{
@@ -82,6 +89,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 			Multiplier:  2.0,
 			JitterPct:   0.3,
 		},
+		NonResponsiveBackoff: nonResponsiveBackoff,
 	}
 	p := pool.New(cfg.Accounts, poolCfg)
 
@@ -100,11 +108,12 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	xpffGen := xpff.New(xpffGuestID, defaultUserAgent)
 
 	c := &Client{
-		client:  bc,
-		pool:    p,
-		xtidMgr: mgr,
-		xpffGen: xpffGen,
-		cfg:     cfg,
+		client:               bc,
+		pool:                 p,
+		xtidMgr:              mgr,
+		xpffGen:              xpffGen,
+		cfg:                  cfg,
+		nonResponsiveBackoff: nonResponsiveBackoff,
 	}
 
 	for _, acc := range cfg.Accounts {
