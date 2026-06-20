@@ -122,6 +122,13 @@ func TestApplyEnvOverrides_AllEndpoints(t *testing.T) {
 		"Following":        "TWITTER_QID_FOLLOWING",
 		"Retweeters":       "TWITTER_QID_RETWEETERS",
 		"CreateTweet":      "TWITTER_QID_CREATE_TWEET",
+		// T5 read cluster.
+		"Bookmarks":                "TWITTER_QID_BOOKMARKS",
+		"HomeTimeline":             "TWITTER_QID_HOME_TIMELINE",
+		"HomeLatestTimeline":       "TWITTER_QID_HOME_LATEST_TIMELINE",
+		"ListLatestTweetsTimeline": "TWITTER_QID_LIST_LATEST_TWEETS_TIMELINE",
+		"CommunityTweetsTimeline":  "TWITTER_QID_COMMUNITY_TWEETS_TIMELINE",
+		"BlueVerifiedFollowers":    "TWITTER_QID_BLUE_VERIFIED_FOLLOWERS",
 	}
 
 	origIDs := make(map[string]string, len(cases))
@@ -143,6 +150,31 @@ func TestApplyEnvOverrides_AllEndpoints(t *testing.T) {
 		ep := Endpoints[name]
 		ep.ID = id
 		Endpoints[name] = ep
+	}
+}
+
+// TestRequiresAuth_ReadCluster proves every T5 read-cluster op requires a real
+// authenticated account (no guest fallback — the Mar-2026 lesson).
+func TestRequiresAuth_ReadCluster(t *testing.T) {
+	for _, op := range []string{
+		"Bookmarks", "HomeTimeline", "HomeLatestTimeline",
+		"ListLatestTweetsTimeline", "CommunityTweetsTimeline", "BlueVerifiedFollowers",
+	} {
+		assert.True(t, requiresAuth(op), "op %q must require auth (no guest fallback)", op)
+	}
+}
+
+// TestReadClusterEndpointsRegistered proves each new op has an Endpoints entry
+// (non-empty ID + matching Name) so EndpointURL resolves it.
+func TestReadClusterEndpointsRegistered(t *testing.T) {
+	for _, op := range []string{
+		"Bookmarks", "HomeTimeline", "HomeLatestTimeline",
+		"ListLatestTweetsTimeline", "CommunityTweetsTimeline", "BlueVerifiedFollowers",
+	} {
+		ep, ok := Endpoints[op]
+		assert.True(t, ok, "op %q must be registered in Endpoints", op)
+		assert.NotEmpty(t, ep.ID, "op %q must have a seed queryID", op)
+		assert.Equal(t, op, ep.Name, "op %q Name must match its key", op)
 	}
 }
 

@@ -59,6 +59,20 @@ var Endpoints = map[string]Endpoint{
 	"TweetDetail":      {ID: "VWFGPVAGkZMGRKGe3GFFnA", Name: "TweetDetail", Features: gqlFeatures()},
 	"Retweeters":       {ID: "0BoJlKAxoNPQUHRftlwZ2w", Name: "Retweeters", Features: gqlFeatures()},
 	"CreateTweet":      {ID: "7TKRKCPuAGsmYde0CudbVg", Name: "CreateTweet", Features: gqlFeatures()},
+
+	// T5 read cluster. queryIDs below are SEEDS — auto-maintained by gql-sync once
+	// the weekly walk covers them (route-split chunks for the home/list/community
+	// ops are not reachable from the unauthenticated x.com/home warm page, so the
+	// extractor cannot seed them today). Sources cited per op; env override
+	// (TWITTER_QID_*) is the always-on operator hotfix.
+	"Bookmarks": {ID: "i8QZ1qqy36ffA3bxfTaf7w", Name: "Bookmarks", Features: gqlFeatures()}, // gql-sync live 2026-06-19 + vladkens/twscrape
+	// HomeTimeline / HomeLatestTimeline seeds from trevorhobenshield/twitter-api-client.
+	"HomeTimeline":       {ID: "HCosKfLNW1AcOo3la3mMgg", Name: "HomeTimeline", Features: gqlFeatures()},       // seed — auto-maintained by gql-sync
+	"HomeLatestTimeline": {ID: "zhX91JE87mWvfprhYE97xA", Name: "HomeLatestTimeline", Features: gqlFeatures()}, // seed — auto-maintained by gql-sync
+	// List / Community / verified-followers seeds from vladkens/twscrape.
+	"ListLatestTweetsTimeline": {ID: "27HKUy8ulrflZ9Tole038g", Name: "ListLatestTweetsTimeline", Features: gqlFeatures()}, // seed — auto-maintained by gql-sync
+	"CommunityTweetsTimeline":  {ID: "Mvs5UOOEkpXVMDZtUcxR-Q", Name: "CommunityTweetsTimeline", Features: gqlFeatures()},  // seed — auto-maintained by gql-sync
+	"BlueVerifiedFollowers":    {ID: "OBBd6Dw-4qEYbsu3hGkyxg", Name: "BlueVerifiedFollowers", Features: gqlFeatures()},    // seed — auto-maintained by gql-sync
 }
 
 // envOverrides maps endpoint names to their env var names for queryId overrides.
@@ -71,6 +85,14 @@ var envOverrides = map[string]string{
 	"Following":        "TWITTER_QID_FOLLOWING",
 	"Retweeters":       "TWITTER_QID_RETWEETERS",
 	"CreateTweet":      "TWITTER_QID_CREATE_TWEET",
+
+	// T5 read cluster.
+	"Bookmarks":                "TWITTER_QID_BOOKMARKS",
+	"HomeTimeline":             "TWITTER_QID_HOME_TIMELINE",
+	"HomeLatestTimeline":       "TWITTER_QID_HOME_LATEST_TIMELINE",
+	"ListLatestTweetsTimeline": "TWITTER_QID_LIST_LATEST_TWEETS_TIMELINE",
+	"CommunityTweetsTimeline":  "TWITTER_QID_COMMUNITY_TWEETS_TIMELINE",
+	"BlueVerifiedFollowers":    "TWITTER_QID_BLUE_VERIFIED_FOLLOWERS",
 }
 
 // ApplyEnvOverrides reads TWITTER_QID_* env vars and overrides queryIds in Endpoints.
@@ -127,6 +149,16 @@ func gqlFeatures() map[string]any {
 		return out
 	}
 	return committedFeatures()
+}
+
+// bookmarkFeatures returns the shared baseline feature set plus the
+// graphql_timeline_v2_bookmark_timeline flag the Bookmarks op requires (without
+// it x.com returns the legacy bookmark shape / a 400). gqlFeatures() already
+// returns a fresh copy, so mutating it here never corrupts the shared baseline.
+func bookmarkFeatures() map[string]any {
+	f := gqlFeatures()
+	f["graphql_timeline_v2_bookmark_timeline"] = true
+	return f
 }
 
 // committedFeatures is the hand-maintained baseline feature set, used when no

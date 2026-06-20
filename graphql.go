@@ -271,6 +271,165 @@ func (c *Client) CreateTweet(ctx context.Context, acc *Account, text string) (st
 	return parseCreateTweet(body)
 }
 
+// tweetPageSize bounds the per-request count for paginated tweet-timeline reads.
+// Twitter caps these server-side; 20 mirrors fetchTweetUserList's page size.
+const tweetPageSize = 20
+
+// fetchTweetTimeline is the generic cursor-paginated GET fetcher for tweet
+// timelines (bookmarks, list, community). It mirrors fetchUserList: build
+// variables per page, GET via addGraphQLParams+doGET, parse a batch + bottom
+// cursor, loop until the cursor is empty, a page is empty, or maxCount is hit.
+// varsFn receives the per-page count and current cursor and returns the variables
+// + feature map for that request.
+func (c *Client) fetchTweetTimeline(
+	ctx context.Context,
+	operation string,
+	maxCount int,
+	varsFn func(count int, cursor string) (variables, features map[string]any),
+	parseFn func(body []byte) ([]*Tweet, string, error),
+) ([]*Tweet, error) {
+	var tweets []*Tweet
+	var cursor string
+
+	for {
+		select {
+		case <-ctx.Done():
+			return tweets, ctx.Err()
+		default:
+		}
+
+		variables, features := varsFn(min(tweetPageSize, maxCount-len(tweets)), cursor)
+
+		url, err := EndpointURL(operation)
+		if err != nil {
+			return tweets, err
+		}
+		url = addGraphQLParams(url, variables, features)
+
+		body, _, err := c.doGET(ctx, operation, url)
+		if err != nil {
+			return tweets, fmt.Errorf("%s: %w", operation, err)
+		}
+
+		batch, nextCursor, err := parseFn(body)
+		if err != nil {
+			return tweets, fmt.Errorf("parse %s: %w", operation, err)
+		}
+		tweets = append(tweets, batch...)
+
+		// Stop on no cursor, an empty page (defends against a stuck cursor), or
+		// reaching the requested ceiling.
+		if nextCursor == "" || len(batch) == 0 || len(tweets) >= maxCount {
+			break
+		}
+		cursor = nextCursor
+	}
+	return tweets, nil
+}
+
+// GetBookmarks fetches the authenticated pool account's bookmarked tweets
+// (paginated up to maxCount).
+func (c *Client) GetBookmarks(ctx context.Context, maxCount int) ([]*Tweet, error) {
+	return c.fetchTweetTimeline(ctx, "Bookmarks", maxCount,
+		func(count int, cursor string) (map[string]any, map[string]any) {
+			variables := map[string]any{
+				"count":                  count,
+				"includePromotedContent": false,
+			}
+			if cursor != "" {
+				variables["cursor"] = cursor
+			}
+			return variables, bookmarkFeatures()
+		}, parseBookmarks)
+}
+
+// GetListTweets fetches the latest tweets in a list (paginated up to maxCount).
+func (c *Client) GetListTweets(ctx context.Context, listID string, maxCount int) ([]*Tweet, error) {
+	return c.fetchTweetTimeline(ctx, "ListLatestTweetsTimeline", maxCount,
+		func(count int, cursor string) (map[string]any, map[string]any) {
+			variables := map[string]any{
+				"listId": listID,
+				"count":  count,
+			}
+			if cursor != "" {
+				variables["cursor"] = cursor
+			}
+			return variables, Endpoints["ListLatestTweetsTimeline"].Features
+		}, parseListTweets)
+}
+
+// GetCommunityTweets fetches the latest tweets in a community (paginated up to maxCount).
+func (c *Client) GetCommunityTweets(ctx context.Context, communityID string, maxCount int) ([]*Tweet, error) {
+	return c.fetchTweetTimeline(ctx, "CommunityTweetsTimeline", maxCount,
+		func(count int, cursor string) (map[string]any, map[string]any) {
+			variables := map[string]any{
+				"communityId":   communityID,
+				"count":         count,
+				"withCommunity": true,
+				"rankingMode":   "Relevance",
+			}
+			if cursor != "" {
+				variables["cursor"] = cursor
+			}
+			return variables, Endpoints["CommunityTweetsTimeline"].Features
+		}, parseCommunityTweets)
+}
+
+// GetVerifiedFollowers fetches a user's blue-verified followers (paginated up to
+// maxCount). The response shares the followers shape
+// (data.user.result.timeline.timeline), so it reuses the existing fetchUserList
+// helper + parseUserList parser.
+func (c *Client) GetVerifiedFollowers(ctx context.Context, userID string, maxCount int) ([]*TwitterUser, error) {
+	return c.fetchUserList(ctx, "BlueVerifiedFollowers", userID, maxCount)
+}
+
+// GetHomeTimeline fetches the algorithmic "For you" home timeline.
+// POST (pool), mirroring SearchTimeline.
+func (c *Client) GetHomeTimeline(ctx context.Context, count int) ([]*Tweet, error) {
+	return c.fetchHomeTimeline(ctx, "HomeTimeline", count)
+}
+
+// GetHomeLatestTimeline fetches the reverse-chronological "Following" home timeline.
+// POST (pool), mirroring SearchTimeline.
+func (c *Client) GetHomeLatestTimeline(ctx context.Context, count int) ([]*Tweet, error) {
+	return c.fetchHomeTimeline(ctx, "HomeLatestTimeline", count)
+}
+
+// fetchHomeTimeline issues a single POST for a home timeline op and parses the
+// result. Both home ops share the data.home.home_timeline_urt root.
+func (c *Client) fetchHomeTimeline(ctx context.Context, operation string, count int) ([]*Tweet, error) {
+	variables := map[string]any{
+		"count":                  count,
+		"includePromotedContent": false,
+		"latestControlAvailable": true,
+		"withCommunity":          true,
+		"seenTweetIds":           []any{},
+	}
+	if operation == "HomeTimeline" {
+		variables["requestContext"] = "launch"
+	}
+
+	ep := Endpoints[operation]
+	// queryId omitted: the op is resolved by the URL path, mirroring SearchTimeline.
+	payload, err := json.Marshal(map[string]any{
+		"variables": variables,
+		"features":  ep.Features,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("%s: marshal payload: %w", operation, err)
+	}
+
+	body, _, err := c.doPoolPOST(ctx, operation, ep.URL(), payload)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", operation, err)
+	}
+	tweets, _, err := parseHomeTimeline(body)
+	if err != nil {
+		return nil, fmt.Errorf("parse %s: %w", operation, err)
+	}
+	return tweets, nil
+}
+
 // PostWithAccount posts a tweet from a named account (by username).
 // Returns the tweet ID on success.
 func (c *Client) PostWithAccount(ctx context.Context, username, text string) (string, error) {
