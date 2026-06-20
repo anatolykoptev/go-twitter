@@ -239,13 +239,17 @@ func writeGenerated(cfg config, ids map[string]string) error {
 func writeFeatures(cfg config, features map[string]any) error {
 	target := filepath.Join(cfg.out, featuresFileName)
 
+	// The on-disk baseline (the prior features_gen.go, == committedFeatures()
+	// verbatim) is the COMMITTED-VALUE authority: known flags keep these values,
+	// the warm-page guest defaults are emitted only as comments. A vanished
+	// baseline flag surfaces as // REMOVED.
 	var baseline map[string]bool
 	if existing, readErr := os.ReadFile(target); readErr == nil {
 		baseline = parseFeatureBaseline(existing)
 	}
 	removed := removedFeatures(features, baseline)
 
-	content, err := renderFeatures(features, removed, cfg.date)
+	content, err := renderFeatures(features, baseline, removed, cfg.date)
 	if err != nil {
 		return err
 	}

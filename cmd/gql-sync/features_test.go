@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"regexp"
 	"testing"
 )
 
@@ -81,15 +82,32 @@ var committedBaseline = map[string]bool{
 	"view_counts_everywhere_api_enabled":                                      true,
 }
 
-// TestExtractFeatures_RealFixture proves the extractor recovers the {flag:bool}
-// map from the REAL captured bundle + warm page — NOT a synthetic fixture. It
-// asserts the exact bool default for flags whose live default DIFFERS from the
-// committed baseline, the precise surprise a synthetic fixture would have hidden.
+// guestFalseCommittedTrue are the flags whose warm-page GUEST default (false)
+// differs from the committed AUTHED value (true). Baking the guest value would
+// flip them to false and HTTP 400 every authenticated call — the precise bug the
+// review caught. The redesign keeps committed values; the guest signal survives
+// only as a comment.
+var guestFalseCommittedTrue = []string{
+	"longform_notetweets_inline_media_enabled",
+	"post_ctas_fetch_enabled",
+	"responsive_web_grok_analyze_button_fetch_trends_enabled",
+	"responsive_web_grok_analyze_post_followups_enabled",
+	"responsive_web_profile_redirect_enabled",
+	"rweb_tipjar_consumption_enabled",
+	"rweb_video_screen_enabled",
+}
+
+// TestExtractFeatures_RealFixture proves the NAMES-ONLY / committed-values-win
+// design over the REAL captured bundle + warm page (NOT a synthetic fixture).
+// Extraction sees the guest defaults (the 7 flags are false on the logged-out
+// warm page); the EMITTER keeps the committed authed values (true) and demotes
+// the guest signal to a trailing comment. New flags are surfaced, not silently
+// adopted; an undefaulted bundle name is skipped, not invented.
 func TestExtractFeatures_RealFixture(t *testing.T) {
 	got, noDefault := realExtract(t)
 
-	// Every committed flag the bundle still declares must be recovered.
-	for name, want := range committedBaseline {
+	// Every committed flag the bundle still declares must be recovered (name set).
+	for name := range committedBaseline {
 		if name == "responsive_web_graphql_exclude_directive_enabled" {
 			continue // genuinely absent from the bundle — see TestFeatures_RemovedSurfaced
 		}
@@ -98,32 +116,45 @@ func TestExtractFeatures_RealFixture(t *testing.T) {
 			t.Errorf("committed flag %q not recovered from real fixture", name)
 			continue
 		}
-		_ = want // committed value is NOT asserted equal — live defaults legitimately differ
 		if _, isBool := v.(bool); !isBool {
 			t.Errorf("flag %q: non-bool value %v", name, v)
 		}
 	}
 
-	// Live defaults that DIFFER from the committed baseline (the human-eyeball set).
-	liveFalse := []string{
-		"longform_notetweets_inline_media_enabled",
-		"post_ctas_fetch_enabled",
-		"responsive_web_grok_analyze_button_fetch_trends_enabled",
-		"responsive_web_grok_analyze_post_followups_enabled",
-		"responsive_web_profile_redirect_enabled",
-		"rweb_tipjar_consumption_enabled",
-		"rweb_video_screen_enabled",
-	}
-	for _, name := range liveFalse {
+	// EXTRACTION sees the guest false for the 7 — that is the flip danger.
+	for _, name := range guestFalseCommittedTrue {
 		if got[name] != false {
-			t.Errorf("flag %q: live default = %v, want false (committed had true)", name, got[name])
+			t.Errorf("flag %q: extracted guest default = %v, want false", name, got[name])
 		}
 	}
 
-	// Newly added flags the bundle declares that the committed baseline lacks.
+	// EMIT with the committed baseline: committed values WIN, so the 7 stay true,
+	// and each carries the warm-page guest-default comment.
+	removed := removedFeatures(got, committedBaseline)
+	out, err := renderFeatures(got, committedBaseline, removed, "")
+	if err != nil {
+		t.Fatalf("renderFeatures: %v", err)
+	}
+	live := parseFeatureBaseline(out)
+	for _, name := range guestFalseCommittedTrue {
+		if live[name] != true {
+			t.Errorf("flag %q: emitted = %v, want true (committed wins over guest false)", name, live[name])
+		}
+		lineRe := regexp.MustCompile(regexp.QuoteMeta(`"`+name+`":`) + `\s+true,\s+// warm-page guest default: false`)
+		if !lineRe.Match(out) {
+			t.Errorf("flag %q: missing `true, // warm-page guest default: false` line\n%s", name, out)
+		}
+	}
+
+	// Newly added flags the bundle declares that the committed baseline lacks are
+	// SURFACED with the NEW comment, not silently adopted.
 	for _, name := range []string{"rweb_cashtags_enabled", "rweb_cashtags_composer_attachment_enabled"} {
 		if _, ok := got[name]; !ok {
 			t.Errorf("new bundle flag %q not extracted", name)
+		}
+		newRe := regexp.MustCompile(regexp.QuoteMeta(`"`+name+`":`) + `.*` + regexp.QuoteMeta(newFeatureComment))
+		if !newRe.Match(out) {
+			t.Errorf("new flag %q missing the NEW verification comment\n%s", name, out)
 		}
 	}
 
@@ -149,21 +180,23 @@ func TestParseFeatureDefaults_IgnoresNonBool(t *testing.T) {
 	}
 }
 
-// TestFeatures_DiffMerge proves the union semantics: extracted defaults win on
-// overlap, a new extracted flag is added, and a baseline flag absent from the
-// extraction is surfaced as REMOVED (never silently dropped).
+// TestFeatures_DiffMerge proves the committed-values-win semantics: a flag in
+// both baseline and extraction keeps the COMMITTED (baseline) value while the
+// guest default is demoted to a comment; an extraction-only flag is added with
+// the NEW comment; a baseline flag absent from the extraction surfaces as
+// REMOVED (never silently dropped).
 func TestFeatures_DiffMerge(t *testing.T) {
 	baseline := map[string]bool{
-		"shared_flag":   true,  // present in both — extracted value wins
+		"shared_flag":   true,  // present in both — committed (baseline) value wins
 		"removed_flag":  false, // baseline only — must surface as REMOVED
 		"another_kept":  true,
 		"another_kept2": false,
 	}
 	extracted := map[string]any{
-		"shared_flag":   false, // flipped vs baseline
+		"shared_flag":   false, // guest default differs — must NOT win
 		"another_kept":  true,
 		"another_kept2": false,
-		"new_flag":      true, // extraction only — added
+		"new_flag":      true, // extraction only — added, flagged NEW
 	}
 
 	removed := removedFeatures(extracted, baseline)
@@ -175,24 +208,34 @@ func TestFeatures_DiffMerge(t *testing.T) {
 		t.Fatal("removed flag must not be a live entry")
 	}
 
-	out, err := renderFeatures(extracted, removed, "")
+	out, err := renderFeatures(extracted, baseline, removed, "")
 	if err != nil {
 		t.Fatalf("renderFeatures: %v", err)
 	}
 	src := string(out)
 
-	// Parse the live map back: extracted defaults win, new flag added, removed
-	// flag is NOT a live entry. (gofmt column-aligns, so verify via the parser
-	// rather than brittle single-space substring matches.)
+	// Parse the live map back: committed value wins on overlap, new flag added,
+	// removed flag is NOT a live entry. (gofmt column-aligns, so verify via the
+	// parser rather than brittle single-space substring matches.)
 	live := parseFeatureBaseline(out)
-	if live["shared_flag"] != false {
-		t.Errorf("shared_flag live = %v, want false (extracted wins)", live["shared_flag"])
+	if live["shared_flag"] != true {
+		t.Errorf("shared_flag live = %v, want true (committed wins over guest false)", live["shared_flag"])
 	}
 	if live["new_flag"] != true {
 		t.Errorf("new_flag missing/false in live map: %v", live)
 	}
 	if _, ok := live["removed_flag"]; ok {
 		t.Errorf("removed flag leaked as a live map entry\n%s", src)
+	}
+
+	// shared_flag keeps committed true but shows the guest default as a comment.
+	sharedRe := regexp.MustCompile(`"shared_flag":\s+true,\s+// warm-page guest default: false`)
+	if !sharedRe.Match(out) {
+		t.Errorf("shared_flag missing committed-true + guest-default comment\n%s", src)
+	}
+	// new_flag carries the NEW verification comment.
+	if !bytes.Contains(out, []byte(newFeatureComment)) {
+		t.Errorf("new_flag missing the NEW verification comment\n%s", src)
 	}
 
 	// REMOVED flag surfaces only as a comment line.
@@ -218,8 +261,9 @@ func TestFeatures_RemovedSurfaced(t *testing.T) {
 // emitter's own output and ignores the REMOVED comment lines.
 func TestParseFeatureBaseline_RoundTrip(t *testing.T) {
 	extracted := map[string]any{"a_enabled": true, "b_enabled": false}
+	committed := map[string]bool{"a_enabled": true, "b_enabled": false}
 	removed := map[string]bool{"gone_enabled": true}
-	out, err := renderFeatures(extracted, removed, "")
+	out, err := renderFeatures(extracted, committed, removed, "")
 	if err != nil {
 		t.Fatalf("renderFeatures: %v", err)
 	}
@@ -237,7 +281,7 @@ func TestParseFeatureBaseline_RoundTrip(t *testing.T) {
 func TestRenderFeatures_Golden(t *testing.T) {
 	extracted, _ := realExtract(t)
 	removed := removedFeatures(extracted, committedBaseline)
-	got, err := renderFeatures(extracted, removed, "")
+	got, err := renderFeatures(extracted, committedBaseline, removed, "")
 	if err != nil {
 		t.Fatalf("renderFeatures: %v", err)
 	}
@@ -259,6 +303,9 @@ func TestRenderFeatures_Golden(t *testing.T) {
 
 // TestRun_RealRefreshesBoth proves acceptance #1: a single gql-sync invocation
 // over the real fixtures refreshes BOTH queryids_gen.go AND features_gen.go.
+// The empty tempdir means NO committed baseline, so every flag is NEW and adopts
+// its warm-page guest default (the no-authority path); the committed-wins +
+// REMOVED end-to-end path is covered by TestRun_SeededBaselineCommittedWins.
 func TestRun_RealRefreshesBoth(t *testing.T) {
 	out := t.TempDir()
 	if err := run([]string{"-fixtures", filepath.Join("testdata", "real"), "-out", out}); err != nil {
@@ -281,9 +328,66 @@ func TestRun_RealRefreshesBoth(t *testing.T) {
 	if len(live) != 38 {
 		t.Errorf("features_gen.go has %d flags, want 38", len(live))
 	}
+	// No committed baseline → guest defaults are adopted (every flag NEW).
 	if live["view_counts_everywhere_api_enabled"] != true ||
 		live["verified_phone_label_enabled"] != false {
-		t.Errorf("unexpected live defaults: %v", live)
+		t.Errorf("unexpected guest defaults: %v", live)
+	}
+	if !bytes.Contains(feats, []byte(newFeatureComment)) {
+		t.Errorf("no-baseline run must flag flags NEW:\n%s", feats)
+	}
+}
+
+// TestRun_SeededBaselineCommittedWins proves the committed-wins + REMOVED path
+// end-to-end through run(): a SEEDED baseline features_gen.go (the committed
+// authority, containing the 7 guest-false flags as true plus a legacy flag the
+// fixture no longer declares) makes run() keep the committed values, demote the
+// guest defaults to comments, and surface the legacy flag as // REMOVED.
+func TestRun_SeededBaselineCommittedWins(t *testing.T) {
+	out := t.TempDir()
+
+	// Seed a baseline that committedFeatures() would carry: the 7 flags true, the
+	// new-cashtag flags absent (so run surfaces them NEW), and a legacy flag the
+	// bundle no longer declares (so run surfaces it REMOVED).
+	var seed bytes.Buffer
+	seed.WriteString("// Code generated by cmd/gql-sync; DO NOT EDIT.\n\npackage twitter\n\nvar generatedFeatures = map[string]any{\n")
+	for _, name := range guestFalseCommittedTrue {
+		seed.WriteString("\t\"" + name + "\": true,\n")
+	}
+	seed.WriteString("\t\"view_counts_everywhere_api_enabled\": true,\n")
+	seed.WriteString("\t\"legacy_only_flag\": true,\n") // absent from the fixture → REMOVED
+	seed.WriteString("}\n")
+	if err := os.WriteFile(filepath.Join(out, featuresFileName), seed.Bytes(), 0o644); err != nil {
+		t.Fatalf("seed baseline: %v", err)
+	}
+
+	if err := run([]string{"-fixtures", filepath.Join("testdata", "real"), "-out", out}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	feats, err := os.ReadFile(filepath.Join(out, featuresFileName))
+	if err != nil {
+		t.Fatalf("features_gen.go not written: %v", err)
+	}
+	live := parseFeatureBaseline(feats)
+
+	// Committed values win: the 7 stay true despite the guest false.
+	for _, name := range guestFalseCommittedTrue {
+		if live[name] != true {
+			t.Errorf("flag %q: regenerated = %v, want true (committed baseline wins)", name, live[name])
+		}
+		lineRe := regexp.MustCompile(regexp.QuoteMeta(`"`+name+`":`) + `\s+true,\s+// warm-page guest default: false`)
+		if !lineRe.Match(feats) {
+			t.Errorf("flag %q: missing committed-true + guest-default comment\n%s", name, feats)
+		}
+	}
+
+	// The legacy flag the bundle dropped surfaces as REMOVED, not a live entry.
+	if _, ok := live["legacy_only_flag"]; ok {
+		t.Errorf("legacy_only_flag leaked as a live entry instead of REMOVED\n%s", feats)
+	}
+	if !bytes.Contains(feats, []byte("//\tlegacy_only_flag (was true)")) {
+		t.Errorf("legacy_only_flag not surfaced as REMOVED\n%s", feats)
 	}
 }
 
