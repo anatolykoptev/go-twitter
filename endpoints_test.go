@@ -421,3 +421,19 @@ func TestFetchUserListSendsGrokTranslatedBio(t *testing.T) {
 		t.Error("withGrokTranslatedBio must be scoped to Followers/Following only (BlueVerifiedFollowers must keep its verified request shape)")
 	}
 }
+
+// TestFetchUserListFollowersFollowingUsePOST guards the GET→POST migration: X
+// migrated the Followers/Following social-graph reads to POST (2026-06-20; same
+// pattern as SearchTimeline, docs/2026-03-31-twitter-searchtimeline-404.md). A
+// revert to doGET passes every other unit test and only surfaces as a live
+// bare-404, so assert the POST branch stays in source.
+func TestFetchUserListFollowersFollowingUsePOST(t *testing.T) {
+	src, err := os.ReadFile("graphql.go")
+	if err != nil {
+		t.Fatalf("read graphql.go: %v", err)
+	}
+	text := string(src)
+	if !strings.Contains(text, "doPoolPOST(ctx, operation, url, payload)") {
+		t.Error("Followers/Following must POST via doPoolPOST — the GET→POST migration appears reverted (live x.com returns bare 404 on GET)")
+	}
+}
