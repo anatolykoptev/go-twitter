@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -166,8 +167,10 @@ func parseSearchTimeline(body []byte) ([]*Tweet, error) {
 
 // timelineTweetParse unmarshals a GraphQL envelope, surfaces API errors, decodes
 // the op-specific root via rootFn, and returns the tweets + bottom cursor. When
-// rootFn finds no instructions it falls back to the recursive scan.
-func timelineTweetParse(body []byte, rootFn func(json.RawMessage) timelineObj) ([]*Tweet, string, error) {
+// rootFn finds no instructions it falls back to the recursive scan and logs a
+// warning tagged with op, so a rotated/broken typed root key is observable (the
+// happy typed-path hit stays silent — no log noise).
+func timelineTweetParse(body []byte, op string, rootFn func(json.RawMessage) timelineObj) ([]*Tweet, string, error) {
 	var env struct {
 		Data   json.RawMessage `json:"data"`
 		Errors []struct {
@@ -182,6 +185,7 @@ func timelineTweetParse(body []byte, rootFn func(json.RawMessage) timelineObj) (
 	}
 	tl := rootFn(env.Data)
 	if len(tl.Instructions) == 0 {
+		slog.Warn("timeline typed root missed; used recursive fallback", slog.String("op", op))
 		tl = findTimelineInstructions(env.Data)
 	}
 	tweets, err := extractTweetsFromTimeline(tl, "")
@@ -196,7 +200,7 @@ func timelineTweetParse(body []byte, rootFn func(json.RawMessage) timelineObj) (
 // imperatrona/twitter-scraper (bookmark_timeline_v2 struct) + twscrape's
 // graphql_timeline_v2_bookmark_timeline feature flag.
 func parseBookmarks(body []byte) ([]*Tweet, string, error) {
-	return timelineTweetParse(body, func(data json.RawMessage) timelineObj {
+	return timelineTweetParse(body, "Bookmarks", func(data json.RawMessage) timelineObj {
 		var r struct {
 			BookmarkTimeline struct {
 				Timeline timelineObj `json:"timeline"`
@@ -211,7 +215,7 @@ func parseBookmarks(body []byte) ([]*Tweet, string, error) {
 // Root: data.home.home_timeline_urt.instructions — canonical home-timeline shape
 // (trevorhobenshield/twitter-api-client home_timeline_urt).
 func parseHomeTimeline(body []byte) ([]*Tweet, string, error) {
-	return timelineTweetParse(body, func(data json.RawMessage) timelineObj {
+	return timelineTweetParse(body, "HomeTimeline", func(data json.RawMessage) timelineObj {
 		var r struct {
 			Home struct {
 				HomeTimelineURT timelineObj `json:"home_timeline_urt"`
@@ -226,7 +230,7 @@ func parseHomeTimeline(body []byte) ([]*Tweet, string, error) {
 // Root: data.list.tweets_timeline.timeline.instructions — canonical list shape
 // (vladkens/twscrape ListLatestTweetsTimeline).
 func parseListTweets(body []byte) ([]*Tweet, string, error) {
-	return timelineTweetParse(body, func(data json.RawMessage) timelineObj {
+	return timelineTweetParse(body, "ListLatestTweetsTimeline", func(data json.RawMessage) timelineObj {
 		var r struct {
 			List struct {
 				TweetsTimeline struct {
@@ -247,7 +251,7 @@ func parseListTweets(body []byte) ([]*Tweet, string, error) {
 // recursive fallback in timelineTweetParse keeps the parser working if the exact
 // wrapper key differs at runtime.
 func parseCommunityTweets(body []byte) ([]*Tweet, string, error) {
-	return timelineTweetParse(body, func(data json.RawMessage) timelineObj {
+	return timelineTweetParse(body, "CommunityTweetsTimeline", func(data json.RawMessage) timelineObj {
 		var r struct {
 			CommunityResults struct {
 				Result struct {
@@ -302,31 +306,70 @@ func findTimelineInstructions(data json.RawMessage) timelineObj {
 	return tl
 }
 
-// findInstructionsNode walks decoded JSON for the first object with a non-empty
-// "instructions" array, returning that object re-marshaled to JSON.
+// findInstructionsNode walks decoded JSON and returns the instructions-bearing
+// object holding the MOST total entries, re-marshaled to JSON.
+//
+// A first-match scan over a map[string]any is non-deterministic: Go randomizes
+// map iteration order, so when a response carries ≥2 sibling objects each owning
+// an "instructions" array (a primary timeline plus a sidebar/promoted/module
+// block), first-match could return any of them — and the wrong, smaller one.
+// Instead, collect every candidate and pick the one whose instructions hold the
+// most entries (the real timeline always dominates a sidebar/promoted block).
+// Maps are traversed in sorted-key order and ties use strict ">", so the first
+// candidate in sorted-key order wins a tie — fully deterministic.
 func findInstructionsNode(v any) (json.RawMessage, bool) {
-	switch t := v.(type) {
-	case map[string]any:
-		if instr, ok := t["instructions"]; ok {
-			if arr, ok := instr.([]any); ok && len(arr) > 0 {
-				if raw, err := json.Marshal(t); err == nil {
-					return raw, true
+	var best json.RawMessage
+	bestCount := -1
+
+	var walk func(any)
+	walk = func(v any) {
+		switch t := v.(type) {
+		case map[string]any:
+			if instr, ok := t["instructions"].([]any); ok && len(instr) > 0 {
+				if n := countInstructionEntries(instr); n > bestCount {
+					if raw, err := json.Marshal(t); err == nil {
+						best = raw
+						bestCount = n
+					}
 				}
 			}
-		}
-		for _, child := range t {
-			if raw, ok := findInstructionsNode(child); ok {
-				return raw, true
+			keys := make([]string, 0, len(t))
+			for k := range t {
+				keys = append(keys, k)
 			}
-		}
-	case []any:
-		for _, child := range t {
-			if raw, ok := findInstructionsNode(child); ok {
-				return raw, true
+			sort.Strings(keys)
+			for _, k := range keys {
+				walk(t[k])
+			}
+		case []any:
+			for _, child := range t {
+				walk(child)
 			}
 		}
 	}
-	return nil, false
+	walk(v)
+	return best, bestCount >= 0
+}
+
+// countInstructionEntries totals the timeline entries across a decoded
+// "instructions" array. The real timeline holds far more entries than a
+// sidebar/promoted block, so this score drives largest-wins selection in
+// findInstructionsNode.
+func countInstructionEntries(instructions []any) int {
+	total := 0
+	for _, instr := range instructions {
+		m, ok := instr.(map[string]any)
+		if !ok {
+			continue
+		}
+		if entries, ok := m["entries"].([]any); ok {
+			total += len(entries)
+		}
+		if _, ok := m["entry"]; ok {
+			total++
+		}
+	}
+	return total
 }
 
 // --- Timeline types ---

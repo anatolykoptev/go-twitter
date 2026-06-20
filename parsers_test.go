@@ -1,6 +1,9 @@
 package twitter
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 func TestParseUserByScreenName(t *testing.T) {
 	body := `{
@@ -232,6 +235,114 @@ func TestParseCommunityTweets_RecursiveFallback(t *testing.T) {
 	body := `{"data":{"communityResults":{"result":{"some_other_wrapper_key":{"timeline":{` + tweetInstructions + `}}}}}}`
 	tweets, cursor, err := parseCommunityTweets([]byte(body))
 	assertOneTweetWithCursor(t, tweets, cursor, err)
+}
+
+// --- Discriminating fixtures (Fix 3) ---
+//
+// tweetEntryJSON builds a single TimelineTweet entry carrying rest_id.
+func tweetEntryJSON(id string) string {
+	return `{"entryId":"tweet-` + id + `","content":{"entryType":"TimelineTimelineItem","__typename":"TimelineTimelineItem","itemContent":{"__typename":"TimelineTweet","tweet_results":{"result":{"__typename":"Tweet","rest_id":"` + id + `","legacy":{"full_text":"x","user_id_str":"1"}}}}}}`
+}
+
+// instrBlockJSON wraps the given entries in a single TimelineAddEntries
+// instruction, emitting the inner `"instructions": [...]` fragment.
+func instrBlockJSON(entries ...string) string {
+	out := `"instructions":[{"type":"TimelineAddEntries","entries":[`
+	for i, e := range entries {
+		if i > 0 {
+			out += ","
+		}
+		out += e
+	}
+	return out + `]}]`
+}
+
+// assertTypedTweet asserts the parser chose the typed path: exactly the right
+// tweet ("123") and never the decoy ("999"). It FAILS if the typed root key is
+// broken, because the recursive fallback would then surface the larger decoy
+// block instead.
+func assertTypedTweet(t *testing.T, tweets []*Tweet, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tw := range tweets {
+		if tw.ID == "999" {
+			t.Fatalf("decoy tweet 999 returned — typed root key broke, fell back to recursive scan")
+		}
+	}
+	if len(tweets) != 1 || tweets[0].ID != "123" {
+		t.Fatalf("expected exactly typed tweet 123, got %d tweets %v", len(tweets), tweetIDs(tweets))
+	}
+}
+
+func tweetIDs(tweets []*Tweet) []string {
+	ids := make([]string, len(tweets))
+	for i, tw := range tweets {
+		ids[i] = tw.ID
+	}
+	return ids
+}
+
+// decoyBlock is a 2-entry instructions block (rest_id 999, 998) placed under a
+// non-typed key. It out-sizes the 1-entry typed block, so if the typed key were
+// broken the recursive fallback (largest-wins) would deterministically pick it —
+// making every discriminating test below truly fail on a broken root key.
+var decoyBlock = `"decoy_module":{` + instrBlockJSON(tweetEntryJSON("999"), tweetEntryJSON("998")) + `}`
+
+// TestParseBookmarks_DiscriminatesRoot pins data.bookmark_timeline_v2.timeline:
+// the typed path must win over a larger decoy block under data.
+func TestParseBookmarks_DiscriminatesRoot(t *testing.T) {
+	body := `{"data":{"bookmark_timeline_v2":{"timeline":{` + instrBlockJSON(tweetEntryJSON("123")) + `}},` + decoyBlock + `}}`
+	tweets, _, err := parseBookmarks([]byte(body))
+	assertTypedTweet(t, tweets, err)
+}
+
+// TestParseHomeTimeline_DiscriminatesRoot pins data.home.home_timeline_urt.
+func TestParseHomeTimeline_DiscriminatesRoot(t *testing.T) {
+	body := `{"data":{"home":{"home_timeline_urt":{` + instrBlockJSON(tweetEntryJSON("123")) + `}},` + decoyBlock + `}}`
+	tweets, _, err := parseHomeTimeline([]byte(body))
+	assertTypedTweet(t, tweets, err)
+}
+
+// TestParseListTweets_DiscriminatesRoot pins data.list.tweets_timeline.timeline.
+func TestParseListTweets_DiscriminatesRoot(t *testing.T) {
+	body := `{"data":{"list":{"tweets_timeline":{"timeline":{` + instrBlockJSON(tweetEntryJSON("123")) + `}}},` + decoyBlock + `}}`
+	tweets, _, err := parseListTweets([]byte(body))
+	assertTypedTweet(t, tweets, err)
+}
+
+// TestParseCommunityTweets_DiscriminatesRoot pins the UNVERIFIED root
+// data.communityResults.result.ranked_community_timeline.timeline. This test
+// pins the CURRENT assumption: if a live smoke test shows the real wrapper key
+// differs, this test fails and the code + assertion update together.
+func TestParseCommunityTweets_DiscriminatesRoot(t *testing.T) {
+	body := `{"data":{"communityResults":{"result":{"ranked_community_timeline":{"timeline":{` + instrBlockJSON(tweetEntryJSON("123")) + `}}}},` + decoyBlock + `}}`
+	tweets, _, err := parseCommunityTweets([]byte(body))
+	assertTypedTweet(t, tweets, err)
+}
+
+// TestFindTimelineInstructions_LargestWinsDeterministic proves the recursive
+// fallback is deterministic and picks the REAL timeline: two sibling
+// instructions blocks under data — a 1-entry decoy (999) and a 3-entry real
+// block (123,124,125) — must always resolve to the 3-entry block regardless of
+// Go's randomized map iteration order.
+func TestFindTimelineInstructions_LargestWinsDeterministic(t *testing.T) {
+	data := `{"sidebar":{` + instrBlockJSON(tweetEntryJSON("999")) + `},"primary":{` +
+		instrBlockJSON(tweetEntryJSON("123"), tweetEntryJSON("124"), tweetEntryJSON("125")) + `}}`
+	for i := 0; i < 25; i++ {
+		tl := findTimelineInstructions(json.RawMessage(data))
+		tweets, err := extractTweetsFromTimeline(tl, "")
+		if err != nil {
+			t.Fatalf("iter %d: %v", i, err)
+		}
+		if len(tweets) != 3 {
+			t.Fatalf("iter %d: expected 3-entry real block, got %d tweets %v", i, len(tweets), tweetIDs(tweets))
+		}
+		if tweets[0].ID != "123" {
+			t.Fatalf("iter %d: expected first tweet 123, got %s", i, tweets[0].ID)
+		}
+	}
 }
 
 // TestParseBlueVerifiedFollowers proves GetVerifiedFollowers' parser (the reused

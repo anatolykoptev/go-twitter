@@ -410,10 +410,10 @@ func (c *Client) fetchHomeTimeline(ctx context.Context, operation string, count 
 	}
 
 	ep := Endpoints[operation]
+	// queryId omitted: the op is resolved by the URL path, mirroring SearchTimeline.
 	payload, err := json.Marshal(map[string]any{
 		"variables": variables,
 		"features":  ep.Features,
-		"queryId":   ep.ID,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("%s: marshal payload: %w", operation, err)
