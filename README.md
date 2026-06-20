@@ -100,6 +100,19 @@ type Tweet struct {
 }
 ```
 
+## CI
+
+**gql-sync drift check** (`.github/workflows/gql-sync-drift.yml`) — runs weekly
+(Mon 06:00 UTC, plus manual `workflow_dispatch`). It regenerates the generated
+GraphQL artifacts (`queryids_gen.go`, `features_gen.go`) from x.com's **live** JS
+bundle and, if they changed, opens a PR for human review (it never auto-merges
+generated values — a wrong queryID/flag default is an HTTP 400 on every call).
+
+Requires repo secret **`TWITTER_PROXY`**: a proxy URL that can reach x.com from
+GitHub's runner IPs (bare datacenter IPs are blocked). The job runs with
+`-fail-on-empty`, so a missing proxy or a bundle break exits non-zero and fails
+closed instead of overwriting the committed IDs with nothing.
+
 ## License
 
 MIT
