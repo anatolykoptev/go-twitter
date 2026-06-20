@@ -289,6 +289,17 @@ func TestGeneratedOverrideChain(t *testing.T) {
 var retiredMutationQueryIDs = map[string]string{
 	"CreateRetweet (pre-v0.6.1, 404)": "ojPdsZsimiJrUGLR1sjUtA",
 	"DeleteRetweet (pre-v0.6.1, 422)": "iQtK4dl5hBmXewYZuEOKVw",
+
+	// Read-op queryIDs retired by x.com and confirmed 404 live (2026-06-20 v0.6.2
+	// arc). Followers had TWO dead candidates: the pre-v0.6.2 committed seed AND
+	// the fa0311/TwitterInternalAPIDocument value — both 404. The live capture
+	// found the working id is a third value (9jsVJ9l2uXUIKslHvJqIhw) AND that the
+	// op needs a DIFFERENT feature set (see TestFollowersFeatureSet). These guard
+	// against a careless revert re-seeding a dead read-op id.
+	"Followers (pre-v0.6.2 committed, 404)": "FpGYzBsUxUOecYYfso0yA",
+	"Followers (fa0311 stale, 404)":         "QAV06ZzlL6dfYpN3JgTxeg",
+	"Following (pre-v0.6.2 committed, 404)": "UCFedrkjMz7PeEAWCWhqFw",
+	"Retweeters (pre-v0.6.2 committed)":     "0BoJlKAxoNPQUHRftlwZ2w",
 }
 
 // TestMutationQueryIDs_LiveVerified pins the 2026-06-20 live-verified CreateRetweet
@@ -353,5 +364,60 @@ func TestUnretweetUsesSourceTweetIDVariable(t *testing.T) {
 	}
 	if !strings.Contains(rest, `"source_tweet_id"`) {
 		t.Error("Unretweet must POST the DeleteRetweet variable as \"source_tweet_id\" (x.com 422s on bare tweet_id)")
+	}
+}
+
+// TestReadOpQueryIDs_LiveVerified pins the 2026-06-20 live-captured Followers,
+// Following and Retweeters queryIDs. Each was confirmed with a live round-trip
+// (GetFollowers/GetFollowing/GetRetweeters returning real users, see PR notes).
+// A change here is a deliberate refresh and must be re-verified live.
+func TestReadOpQueryIDs_LiveVerified(t *testing.T) {
+	want := map[string]string{
+		"Followers":  "9jsVJ9l2uXUIKslHvJqIhw",
+		"Following":  "OLm4oHZBfqWx8jbcEhWoFw",
+		"Retweeters": "FeoLYPQ-q4bmjGLTZTGs0g",
+	}
+	for op, id := range want {
+		assert.Equal(t, id, Endpoints[op].ID,
+			"op %q queryID drifted from the live-verified value; re-verify with a live round-trip before changing", op)
+	}
+}
+
+// TestFollowersFeatureSet guards the v0.6.2 finding that the Followers/Following
+// ops validate a DIFFERENT GraphQL feature set than the shared gqlFeatures()
+// baseline. Sending the baseline returns HTTP 404 (feature-set mismatch, not a
+// stale queryId alone). The live x.com request INCLUDES rweb_cashtags_enabled
+// and OMITS responsive_web_graphql_exclude_directive_enabled. These two flags
+// are the discriminator; if a refactor ever points Followers back at
+// gqlFeatures(), this fails the build.
+func TestFollowersFeatureSet(t *testing.T) {
+	for _, op := range []string{"Followers", "Following"} {
+		f := Endpoints[op].Features
+		if v, ok := f["rweb_cashtags_enabled"]; !ok || v != true {
+			t.Errorf("%s must send rweb_cashtags_enabled=true (live x.com requirement); got ok=%v v=%v", op, ok, v)
+		}
+		if _, ok := f["responsive_web_graphql_exclude_directive_enabled"]; ok {
+			t.Errorf("%s must NOT send responsive_web_graphql_exclude_directive_enabled (live x.com 404s with it present)", op)
+		}
+	}
+}
+
+// TestFetchUserListSendsGrokTranslatedBio guards the withGrokTranslatedBio
+// variable that the live Followers/Following request sends. Omitting it together
+// with the legacy feature set was part of the 404 failure mode.
+func TestFetchUserListSendsGrokTranslatedBio(t *testing.T) {
+	src, err := os.ReadFile("graphql.go")
+	if err != nil {
+		t.Fatalf("read graphql.go: %v", err)
+	}
+	text := string(src)
+	if !strings.Contains(text, `"withGrokTranslatedBio"`) {
+		t.Error("fetchUserList must send the withGrokTranslatedBio variable (live x.com Followers/Following request includes it)")
+	}
+	// The variable must be SCOPED to Followers/Following — BlueVerifiedFollowers
+	// rides the same fetchUserList helper but was verified live WITHOUT it. Guard
+	// the op-scoping condition so a refactor cannot silently re-globalize it.
+	if !strings.Contains(text, `operation == "Followers" || operation == "Following"`) {
+		t.Error("withGrokTranslatedBio must be scoped to Followers/Following only (BlueVerifiedFollowers must keep its verified request shape)")
 	}
 }

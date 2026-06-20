@@ -4,9 +4,9 @@ package twitter
 
 var generatedQueryIDs = map[string]string{
 	"CreateTweet":      "7TKRKCPuAGsmYde0CudbVg",
-	"Followers":        "FpGYzBsUxUOecYYfso0yA",
-	"Following":        "UCFedrkjMz7PeEAWCWhqFw",
-	"Retweeters":       "0BoJlKAxoNPQUHRftlwZ2w",
+	"Followers":        "9jsVJ9l2uXUIKslHvJqIhw",
+	"Following":        "OLm4oHZBfqWx8jbcEhWoFw",
+	"Retweeters":       "FeoLYPQ-q4bmjGLTZTGs0g",
 	"SearchTimeline":   "GcXk9vN_d1jUfHNqLacXQA",
 	"TweetDetail":      "VWFGPVAGkZMGRKGe3GFFnA",
 	"UserByRestId":     "VQfQ9wwYdk6j_u2O4vt64Q",
