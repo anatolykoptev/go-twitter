@@ -410,7 +410,14 @@ func TestFetchUserListSendsGrokTranslatedBio(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read graphql.go: %v", err)
 	}
-	if !strings.Contains(string(src), `"withGrokTranslatedBio"`) {
+	text := string(src)
+	if !strings.Contains(text, `"withGrokTranslatedBio"`) {
 		t.Error("fetchUserList must send the withGrokTranslatedBio variable (live x.com Followers/Following request includes it)")
+	}
+	// The variable must be SCOPED to Followers/Following — BlueVerifiedFollowers
+	// rides the same fetchUserList helper but was verified live WITHOUT it. Guard
+	// the op-scoping condition so a refactor cannot silently re-globalize it.
+	if !strings.Contains(text, `operation == "Followers" || operation == "Following"`) {
+		t.Error("withGrokTranslatedBio must be scoped to Followers/Following only (BlueVerifiedFollowers must keep its verified request shape)")
 	}
 }

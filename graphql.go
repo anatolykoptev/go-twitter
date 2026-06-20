@@ -52,10 +52,15 @@ func (c *Client) fetchUserList(ctx context.Context, operation, userID string, ma
 			"userId":                 userID,
 			"count":                  min(100, maxCount-len(users)),
 			"includePromotedContent": false,
-			// withGrokTranslatedBio is sent by the live x.com Followers/Following
-			// request (captured 2026-06-20). Omitting it together with the legacy
-			// feature set returned HTTP 404.
-			"withGrokTranslatedBio": true,
+		}
+		// withGrokTranslatedBio is sent by the live x.com Followers/Following
+		// request (captured 2026-06-20). Omitting it together with the
+		// followersFeatures() set returned HTTP 404. Scope it to those two ops:
+		// BlueVerifiedFollowers also rides fetchUserList but was verified live
+		// WITHOUT this variable (and on the gqlFeatures() baseline), so leave its
+		// request shape unchanged.
+		if operation == "Followers" || operation == "Following" {
+			variables["withGrokTranslatedBio"] = true
 		}
 		if cursor != "" {
 			variables["cursor"] = cursor
