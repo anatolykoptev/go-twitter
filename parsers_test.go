@@ -141,6 +141,155 @@ func TestParseSearchTimeline(t *testing.T) {
 	}
 }
 
+// tweetInstructions is the shared inner instructions shape (one TimelineTweet +
+// one bottom cursor), reused across the T5 read-cluster parser tests. Only the
+// per-op root WRAPPER around it differs — these tests validate the parser + the
+// documented root-key wiring against that shape, with the same rigor as
+// TestParseSearchTimeline. Live queryID/response validation is deferred to the
+// planned smoke test.
+const tweetInstructions = `"instructions": [{
+	"type": "TimelineAddEntries",
+	"entries": [
+		{
+			"entryId": "tweet-123",
+			"content": {
+				"entryType": "TimelineTimelineItem",
+				"__typename": "TimelineTimelineItem",
+				"itemContent": {
+					"__typename": "TimelineTweet",
+					"tweet_results": {
+						"result": {
+							"__typename": "Tweet",
+							"rest_id": "123",
+							"legacy": {"full_text": "hello", "user_id_str": "999", "favorite_count": 7}
+						}
+					}
+				}
+			}
+		},
+		{
+			"entryId": "cursor-bottom-9",
+			"content": {
+				"entryType": "TimelineTimelineCursor",
+				"__typename": "TimelineTimelineCursor",
+				"cursorType": "Bottom",
+				"value": "CURSOR_NEXT"
+			}
+		}
+	]
+}]`
+
+// assertOneTweetWithCursor checks the (tweets, cursor) result every read-cluster
+// parser must produce against the shared tweetInstructions fixture.
+func assertOneTweetWithCursor(t *testing.T, tweets []*Tweet, cursor string, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tweets) != 1 {
+		t.Fatalf("expected 1 tweet, got %d", len(tweets))
+	}
+	if tweets[0].ID != "123" {
+		t.Fatalf("expected ID 123, got %s", tweets[0].ID)
+	}
+	if tweets[0].Likes != 7 {
+		t.Fatalf("expected 7 likes, got %d", tweets[0].Likes)
+	}
+	if cursor != "CURSOR_NEXT" {
+		t.Fatalf("expected bottom cursor CURSOR_NEXT, got %q", cursor)
+	}
+}
+
+func TestParseBookmarks(t *testing.T) {
+	body := `{"data":{"bookmark_timeline_v2":{"timeline":{` + tweetInstructions + `}}}}`
+	tweets, cursor, err := parseBookmarks([]byte(body))
+	assertOneTweetWithCursor(t, tweets, cursor, err)
+}
+
+func TestParseHomeTimeline(t *testing.T) {
+	body := `{"data":{"home":{"home_timeline_urt":{` + tweetInstructions + `}}}}`
+	tweets, cursor, err := parseHomeTimeline([]byte(body))
+	assertOneTweetWithCursor(t, tweets, cursor, err)
+}
+
+func TestParseListTweets(t *testing.T) {
+	body := `{"data":{"list":{"tweets_timeline":{"timeline":{` + tweetInstructions + `}}}}}`
+	tweets, cursor, err := parseListTweets([]byte(body))
+	assertOneTweetWithCursor(t, tweets, cursor, err)
+}
+
+func TestParseCommunityTweets(t *testing.T) {
+	body := `{"data":{"communityResults":{"result":{"ranked_community_timeline":{"timeline":{` + tweetInstructions + `}}}}}}`
+	tweets, cursor, err := parseCommunityTweets([]byte(body))
+	assertOneTweetWithCursor(t, tweets, cursor, err)
+}
+
+// TestParseCommunityTweets_RecursiveFallback proves the recursive-fallback path:
+// even if the ranked_community_timeline wrapper key (UNVERIFIED) is wrong at
+// runtime, instructions found anywhere under data still parse. This is the
+// resilience guarantee documented in timelineTweetParse.
+func TestParseCommunityTweets_RecursiveFallback(t *testing.T) {
+	body := `{"data":{"communityResults":{"result":{"some_other_wrapper_key":{"timeline":{` + tweetInstructions + `}}}}}}`
+	tweets, cursor, err := parseCommunityTweets([]byte(body))
+	assertOneTweetWithCursor(t, tweets, cursor, err)
+}
+
+// TestParseBlueVerifiedFollowers proves GetVerifiedFollowers' parser (the reused
+// parseUserList) extracts a verified follower + bottom cursor from the
+// data.user.result.timeline.timeline shape.
+func TestParseBlueVerifiedFollowers(t *testing.T) {
+	body := `{
+		"data": {"user": {"result": {"timeline": {"timeline": {
+			"instructions": [{
+				"type": "TimelineAddEntries",
+				"entries": [
+					{
+						"entryId": "user-42",
+						"content": {
+							"entryType": "TimelineTimelineItem",
+							"__typename": "TimelineTimelineItem",
+							"itemContent": {
+								"__typename": "TimelineUser",
+								"user_results": {"result": {
+									"__typename": "User",
+									"rest_id": "42",
+									"legacy": {"screen_name": "verified_user", "name": "Verified"},
+									"is_blue_verified": true
+								}}
+							}
+						}
+					},
+					{
+						"entryId": "cursor-bottom-1",
+						"content": {
+							"entryType": "TimelineTimelineCursor",
+							"__typename": "TimelineTimelineCursor",
+							"cursorType": "Bottom",
+							"value": "USER_CURSOR_NEXT"
+						}
+					}
+				]
+			}]
+		}}}}}
+	}`
+	users, cursor, err := parseUserList([]byte(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(users) != 1 {
+		t.Fatalf("expected 1 user, got %d", len(users))
+	}
+	if users[0].Handle != "verified_user" {
+		t.Fatalf("expected handle verified_user, got %s", users[0].Handle)
+	}
+	if !users[0].IsVerified {
+		t.Fatal("expected verified follower")
+	}
+	if cursor != "USER_CURSOR_NEXT" {
+		t.Fatalf("expected bottom cursor USER_CURSOR_NEXT, got %q", cursor)
+	}
+}
+
 func TestExtractTokenMentions(t *testing.T) {
 	tests := []struct {
 		text     string

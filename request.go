@@ -513,7 +513,11 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 func requiresAuth(endpoint string) bool {
 	switch endpoint {
 	case "TweetDetail", "SearchTimeline", "Following", "Followers", "Retweeters",
-		"CreateTweet", "UserByScreenName", "UserTweets":
+		"CreateTweet", "UserByScreenName", "UserTweets",
+		// T5 read cluster: all require a real account — no guest fallback
+		// (the Mar-2026 lesson, plan §T5 / doc §8).
+		"Bookmarks", "HomeTimeline", "HomeLatestTimeline",
+		"ListLatestTweetsTimeline", "CommunityTweetsTimeline", "BlueVerifiedFollowers":
 		return true
 	}
 	return false

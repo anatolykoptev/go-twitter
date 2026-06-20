@@ -154,6 +154,181 @@ func parseSearchTimeline(body []byte) ([]*Tweet, error) {
 	return extractTweetsFromTimeline(raw.Data.SearchByRawQuery.SearchTimeline.Timeline, "")
 }
 
+// --- T5 read-cluster timeline parsers ---
+//
+// Every parser below decodes the op's DOCUMENTED typed root path first, then
+// falls back to a recursive "find instructions anywhere under data" scan. That
+// fallback is the same locate-the-timeline strategy every major public client
+// uses (vladkens/twscrape, trevorhobenshield/twitter-api-client, d60/twikit all
+// recursively find "instructions"/"entries" rather than hardcoding the wrapper),
+// so a rotated or mis-cited wrapper key degrades to "still works" instead of
+// "silently empty". The typed path stays primary for clarity + speed.
+
+// timelineTweetParse unmarshals a GraphQL envelope, surfaces API errors, decodes
+// the op-specific root via rootFn, and returns the tweets + bottom cursor. When
+// rootFn finds no instructions it falls back to the recursive scan.
+func timelineTweetParse(body []byte, rootFn func(json.RawMessage) timelineObj) ([]*Tweet, string, error) {
+	var env struct {
+		Data   json.RawMessage `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(body, &env); err != nil {
+		return nil, "", fmt.Errorf("unmarshal timeline: %w", err)
+	}
+	if len(env.Errors) > 0 {
+		return nil, "", fmt.Errorf("twitter API error: %s", env.Errors[0].Message)
+	}
+	tl := rootFn(env.Data)
+	if len(tl.Instructions) == 0 {
+		tl = findTimelineInstructions(env.Data)
+	}
+	tweets, err := extractTweetsFromTimeline(tl, "")
+	if err != nil {
+		return nil, "", err
+	}
+	return tweets, bottomCursor(tl), nil
+}
+
+// parseBookmarks parses the Bookmarks response.
+// Root: data.bookmark_timeline_v2.timeline.instructions — CONFIRMED against
+// imperatrona/twitter-scraper (bookmark_timeline_v2 struct) + twscrape's
+// graphql_timeline_v2_bookmark_timeline feature flag.
+func parseBookmarks(body []byte) ([]*Tweet, string, error) {
+	return timelineTweetParse(body, func(data json.RawMessage) timelineObj {
+		var r struct {
+			BookmarkTimeline struct {
+				Timeline timelineObj `json:"timeline"`
+			} `json:"bookmark_timeline_v2"`
+		}
+		_ = json.Unmarshal(data, &r)
+		return r.BookmarkTimeline.Timeline
+	})
+}
+
+// parseHomeTimeline parses HomeTimeline / HomeLatestTimeline responses (same shape).
+// Root: data.home.home_timeline_urt.instructions — canonical home-timeline shape
+// (trevorhobenshield/twitter-api-client home_timeline_urt).
+func parseHomeTimeline(body []byte) ([]*Tweet, string, error) {
+	return timelineTweetParse(body, func(data json.RawMessage) timelineObj {
+		var r struct {
+			Home struct {
+				HomeTimelineURT timelineObj `json:"home_timeline_urt"`
+			} `json:"home"`
+		}
+		_ = json.Unmarshal(data, &r)
+		return r.Home.HomeTimelineURT
+	})
+}
+
+// parseListTweets parses the ListLatestTweetsTimeline response.
+// Root: data.list.tweets_timeline.timeline.instructions — canonical list shape
+// (vladkens/twscrape ListLatestTweetsTimeline).
+func parseListTweets(body []byte) ([]*Tweet, string, error) {
+	return timelineTweetParse(body, func(data json.RawMessage) timelineObj {
+		var r struct {
+			List struct {
+				TweetsTimeline struct {
+					Timeline timelineObj `json:"timeline"`
+				} `json:"tweets_timeline"`
+			} `json:"list"`
+		}
+		_ = json.Unmarshal(data, &r)
+		return r.List.TweetsTimeline.Timeline
+	})
+}
+
+// parseCommunityTweets parses the CommunityTweetsTimeline response.
+// Root: data.communityResults.result.ranked_community_timeline.timeline.instructions.
+// The data.communityResults.result prefix is CONFIRMED (twscrape models.py uses
+// "data.communityResults.result"); the ranked_community_timeline wrapper is
+// UNVERIFIED root key — confirm against a live authed response (smoke test). The
+// recursive fallback in timelineTweetParse keeps the parser working if the exact
+// wrapper key differs at runtime.
+func parseCommunityTweets(body []byte) ([]*Tweet, string, error) {
+	return timelineTweetParse(body, func(data json.RawMessage) timelineObj {
+		var r struct {
+			CommunityResults struct {
+				Result struct {
+					RankedCommunityTimeline struct {
+						Timeline timelineObj `json:"timeline"`
+					} `json:"ranked_community_timeline"`
+				} `json:"result"`
+			} `json:"communityResults"`
+		}
+		_ = json.Unmarshal(data, &r)
+		return r.CommunityResults.Result.RankedCommunityTimeline.Timeline
+	})
+}
+
+// bottomCursor returns the bottom pagination cursor from a timeline, or "" when
+// none is present. Mirrors the cursor logic in extractUsersFromTimeline.
+func bottomCursor(tl timelineObj) string {
+	for _, instruction := range tl.Instructions {
+		entries := instruction.Entries
+		if instruction.Entry != nil {
+			entries = append(entries, *instruction.Entry)
+		}
+		for _, entry := range entries {
+			if entry.Content.EntryType != "TimelineTimelineCursor" && entry.Content.TypeName != "TimelineTimelineCursor" {
+				continue
+			}
+			if entry.Content.CursorType == "Bottom" || strings.Contains(entry.EntryID, "cursor-bottom") {
+				return entry.Content.Value
+			}
+		}
+	}
+	return ""
+}
+
+// findTimelineInstructions recursively scans an arbitrary decoded GraphQL data
+// node for the first object carrying a non-empty "instructions" array and decodes
+// that object as a timelineObj. Used as the resilient fallback when a typed root
+// path yields nothing (see timelineTweetParse doc).
+func findTimelineInstructions(data json.RawMessage) timelineObj {
+	var v any
+	if err := json.Unmarshal(data, &v); err != nil {
+		return timelineObj{}
+	}
+	node, ok := findInstructionsNode(v)
+	if !ok {
+		return timelineObj{}
+	}
+	var tl timelineObj
+	if err := json.Unmarshal(node, &tl); err != nil {
+		return timelineObj{}
+	}
+	return tl
+}
+
+// findInstructionsNode walks decoded JSON for the first object with a non-empty
+// "instructions" array, returning that object re-marshaled to JSON.
+func findInstructionsNode(v any) (json.RawMessage, bool) {
+	switch t := v.(type) {
+	case map[string]any:
+		if instr, ok := t["instructions"]; ok {
+			if arr, ok := instr.([]any); ok && len(arr) > 0 {
+				if raw, err := json.Marshal(t); err == nil {
+					return raw, true
+				}
+			}
+		}
+		for _, child := range t {
+			if raw, ok := findInstructionsNode(child); ok {
+				return raw, true
+			}
+		}
+	case []any:
+		for _, child := range t {
+			if raw, ok := findInstructionsNode(child); ok {
+				return raw, true
+			}
+		}
+	}
+	return nil, false
+}
+
 // --- Timeline types ---
 
 type timelineObj struct {
