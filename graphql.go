@@ -327,10 +327,14 @@ func (c *Client) Retweet(ctx context.Context, acc *Account, tweetID string) (str
 }
 
 // Unretweet removes a retweet from a specific account. Returns the source tweet ID.
+// The DeleteRetweet op keys the target by "source_tweet_id" (the ID of the
+// ORIGINAL tweet, not the retweet's own ID) — confirmed live 2026-06-20: sending
+// "tweet_id" yields HTTP 422 GRAPHQL_VALIDATION_FAILED ("source_tweet_id must be
+// defined"). Matches trevorhobenshield/twitter-api-client + dimdenGD/OldTweetDeck.
 func (c *Client) Unretweet(ctx context.Context, acc *Account, tweetID string) (string, error) {
 	body, err := c.postMutation(ctx, acc, "DeleteRetweet", map[string]any{
-		"tweet_id":     tweetID,
-		"dark_request": false,
+		"source_tweet_id": tweetID,
+		"dark_request":    false,
 	})
 	if err != nil {
 		return "", err
