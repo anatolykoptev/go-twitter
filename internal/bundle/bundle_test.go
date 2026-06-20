@@ -316,6 +316,7 @@ func TestHTTPFetcher_Fetch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewHTTPFetcher: %v", err)
 	}
+	f.skipInitialHostCheck = true // httptest dials 127.0.0.1 over http
 	body, err := f.Fetch(context.Background(), srv.URL)
 	if err != nil {
 		t.Fatalf("Fetch: %v", err)
@@ -335,6 +336,7 @@ func TestHTTPFetcher_Non200(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewHTTPFetcher: %v", err)
 	}
+	f.skipInitialHostCheck = true // exercise the real 403 path, not the host guard
 	if _, err := f.Fetch(context.Background(), srv.URL); err == nil {
 		t.Fatal("expected an error on HTTP 403")
 	}
@@ -348,7 +350,7 @@ func TestHTTPFetcher_ZeroValueUsesDefaults(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	f := &HTTPFetcher{} // nil Client, empty UserAgent → defaults
+	f := &HTTPFetcher{skipInitialHostCheck: true} // nil Client, empty UserAgent → defaults
 	body, err := f.Fetch(context.Background(), srv.URL)
 	if err != nil {
 		t.Fatalf("Fetch: %v", err)

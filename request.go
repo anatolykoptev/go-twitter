@@ -64,9 +64,8 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 
 		// Proactive ct0 rotation
 		if acc.CT0Age() > ct0MaxAge {
-			_, oldCT0, _ := acc.Credentials()
 			acc.RotateCT0()
-			slog.Info("ct0 rotated (proactive)", slog.String("user", acc.Username), slog.String("old_prefix", oldCT0[:min(8, len(oldCT0))]))
+			slog.Info("ct0 rotated (proactive)", slog.String("user", acc.Username))
 			authTok2, ct02, _ := acc.Credentials()
 			_ = saveSession(c.cfg.SessionDir, acc.Username, authTok2, ct02)
 		}

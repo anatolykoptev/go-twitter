@@ -3,9 +3,16 @@ package twitter
 import (
 	"crypto/rand"
 	"encoding/hex"
+	"regexp"
 	"strings"
 	"time"
 )
+
+// ct0Re bounds an extracted ct0 to the alphanumeric token alphabet x.com uses.
+// A ct0 is reused verbatim in a request header, so a value carrying CR/LF or
+// other control bytes from a hostile set-cookie must be rejected before storage
+// (removes reliance on go-stealth for CRLF rejection).
+var ct0Re = regexp.MustCompile(`^[A-Za-z0-9]+$`)
 
 // GenerateCT0 generates a random 32-byte hex string for use as a ct0 CSRF token.
 func GenerateCT0() string {
@@ -29,7 +36,7 @@ func extractCT0FromHeaders(headers map[string]string) string {
 		part = strings.TrimSpace(part)
 		if strings.HasPrefix(part, "ct0=") {
 			val := strings.TrimPrefix(part, "ct0=")
-			if val != "" {
+			if val != "" && ct0Re.MatchString(val) {
 				return val
 			}
 		}

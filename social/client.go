@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -65,10 +66,16 @@ func (c *Client) AcquireAccount(ctx context.Context, platform string) (*Credenti
 
 // ReportUsage reports the result of using an account back to go-social.
 func (c *Client) ReportUsage(ctx context.Context, platform, accountID, status string) error {
-	body := fmt.Sprintf(`{"status":"%s"}`, status)
+	// Build the JSON body via Marshal (not Sprintf) so a status containing a
+	// quote/backslash can't break out of the JSON string, and PathEscape the
+	// interpolated path segments so they can't break the URL path.
+	body, err := json.Marshal(map[string]string{"status": status})
+	if err != nil {
+		return fmt.Errorf("marshal report body: %w", err)
+	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost,
-		fmt.Sprintf("%s/%s/report/%s", c.baseURL, platform, accountID),
-		strings.NewReader(body))
+		fmt.Sprintf("%s/%s/report/%s", c.baseURL, url.PathEscape(platform), url.PathEscape(accountID)),
+		strings.NewReader(string(body)))
 	if err != nil {
 		return err
 	}

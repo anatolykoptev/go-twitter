@@ -159,7 +159,12 @@ func ParseAccounts(raw string) []*Account {
 		}
 		parts := strings.SplitN(entry, ":", 5)
 		if len(parts) < 2 {
-			slog.Warn("invalid account entry, skipping", slog.String("entry", entry))
+			// Never log entry content: a malformed entry may be (or contain) a
+			// password / auth_token / ct0 / TOTP seed. Log only non-secret
+			// discriminators. parts[0] is excluded too — when len(parts)==1 it IS
+			// the whole secret.
+			slog.Warn("invalid account entry, skipping",
+				slog.Int("fields", len(parts)), slog.Int("len", len(entry)))
 			continue
 		}
 		acc := &Account{
