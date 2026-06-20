@@ -21,12 +21,12 @@ import (
 
 // Client is the top-level Twitter scraping client.
 type Client struct {
-	client      *stealth.BrowserClient
-	pool        *pool.Pool[*Account]
-	xtidMgr     *xtid.Manager
-	xpffGen     *xpff.Generator
-	cfg         ClientConfig
-	reloginGate AutoReloginGate // nil = always allow
+	client               *stealth.BrowserClient
+	pool                 *pool.Pool[*Account]
+	xtidMgr              *xtid.Manager
+	xpffGen              *xpff.Generator
+	cfg                  ClientConfig
+	reloginGate          AutoReloginGate    // nil = always allow
 	nonResponsiveBackoff pool.BackoffConfig // transient-failure backoff (base from cfg, x2, cap 30m)
 
 	mu                sync.Mutex

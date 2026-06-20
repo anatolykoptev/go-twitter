@@ -95,11 +95,22 @@ func TestNonResponsive_AllAccountsBroken_PoolSelfHeals(t *testing.T) {
 	for _, a := range accs {
 		a.SetReactivateAt(time.Now().Add(-time.Second))
 	}
-	if _, err := c.pool.Next(nil); err != nil {
-		t.Fatalf("pool failed to self-heal after cooldown: %v", err)
+	// Drive Next n times: each round-robin hit auto-reactivates one account, so
+	// after n calls the WHOLE fleet must be back -- proving full self-heal, not
+	// just one survivor. (Healthy() does not auto-reactivate, only Next does.)
+	recovered := map[string]bool{}
+	for i := 0; i < n; i++ {
+		got, err := c.pool.Next(nil)
+		if err != nil {
+			t.Fatalf("pool failed to self-heal after cooldown (call %d): %v", i, err)
+		}
+		recovered[got.Username] = true
 	}
-	if c.pool.Healthy(nil) == 0 {
-		t.Fatal("expected healthy accounts after self-heal")
+	if len(recovered) != n {
+		t.Fatalf("only %d/%d accounts self-healed: %v", len(recovered), n, recovered)
+	}
+	if c.pool.Healthy(nil) != n {
+		t.Fatalf("expected all %d accounts healthy after self-heal, got %d", n, c.pool.Healthy(nil))
 	}
 }
 
