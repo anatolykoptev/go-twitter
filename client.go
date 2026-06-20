@@ -307,6 +307,15 @@ const (
 // quantizes to the 50ms poll period. At our production values (>=4.5s) this is
 // negligible (~90 distinct buckets across the 4.5s jitter span) and the rhythm
 // stays human-variable; it only matters for sub-second delays.
+//
+// SCOPE: the pacer is wired ONLY at the doPoolRequest pool-rotation site, which
+// is the high-volume scrape burst path (Retweeters/Followers/KOL/VC/seed). The
+// low-frequency media-upload (doMediaRequest) and login/guest-activate (auth.go
+// via DoWithHeaderOrder) sites hit the same Twitter domains but are
+// INTENTIONALLY not paced -- they are not the burst source. They do still count
+// against the same per-account rate-limit ceiling, so if a future burst path is
+// added through one of those, route it through doPoolRequest (or call
+// c.domainPacer.Wait) so it inherits the pace.
 func buildDomainPacer(cfg ClientConfig) *ratelimit.DomainLimiter {
 	if cfg.DomainPaceDisabled {
 		return nil
