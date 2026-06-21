@@ -385,10 +385,10 @@ func createTweetVariables(text string, mediaIDs []string) map[string]any {
 // Accepts 200/201/204 as success.
 func (c *Client) doMediaRequest(ctx context.Context, acc *Account, method, urlStr string, payload []byte, contentType string) ([]byte, error) {
 	// NOTE: media uploads are a low-frequency POST path, NOT the scrape burst
-	// source, so they are intentionally NOT routed through the per-domain human
-	// pacer wired at doPoolRequest (see buildDomainPacer SCOPE note). Only the
-	// anti-fingerprint jitter applies here. If this path ever becomes
-	// bursty, call c.domainPacer.Wait(ctx, urlStr) before the retry loop.
+	// source, so they are intentionally NOT routed through the per-account human
+	// pacer wired at doPoolRequest (see buildAccountPacer SCOPE note). Only the
+	// anti-fingerprint jitter applies here. If this path ever becomes bursty,
+	// call c.accountPacer.Wait(ctx, acc.ID()) after the account is selected.
 	if err := stealth.DefaultJitter.Sleep(ctx); err != nil {
 		return nil, err
 	}

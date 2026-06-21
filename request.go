@@ -101,10 +101,13 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 		acc.proxyConsecFails = 0
 		acc.mu.Unlock()
 
-		// Adaptive rate-limit sync: every response (200, 429, 4xx) that carries
-		// x-rate-limit-limit refines this account's per-endpoint cap toward X's
-		// real, possibly-shifting per-account budget. No-op when the header is
-		// absent/malformed (the seeded default stands).
+		// Adaptive rate-limit sync: the primary response of each attempt (200,
+		// 429, 4xx) that carries x-rate-limit-limit refines this account's
+		// per-endpoint cap toward X's real, possibly-shifting per-account budget.
+		// Recovery sub-requests (ct0-rotation / relogin) are not re-synced — the
+		// cap is only ever refined, never collapsed (parseRateLimitLimit guards
+		// non-positive), so the next primary response re-syncs. No-op when the
+		// header is absent/malformed (the seeded default stands).
 		acc.SyncRateLimit(endpoint, respHdrs)
 
 		// Handle HTTP status

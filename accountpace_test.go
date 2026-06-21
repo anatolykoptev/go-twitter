@@ -209,7 +209,11 @@ func TestMultiScraper_LowFreqNotStarved(t *testing.T) {
 	// allows the call, then pace it by account. Returns whether an account was
 	// served.
 	acquire := func(ctx context.Context, endpoint string) bool {
-		filter := func(a *Account) bool { return a.AllowRequest(endpoint) }
+		// Mirror request.go's filter exactly (incl. the proxyBackoff clause) so the
+		// test tracks the production selection predicate, not a subset of it.
+		filter := func(a *Account) bool {
+			return a.AllowRequest(endpoint) && time.Now().After(a.proxyBackoff)
+		}
 		acc, err := p.Next(filter)
 		if err != nil {
 			return false
@@ -296,7 +300,9 @@ func TestAggregateThroughput_SumsPerAccountCaps(t *testing.T) {
 	const ep = "Followers" // seeded to 187 per account
 	served := 0
 	for {
-		acc, err := p.Next(func(a *Account) bool { return a.AllowRequest(ep) })
+		acc, err := p.Next(func(a *Account) bool {
+			return a.AllowRequest(ep) && time.Now().After(a.proxyBackoff)
+		})
 		if err != nil {
 			break // all accounts exhausted for this endpoint+window
 		}
