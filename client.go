@@ -26,9 +26,9 @@ type Client struct {
 	xtidMgr              *xtid.Manager
 	xpffGen              *xpff.Generator
 	cfg                  ClientConfig
-	reloginGate          AutoReloginGate          // nil = always allow
-	nonResponsiveBackoff pool.BackoffConfig       // transient-failure backoff (base from cfg, x2, cap 30m)
-	domainPacer          *ratelimit.DomainLimiter // human-pace spacing per Twitter domain (nil = disabled)
+	reloginGate          AutoReloginGate       // nil = always allow
+	nonResponsiveBackoff pool.BackoffConfig    // transient-failure backoff (base from cfg, x2, cap 30m)
+	accountPacer         *ratelimit.KeyedPacer // per-account human-pace spacing (keyed by account, nil = disabled)
 
 	mu                sync.Mutex
 	guestToken        string
@@ -44,6 +44,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	for _, acc := range cfg.Accounts {
 		acc.active = true
 		acc.rateLimiter = ratelimit.NewLimiter(cfg.RateLimit)
+		seedRateLimits(acc) // prime per-endpoint caps with X's measured real limits
 		acc.HealthTracker = pool.DefaultHealthTracker()
 	}
 
@@ -108,12 +109,12 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	}
 	xpffGen := xpff.New(xpffGuestID, defaultUserAgent)
 
-	// Human-pace per-domain spacing for x.com / twitter.com. ADDITIVE to the
-	// anti-fingerprint jitter: it spaces the whole scrape workload under the
-	// per-account rate-limit ceiling so the pool self-paces over time instead of
-	// bursting through it and tripping "all accounts unavailable". The per-account
-	// rate limiter remains the authoritative ceiling.
-	domainPacer := buildDomainPacer(cfg)
+	// Per-account human-pace spacing. ADDITIVE to the anti-fingerprint jitter: it
+	// spaces a single account's consecutive requests for stealth, keyed by
+	// account (not domain), so a low-frequency caller is never starved by a
+	// global gate. The per-account-per-endpoint rate limiter remains the
+	// authoritative throughput ceiling; this pace stays well under it.
+	accountPacer := buildAccountPacer(cfg)
 
 	c := &Client{
 		client:               bc,
@@ -122,7 +123,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		xpffGen:              xpffGen,
 		cfg:                  cfg,
 		nonResponsiveBackoff: nonResponsiveBackoff,
-		domainPacer:          domainPacer,
+		accountPacer:         accountPacer,
 	}
 
 	for _, acc := range cfg.Accounts {
@@ -156,6 +157,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 				continue
 			}
 			acc.rateLimiter = ratelimit.NewLimiter(cfg.RateLimit)
+			seedRateLimits(acc) // prime per-endpoint caps with X's measured real limits
 			acc.HealthTracker = pool.DefaultHealthTracker()
 			p.Add(acc)
 		}
@@ -285,65 +287,31 @@ func (c *Client) getGuestTokenCached() (string, bool) {
 	return c.guestToken, true
 }
 
-// domainPaceWindowCap and domainPaceWindow keep the DomainLimiter embedded
-// window limiter from ever gating: a very high cap over a short window means the
-// MinDelay floor (>= 4.5s) is always the binding constraint, never the window.
-// This makes the DomainLimiter a pure pacer; the per-account limiter remains the
-// authoritative request ceiling. See buildDomainPacer for the full rationale.
-const (
-	domainPaceWindowCap = 1_000_000
-	domainPaceWindow    = time.Minute
-)
-
-// buildDomainPacer constructs the per-domain human-pace limiter for the Twitter
-// hosts (x.com and twitter.com, including subdomains like api.twitter.com).
-// Returns nil when pacing is disabled. MinDelay is the hard floor between
-// consecutive same-domain requests; +RandomDelay makes the realized spacing
-// variable (human-like). This is the single authority for pacer construction —
+// buildAccountPacer constructs the per-account human-pace pacer. Returns nil
+// when pacing is disabled. The pacer is keyed by account ID at the call site
+// (doPoolRequest, after pool.Next): MinDelay is the hard floor between an
+// account's consecutive requests, +RandomDelay makes the realized spacing
+// human-variable. This is the single authority for pacer construction —
 // NewClient and the unit tests both go through here so the test exercises the
 // exact wiring production uses, not a copy.
 //
-// NOTE: go-stealth DomainLimiter.Wait polls every 50ms, so realized spacing
-// quantizes to the 50ms poll period. At our production values (>=4.5s) this is
-// negligible (~90 distinct buckets across the 4.5s jitter span) and the rhythm
-// stays human-variable; it only matters for sub-second delays.
+// Unlike the rejected per-DOMAIN gate, per-ACCOUNT keying gives N independent
+// pacers: a low-frequency caller (seed) selecting account B is never blocked by
+// a high-frequency caller (KOL/VC) that just used account A. The pace stays well
+// under the per-account-per-endpoint rate ceiling so it never caps throughput;
+// it only smooths a single account's burst rhythm for stealth.
 //
 // SCOPE: the pacer is wired ONLY at the doPoolRequest pool-rotation site, which
 // is the high-volume scrape burst path (Retweeters/Followers/KOL/VC/seed). The
 // low-frequency media-upload (doMediaRequest) and login/guest-activate (auth.go
-// via DoWithHeaderOrder) sites hit the same Twitter domains but are
-// INTENTIONALLY not paced -- they are not the burst source. They do still count
-// against the same per-account rate-limit ceiling, so if a future burst path is
-// added through one of those, route it through doPoolRequest (or call
-// c.domainPacer.Wait) so it inherits the pace.
-func buildDomainPacer(cfg ClientConfig) *ratelimit.DomainLimiter {
-	if cfg.DomainPaceDisabled {
+// via DoWithHeaderOrder) sites are INTENTIONALLY not paced -- they are not the
+// burst source. They do still count against the same per-account rate-limit
+// ceiling, so if a future burst path is added through one of those, route it
+// through doPoolRequest (or call c.accountPacer.Wait keyed by account) so it
+// inherits the pace.
+func buildAccountPacer(cfg ClientConfig) *ratelimit.KeyedPacer {
+	if cfg.AccountPaceDisabled {
 		return nil
 	}
-	// IMPORTANT: DomainConfig embeds a sliding-window rate limiter whose
-	// RequestsPerWindow defaults to 0 — and ratelimit.Limiter.Allow treats
-	// count<=0 as DENY, so a delay-only DomainConfig (zero window fields) would
-	// block forever. We want the DomainLimiter to be a PURE pacer here
-	// (MinDelay+RandomDelay spacing only); the per-account ratelimit.Config
-	// (50/15m x N accounts) is already the authoritative hard ceiling and we do
-	// not want a second redundant window gate. So set the embedded window
-	// permissively (effectively unbounded) and let MinDelay/RandomDelay do the
-	// spacing. domainPaceWindowCap / domainPaceWindow are large/short enough that
-	// the spacing floor is always reached long before the window cap matters.
-	return ratelimit.NewDomainLimiter(
-		ratelimit.DomainConfig{
-			Domain:            "*.x.com",
-			RequestsPerWindow: domainPaceWindowCap,
-			WindowDuration:    domainPaceWindow,
-			MinDelay:          cfg.DomainPaceMin,
-			RandomDelay:       cfg.DomainPaceRandom,
-		},
-		ratelimit.DomainConfig{
-			Domain:            "*.twitter.com",
-			RequestsPerWindow: domainPaceWindowCap,
-			WindowDuration:    domainPaceWindow,
-			MinDelay:          cfg.DomainPaceMin,
-			RandomDelay:       cfg.DomainPaceRandom,
-		},
-	)
+	return ratelimit.NewKeyedPacer(cfg.AccountPaceMin, cfg.AccountPaceRandom)
 }

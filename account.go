@@ -104,6 +104,32 @@ func (a *Account) AllowRequest(endpoint string) bool {
 	return rl.Allow(endpoint)
 }
 
+// UpdateEndpointLimit sets this account's per-window request cap for the given
+// endpoint, overriding the static default. Driven by the x-rate-limit-limit
+// response header so the limiter self-tunes to X's real per-account-per-endpoint
+// budget. Non-positive limits are ignored by the underlying limiter.
+func (a *Account) UpdateEndpointLimit(endpoint string, limit int) {
+	a.mu.Lock()
+	if a.rateLimiter == nil {
+		a.mu.Unlock()
+		return
+	}
+	rl := a.rateLimiter
+	a.mu.Unlock()
+	rl.UpdateLimit(endpoint, limit)
+}
+
+// SyncRateLimit reads the x-rate-limit-limit header from a response and updates
+// this account's per-endpoint cap when the header carries a valid positive
+// value. A no-op when the header is absent or malformed (the prior cap stands).
+// Called on every observed response (200 and 429) so the cap tracks X's real,
+// possibly-shifting per-account budget.
+func (a *Account) SyncRateLimit(endpoint string, respHdrs map[string]string) {
+	if limit, ok := parseRateLimitLimit(respHdrs[xRateLimitLimit]); ok {
+		a.UpdateEndpointLimit(endpoint, limit)
+	}
+}
+
 // MarkEndpointRateLimited marks an endpoint as rate-limited for this account.
 func (a *Account) MarkEndpointRateLimited(endpoint string, until time.Time) {
 	a.mu.Lock()
