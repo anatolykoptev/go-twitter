@@ -3,7 +3,7 @@ module github.com/anatolykoptev/go-twitter
 go 1.26
 
 require (
-	github.com/anatolykoptev/go-stealth v1.16.0
+	github.com/anatolykoptev/go-stealth v1.16.1-0.20260621042124-5f54de76f0cf
 	github.com/pquerna/otp v1.5.0
 	github.com/stretchr/testify v1.11.1
 )

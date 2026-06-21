@@ -34,17 +34,6 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 		return nil, nil, err
 	}
 
-	// Human-pace per-domain spacing (additive to the jitter above). Applied ONCE
-	// per logical request, before the retry loop, so transient retries (which
-	// have their own backoff) do not each re-pay the full pace. Spaces the whole
-	// Twitter workload under the per-account rate-limit ceiling so the pool
-	// self-paces instead of bursting through it. nil pacer = pacing disabled.
-	if c.domainPacer != nil {
-		if err := c.domainPacer.Wait(ctx, url); err != nil {
-			return nil, nil, err
-		}
-	}
-
 	var lastErr error
 	for attempt := range maxRetries {
 		if attempt > 0 {
@@ -73,6 +62,18 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 			break
 		}
 
+		// Per-account human-pace spacing, applied AFTER the pool selects the
+		// account and keyed by that account. Keying by account (not domain) means
+		// a low-frequency caller is never starved by a high-frequency one — each
+		// account self-paces its own rhythm. Additive to the anti-fingerprint
+		// jitter above; well under the per-account rate ceiling so it never caps
+		// throughput. nil pacer = pacing disabled.
+		if c.accountPacer != nil {
+			if err := c.accountPacer.Wait(ctx, acc.ID()); err != nil {
+				return nil, nil, err
+			}
+		}
+
 		// Proactive ct0 rotation
 		if acc.CT0Age() > ct0MaxAge {
 			acc.RotateCT0()
@@ -99,6 +100,12 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 		acc.mu.Lock()
 		acc.proxyConsecFails = 0
 		acc.mu.Unlock()
+
+		// Adaptive rate-limit sync: every response (200, 429, 4xx) that carries
+		// x-rate-limit-limit refines this account's per-endpoint cap toward X's
+		// real, possibly-shifting per-account budget. No-op when the header is
+		// absent/malformed (the seeded default stands).
+		acc.SyncRateLimit(endpoint, respHdrs)
 
 		// Handle HTTP status
 		switch {
@@ -433,6 +440,10 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 		acc.mu.Lock()
 		acc.proxyConsecFails = 0
 		acc.mu.Unlock()
+
+		// Adaptive rate-limit sync (see doPoolRequest): refine this account's
+		// per-endpoint cap from x-rate-limit-limit on every response.
+		acc.SyncRateLimit(endpoint, respHdrs)
 
 		switch {
 		case status == 429:
