@@ -8,6 +8,16 @@ import (
 )
 
 // AutoReloginGateFunc adapts a plain function to the AutoReloginGate interface.
+//
+// OPT-OUT: as of v0.6.7 a client that never calls SetAutoReloginGate gets the
+// internal per-account relogin breaker by default (see wireDefaultReloginGate),
+// which stops auto-relogin for an account after reloginBreakerThreshold
+// consecutive failures for reloginBreakerWindow. A consumer that wants the
+// pre-v0.6.7 "always relogin, unlimited" behavior must install an always-allow
+// gate explicitly:
+//
+//	c.SetAutoReloginGate(AutoReloginGateFunc(
+//		func(context.Context, string) (bool, string) { return true, "" }))
 type AutoReloginGateFunc func(ctx context.Context, username string) (allowed bool, reason string)
 
 // Allowed implements AutoReloginGate.
@@ -16,11 +26,13 @@ func (f AutoReloginGateFunc) Allowed(ctx context.Context, username string) (bool
 }
 
 const (
-	// reloginBreakerThreshold is the number of consecutive failed relogins for one
-	// account before the breaker opens. Conservative: a couple of transient
-	// failures are tolerated, but a persistently failing login (e.g. the
-	// WAF-blocked guest-token path) is cut off before it can keep destroying the
-	// still-valid session and hammering the self-worsening 399 throttle.
+	// reloginBreakerThreshold is the number of failed relogins for one account
+	// before the breaker opens. The count is consecutive in ATTEMPTS (any
+	// successful relogin resets it via RecordSuccess), not time-windowed — there
+	// is no decay, so isolated failures spread over time still accumulate toward
+	// the threshold. Conservative on purpose: a persistently failing login (e.g.
+	// the WAF-blocked guest-token path) is cut off before it can keep destroying
+	// the still-valid session and hammering the self-worsening 399 throttle.
 	reloginBreakerThreshold = 3
 
 	// reloginBreakerWindow is how long the breaker stays open for an account once
