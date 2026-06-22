@@ -74,14 +74,11 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 			}
 		}
 
-		// Proactive ct0 rotation
-		if acc.CT0Age() > ct0MaxAge {
-			acc.RotateCT0()
-			slog.Info("ct0 rotated (proactive)", slog.String("user", acc.Username))
-			authTok2, ct02, _ := acc.Credentials()
-			_ = saveSession(c.cfg.SessionDir, acc.Username, authTok2, ct02)
-		}
-
+		// NO proactive ct0 rotation: an established session's ct0 is validated
+		// server-side, so replacing it with a client-random value on a timer
+		// guarantees CSRF-353 and the doomed relogin cascade (the live-reproduced
+		// killer). ct0 is kept current by adopting the server's set-cookie ct0 on
+		// each successful response below. See shouldProactivelyRotate (ct0.go).
 		bc := c.clientForAccount(acc)
 
 		authTok, ct0, ua := acc.Credentials()
@@ -123,40 +120,9 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 			errClass := classifyError(body, respHdrs)
 			switch errClass {
 			case errCSRF:
-				slog.Warn("CSRF error 353, rotating ct0", slog.String("user", acc.Username))
-				acc.RotateCT0()
-				authTok2, ct02, ua2 := acc.Credentials()
-				_ = saveSession(c.cfg.SessionDir, acc.Username, authTok2, ct02)
-				body2, respHdrs2, status2, err2 := c.doPoolReq(bc, method, url, payload, twitterHeaders(authTok2, ct02, ua2))
-				if err2 == nil && status2 == 200 {
-					if newCT0 := extractCT0FromHeaders(respHdrs2); newCT0 != "" {
-						acc.SetCT0(newCT0)
-						authTok3, ct03, _ := acc.Credentials()
-						_ = saveSession(c.cfg.SessionDir, acc.Username, authTok3, ct03)
-					}
-					c.recordAPICall(endpoint, true, false)
-					acc.RecordSuccess()
+				if body2, respHdrs2, ok := c.recoverCSRF(acc, bc, method, url, payload, endpoint, respHdrs, &lastErr); ok {
 					return body2, respHdrs2, nil
 				}
-				acc.RecordFailure()
-				// CSRF retry failed — attempt relogin as session may be expired
-				slog.Warn("CSRF retry failed, attempting relogin", slog.String("user", acc.Username))
-				if reErr := c.relogin(acc); reErr != nil {
-					slog.Warn("relogin after CSRF failed", slog.String("user", acc.Username), slog.Any("error", reErr))
-					c.pool.SoftDeactivate(acc, c.cfg.AuthCooldown)
-					lastErr = reErr
-					continue
-				}
-				// Retry with fresh credentials after relogin
-				authTok3, ct03, ua3 := acc.Credentials()
-				body3, respHdrs3, status3, err3 := c.doPoolReq(bc, method, url, payload, twitterHeaders(authTok3, ct03, ua3))
-				if err3 == nil && status3 == 200 {
-					c.recordAPICall(endpoint, true, false)
-					acc.RecordSuccess()
-					return body3, respHdrs3, nil
-				}
-				c.pool.SoftDeactivate(acc, c.cfg.AuthCooldown)
-				lastErr = fmt.Errorf("post-relogin CSRF request failed")
 				continue
 			case errAuthExpired:
 				slog.Warn("auth expired (code 32), attempting relogin", slog.String("user", acc.Username))
@@ -216,38 +182,9 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 			return body, respHdrs, nil
 
 		case errCSRF:
-			slog.Warn("CSRF error 353, rotating ct0", slog.String("user", acc.Username))
-			acc.RotateCT0()
-			authTok2, ct02, ua2 := acc.Credentials()
-			_ = saveSession(c.cfg.SessionDir, acc.Username, authTok2, ct02)
-			body2, respHdrs2, status2, err2 := c.doPoolReq(bc, method, url, payload, twitterHeaders(authTok2, ct02, ua2))
-			if err2 == nil && status2 == 200 && classifyError(body2, respHdrs2) == errNone {
-				if newCT0 := extractCT0FromHeaders(respHdrs2); newCT0 != "" {
-					acc.SetCT0(newCT0)
-					authTok3, ct03, _ := acc.Credentials()
-					_ = saveSession(c.cfg.SessionDir, acc.Username, authTok3, ct03)
-				}
-				c.recordAPICall(endpoint, true, false)
-				acc.RecordSuccess()
+			if body2, respHdrs2, ok := c.recoverCSRF(acc, bc, method, url, payload, endpoint, respHdrs, &lastErr); ok {
 				return body2, respHdrs2, nil
 			}
-			// CSRF retry failed — attempt relogin
-			slog.Warn("CSRF retry failed, attempting relogin", slog.String("user", acc.Username))
-			if reErr := c.relogin(acc); reErr != nil {
-				slog.Warn("relogin after CSRF failed", slog.String("user", acc.Username), slog.Any("error", reErr))
-				c.pool.SoftDeactivate(acc, c.cfg.AuthCooldown)
-				lastErr = reErr
-				continue
-			}
-			authTok3, ct03, ua3 := acc.Credentials()
-			body3, respHdrs3, status3, err3 := c.doPoolReq(bc, method, url, payload, twitterHeaders(authTok3, ct03, ua3))
-			if err3 == nil && status3 == 200 {
-				c.recordAPICall(endpoint, true, false)
-				acc.RecordSuccess()
-				return body3, respHdrs3, nil
-			}
-			c.pool.SoftDeactivate(acc, c.cfg.AuthCooldown)
-			lastErr = fmt.Errorf("post-relogin CSRF request failed")
 			continue
 
 		case errAuthExpired:
@@ -400,6 +337,101 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 	return body, respHdrs, nil
 }
 
+// recoverCSRF handles a CSRF error 353 for a pool (GET/POST) request without ever
+// generating a client-random ct0. It (1) adopts the SERVER ct0 from the 353
+// response set-cookie when present and retries; (2) only if x.com offered no ct0
+// to adopt, or the adopted ct0 still fails, falls through to relogin and retries
+// with fresh credentials. Returns (body, hdrs, true) on a recovered success;
+// (nil, nil, false) when recovery failed — the caller sets lastErr (via the
+// pointer) and `continue`s to the next pool attempt.
+//
+// Rotating to a random ct0 on a 353 is proven futile against an established
+// session (the live-reproduced killer), so it is never done here.
+func (c *Client) recoverCSRF(acc *Account, bc *stealth.BrowserClient, method, url string, payload []byte, endpoint string, respHdrs map[string]string, lastErr *error) ([]byte, map[string]string, bool) {
+	if serverCT0, ok := csrfRecoveryCT0(respHdrs); ok {
+		slog.Warn("CSRF error 353, adopting server ct0", slog.String("user", acc.Username))
+		acc.SetCT0(serverCT0)
+		authTok2, ct02, ua2 := acc.Credentials()
+		_ = saveSession(c.cfg.SessionDir, acc.Username, authTok2, ct02)
+		body2, respHdrs2, status2, err2 := c.doPoolReq(bc, method, url, payload, twitterHeaders(authTok2, ct02, ua2))
+		if err2 == nil && status2 == 200 && classifyError(body2, respHdrs2) == errNone {
+			if newCT0 := extractCT0FromHeaders(respHdrs2); newCT0 != "" {
+				acc.SetCT0(newCT0)
+				authTok3, ct03, _ := acc.Credentials()
+				_ = saveSession(c.cfg.SessionDir, acc.Username, authTok3, ct03)
+			}
+			c.recordAPICall(endpoint, true, false)
+			acc.RecordSuccess()
+			return body2, respHdrs2, true
+		}
+		acc.RecordFailure()
+		slog.Warn("CSRF retry with server ct0 failed, attempting relogin", slog.String("user", acc.Username))
+	} else {
+		slog.Warn("CSRF error 353, no server ct0 to adopt, attempting relogin", slog.String("user", acc.Username))
+	}
+
+	if reErr := c.relogin(acc); reErr != nil {
+		slog.Warn("relogin after CSRF failed", slog.String("user", acc.Username), slog.Any("error", reErr))
+		c.pool.SoftDeactivate(acc, c.cfg.AuthCooldown)
+		*lastErr = reErr
+		return nil, nil, false
+	}
+	authTok3, ct03, ua3 := acc.Credentials()
+	body3, respHdrs3, status3, err3 := c.doPoolReq(bc, method, url, payload, twitterHeaders(authTok3, ct03, ua3))
+	if err3 == nil && status3 == 200 {
+		c.recordAPICall(endpoint, true, false)
+		acc.RecordSuccess()
+		return body3, respHdrs3, true
+	}
+	c.pool.SoftDeactivate(acc, c.cfg.AuthCooldown)
+	*lastErr = fmt.Errorf("post-relogin CSRF request failed")
+	return nil, nil, false
+}
+
+// recoverCSRFPost is the single-account (doPOST) twin of recoverCSRF. It adopts
+// the SERVER ct0 from the 353 response and retries; only if x.com offered no ct0
+// to adopt (or the adopted ct0 still fails) does it relogin and retry. It never
+// generates a client-random ct0. Returns (body, true) on a recovered success;
+// (nil, false) when recovery failed — the caller sets lastErr and `continue`s.
+func (c *Client) recoverCSRFPost(acc *Account, bc *stealth.BrowserClient, url string, payload []byte, endpoint string, respHdrs map[string]string, lastErr *error) ([]byte, bool) {
+	if serverCT0, ok := csrfRecoveryCT0(respHdrs); ok {
+		slog.Warn("doPOST: CSRF error 353, adopting server ct0", slog.String("user", acc.Username))
+		acc.SetCT0(serverCT0)
+		authTok2, ct02, ua2 := acc.Credentials()
+		_ = saveSession(c.cfg.SessionDir, acc.Username, authTok2, ct02)
+		body2, respHdrs2, status2, err2 := c.doRequestWithBody(bc, "POST", url, twitterHeaders(authTok2, ct02, ua2), bytes.NewReader(payload))
+		if err2 == nil && (status2 == 200 || status2 == 201) && classifyError(body2, respHdrs2) == errNone {
+			if newCT0 := extractCT0FromHeaders(respHdrs2); newCT0 != "" {
+				acc.SetCT0(newCT0)
+				authTok3, ct03, _ := acc.Credentials()
+				_ = saveSession(c.cfg.SessionDir, acc.Username, authTok3, ct03)
+			}
+			c.recordAPICall(endpoint, true, false)
+			acc.RecordSuccess()
+			return body2, true
+		}
+		acc.RecordFailure()
+		slog.Warn("doPOST: CSRF retry with server ct0 failed, attempting relogin", slog.String("user", acc.Username))
+	} else {
+		slog.Warn("doPOST: CSRF error 353, no server ct0 to adopt, attempting relogin", slog.String("user", acc.Username))
+	}
+
+	if reErr := c.relogin(acc); reErr != nil {
+		slog.Warn("doPOST: relogin after CSRF failed", slog.String("user", acc.Username), slog.Any("error", reErr))
+		*lastErr = fmt.Errorf("relogin failed: %w", reErr)
+		return nil, false
+	}
+	authTok3, ct03, ua3 := acc.Credentials()
+	body3, respHdrs3, status3, err3 := c.doRequestWithBody(bc, "POST", url, twitterHeaders(authTok3, ct03, ua3), bytes.NewReader(payload))
+	if err3 == nil && (status3 == 200 || status3 == 201) && classifyError(body3, respHdrs3) == errNone {
+		c.recordAPICall(endpoint, true, false)
+		acc.RecordSuccess()
+		return body3, true
+	}
+	*lastErr = fmt.Errorf("post-relogin CSRF request failed")
+	return nil, false
+}
+
 // doPOST executes a POST mutation with a specific account.
 // Unlike doGET, it does not rotate accounts from the pool — the caller provides the account.
 // Handles CSRF rotation, auth expiry, and retries on transient errors.
@@ -419,13 +451,9 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 			}
 		}
 
-		// Proactive ct0 rotation
-		if acc.CT0Age() > ct0MaxAge {
-			acc.RotateCT0()
-			authTok, ct0, _ := acc.Credentials()
-			_ = saveSession(c.cfg.SessionDir, acc.Username, authTok, ct0)
-		}
-
+		// NO proactive ct0 rotation (see doPoolRequest / shouldProactivelyRotate):
+		// client-rotating an established session's ct0 forces CSRF-353. ct0 stays
+		// current via the server's set-cookie adopted on each success below.
 		bc := c.clientForAccount(acc)
 		authTok, ct0, ua := acc.Credentials()
 		body, respHdrs, status, err := c.doRequestWithBody(bc, "POST", url, twitterHeaders(authTok, ct0, ua), bytes.NewReader(payload))
@@ -460,18 +488,9 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 			errClass := classifyError(body, respHdrs)
 			switch errClass {
 			case errCSRF:
-				slog.Warn("doPOST: CSRF error 353, rotating ct0", slog.String("user", acc.Username))
-				acc.RotateCT0()
-				authTok2, ct02, ua2 := acc.Credentials()
-				_ = saveSession(c.cfg.SessionDir, acc.Username, authTok2, ct02)
-				body2, _, status2, err2 := c.doRequestWithBody(bc, "POST", url, twitterHeaders(authTok2, ct02, ua2), bytes.NewReader(payload))
-				if err2 == nil && (status2 == 200 || status2 == 201) {
-					c.recordAPICall(endpoint, true, false)
-					acc.RecordSuccess()
+				if body2, ok := c.recoverCSRFPost(acc, bc, url, payload, endpoint, respHdrs, &lastErr); ok {
 					return body2, nil
 				}
-				acc.RecordFailure()
-				lastErr = fmt.Errorf("CSRF retry failed")
 				continue
 			case errAuthExpired:
 				slog.Warn("doPOST: auth expired, attempting relogin", slog.String("user", acc.Username))
@@ -512,17 +531,9 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 			acc.RecordSuccess()
 			return body, nil
 		case errCSRF:
-			slog.Warn("doPOST: CSRF in 200, rotating ct0", slog.String("user", acc.Username))
-			acc.RotateCT0()
-			authTok2, ct02, ua2 := acc.Credentials()
-			_ = saveSession(c.cfg.SessionDir, acc.Username, authTok2, ct02)
-			body2, _, status2, err2 := c.doRequestWithBody(bc, "POST", url, twitterHeaders(authTok2, ct02, ua2), bytes.NewReader(payload))
-			if err2 == nil && (status2 == 200 || status2 == 201) && classifyError(body2, nil) == errNone {
-				c.recordAPICall(endpoint, true, false)
-				acc.RecordSuccess()
+			if body2, ok := c.recoverCSRFPost(acc, bc, url, payload, endpoint, respHdrs, &lastErr); ok {
 				return body2, nil
 			}
-			lastErr = fmt.Errorf("CSRF retry failed")
 			continue
 		default:
 			c.recordAPICall(endpoint, false, false)

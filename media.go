@@ -404,13 +404,9 @@ func (c *Client) doMediaRequest(ctx context.Context, acc *Account, method, urlSt
 			}
 		}
 
-		// Proactive ct0 rotation.
-		if acc.CT0Age() > ct0MaxAge {
-			acc.RotateCT0()
-			authTok, ct0, _ := acc.Credentials()
-			_ = saveSession(c.cfg.SessionDir, acc.Username, authTok, ct0)
-		}
-
+		// NO proactive ct0 rotation (see doPoolRequest / shouldProactivelyRotate):
+		// client-rotating an established session's ct0 forces CSRF-353. ct0 stays
+		// current via the server's set-cookie adopted on each success below.
 		bc := c.clientForAccount(acc)
 		authTok, ct0, ua := acc.Credentials()
 		body, respHdrs, status, err := c.doPoolReq(bc, method, urlStr, payload, mediaHeaders(authTok, ct0, ua, contentType))
@@ -440,18 +436,9 @@ func (c *Client) doMediaRequest(ctx context.Context, acc *Account, method, urlSt
 			c.recordAPICall(epUploadMedia, false, false)
 			switch classifyError(body, respHdrs) {
 			case errCSRF:
-				slog.Warn("UploadMedia: CSRF error 353, rotating ct0", slog.String("user", acc.Username))
-				acc.RotateCT0()
-				authTok2, ct02, ua2 := acc.Credentials()
-				_ = saveSession(c.cfg.SessionDir, acc.Username, authTok2, ct02)
-				body2, _, status2, err2 := c.doPoolReq(bc, method, urlStr, payload, mediaHeaders(authTok2, ct02, ua2, contentType))
-				if err2 == nil && isUploadOK(status2) {
-					c.recordAPICall(epUploadMedia, true, false)
-					acc.RecordSuccess()
+				if body2, ok := c.recoverCSRFMedia(acc, bc, method, urlStr, payload, contentType, respHdrs, &lastErr); ok {
 					return body2, nil
 				}
-				acc.RecordFailure()
-				lastErr = fmt.Errorf("CSRF retry failed")
 				continue
 			case errAuthExpired:
 				slog.Warn("UploadMedia: auth expired, attempting relogin", slog.String("user", acc.Username))
@@ -504,6 +491,51 @@ func (c *Client) doMediaRequest(ctx context.Context, acc *Account, method, urlSt
 // isUploadOK reports whether an HTTP status counts as a successful upload step.
 func isUploadOK(status int) bool {
 	return status == http.StatusOK || status == http.StatusCreated || status == http.StatusNoContent
+}
+
+// recoverCSRFMedia is the media-upload (doMediaRequest) twin of recoverCSRF. It
+// adopts the SERVER ct0 from the 353 response and retries; only if x.com offered
+// no ct0 to adopt (or the adopted ct0 still fails) does it relogin and retry. It
+// never generates a client-random ct0. Returns (body, true) on a recovered
+// success; (nil, false) when recovery failed — the caller sets lastErr and
+// `continue`s.
+func (c *Client) recoverCSRFMedia(acc *Account, bc *stealth.BrowserClient, method, urlStr string, payload []byte, contentType string, respHdrs map[string]string, lastErr *error) ([]byte, bool) {
+	if serverCT0, ok := csrfRecoveryCT0(respHdrs); ok {
+		slog.Warn("UploadMedia: CSRF error 353, adopting server ct0", slog.String("user", acc.Username))
+		acc.SetCT0(serverCT0)
+		authTok2, ct02, ua2 := acc.Credentials()
+		_ = saveSession(c.cfg.SessionDir, acc.Username, authTok2, ct02)
+		body2, respHdrs2, status2, err2 := c.doPoolReq(bc, method, urlStr, payload, mediaHeaders(authTok2, ct02, ua2, contentType))
+		if err2 == nil && isUploadOK(status2) && classifyError(body2, respHdrs2) == errNone {
+			if newCT0 := extractCT0FromHeaders(respHdrs2); newCT0 != "" {
+				acc.SetCT0(newCT0)
+				authTok3, ct03, _ := acc.Credentials()
+				_ = saveSession(c.cfg.SessionDir, acc.Username, authTok3, ct03)
+			}
+			c.recordAPICall(epUploadMedia, true, false)
+			acc.RecordSuccess()
+			return body2, true
+		}
+		acc.RecordFailure()
+		slog.Warn("UploadMedia: CSRF retry with server ct0 failed, attempting relogin", slog.String("user", acc.Username))
+	} else {
+		slog.Warn("UploadMedia: CSRF error 353, no server ct0 to adopt, attempting relogin", slog.String("user", acc.Username))
+	}
+
+	if reErr := c.relogin(acc); reErr != nil {
+		slog.Warn("UploadMedia: relogin after CSRF failed", slog.String("user", acc.Username), slog.Any("error", reErr))
+		*lastErr = fmt.Errorf("relogin failed: %w", reErr)
+		return nil, false
+	}
+	authTok3, ct03, ua3 := acc.Credentials()
+	body3, respHdrs3, status3, err3 := c.doPoolReq(bc, method, urlStr, payload, mediaHeaders(authTok3, ct03, ua3, contentType))
+	if err3 == nil && isUploadOK(status3) && classifyError(body3, respHdrs3) == errNone {
+		c.recordAPICall(epUploadMedia, true, false)
+		acc.RecordSuccess()
+		return body3, true
+	}
+	*lastErr = fmt.Errorf("post-relogin upload failed")
+	return nil, false
 }
 
 // mediaHeaders returns the authenticated headers for a media upload request.

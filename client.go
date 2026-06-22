@@ -126,6 +126,12 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		accountPacer:         accountPacer,
 	}
 
+	// Default per-account relogin circuit breaker: a transient login outage must
+	// not repeatedly destroy still-valid sessions or storm the WAF-blocked
+	// guest-token/login endpoint. A consumer's SetAutoReloginGate (go-social)
+	// overrides this — wiring is non-clobbering.
+	wireDefaultReloginGate(c)
+
 	for _, acc := range cfg.Accounts {
 		if acc.Proxy != "" {
 			accClient, err := stealth.NewClient(

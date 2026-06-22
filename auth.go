@@ -78,7 +78,20 @@ func loadSession(dir, username string, ttl time.Duration) (authToken, ct0 string
 	return s.AuthToken, s.CT0, nil
 }
 
-// relogin clears auth credentials and performs a fresh login.
+// reloginOutcomeRecorder is implemented by gates (e.g. the default
+// reloginBreaker) that track consecutive relogin outcomes per account. relogin()
+// feeds the outcome back so the gate can trip after repeated failures and reset
+// on success. A gate that does not implement it (e.g. go-social's external gate)
+// simply receives no feedback — Allowed still governs.
+type reloginOutcomeRecorder interface {
+	RecordFailure(username string)
+	RecordSuccess(username string)
+}
+
+// relogin clears auth credentials and performs a fresh login. The gate is
+// consulted (and credentials are preserved) BEFORE the destructive clear, so an
+// OPEN breaker neither destroys a still-valid session nor hammers the
+// WAF-blocked login endpoint.
 func (c *Client) relogin(acc *Account) error {
 	if c.reloginGate != nil {
 		if ok, reason := c.reloginGate.Allowed(context.Background(), acc.Username); !ok {
@@ -87,6 +100,7 @@ func (c *Client) relogin(acc *Account) error {
 			return fmt.Errorf("relogin blocked: %s", reason)
 		}
 	}
+	rec, _ := c.reloginGate.(reloginOutcomeRecorder)
 	slog.Info("attempting relogin", slog.String("user", acc.Username))
 
 	bc := c.clientForAccount(acc)
@@ -95,9 +109,15 @@ func (c *Client) relogin(acc *Account) error {
 	_ = os.Remove(sessionPath(sessionDir(c.cfg.SessionDir), acc.Username))
 
 	if err := c.loadOrLogin(acc, bc); err != nil {
+		if rec != nil {
+			rec.RecordFailure(acc.Username)
+		}
 		return fmt.Errorf("relogin %s: %w", acc.Username, err)
 	}
 
+	if rec != nil {
+		rec.RecordSuccess(acc.Username)
+	}
 	acc.Reset()
 	slog.Info("relogin succeeded", slog.String("user", acc.Username))
 	return nil
