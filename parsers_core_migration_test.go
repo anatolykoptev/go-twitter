@@ -68,6 +68,102 @@ func TestParseUserByScreenName_CoreShape(t *testing.T) {
 	if !user.HasBio {
 		t.Fatal("HasBio: want true, got false")
 	}
+	// Bio is grounded in the REAL captured body. This fixture carries the bio in
+	// BOTH the post-migration profile_bio.description and the still-populated
+	// legacy.description (identical content) — the migration-in-progress
+	// signature. Asserting the exact text proves Bio parses to the captured value
+	// regardless of which source bio() reads.
+	const wantBio = "Buy the book (proceeds go to charity):\nEnglish: https://t.co/UxgYxYJ3NF\nChinese: https://t.co/ItFd8FEyuK \n\n@binance\n@BNBchain\n@YZiLabs\n@GiggleAcademy"
+	if user.Bio != wantBio {
+		t.Fatalf("Bio: want %q, got %q", wantBio, user.Bio)
+	}
+}
+
+// TestParseUserResult_BioProfileBioPath proves Bio reads the post-migration
+// profile_bio.description location. Here legacy.description is ABSENT while
+// profile_bio.description carries the text — the shape X serves once the bio
+// field finishes migrating out of legacy (mirroring the core.* migration this
+// PR fixes). With the pre-fix parser (which read only r.Legacy.Description) this
+// returns an empty Bio / HasBio=false; the bio() helper makes it read the new
+// path. This is the RED-without-the-fix proof for the profile_bio fallback.
+func TestParseUserResult_BioProfileBioPath(t *testing.T) {
+	body := []byte(`{
+		"data": {
+			"user": {
+				"result": {
+					"__typename": "User",
+					"id": "VXNlcjoxMDA=",
+					"rest_id": "100",
+					"core": {
+						"name": "Migrated Bio User",
+						"screen_name": "migrated_bio",
+						"created_at": "Mon Jan 02 15:04:05 +0000 2021"
+					},
+					"profile_bio": {
+						"description": "bio from the new profile_bio location"
+					},
+					"avatar": {
+						"image_url": "https://pbs.twimg.com/profile_images/100/new.jpg"
+					},
+					"legacy": {
+						"followers_count": 5,
+						"friends_count": 2,
+						"statuses_count": 9,
+						"listed_count": 1
+					},
+					"is_blue_verified": true
+				}
+			}
+		}
+	}`)
+
+	user, err := parseUserByScreenName(body)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	const wantBio = "bio from the new profile_bio location"
+	if user.Bio != wantBio {
+		t.Fatalf("Bio: want %q from profile_bio.description, got %q (new path not read)", wantBio, user.Bio)
+	}
+	if !user.HasBio {
+		t.Fatal("HasBio: want true from profile_bio.description, got false")
+	}
+}
+
+// TestParseUserResult_BioLegacyFallback proves the bio() helper still falls back
+// to the pre-migration legacy.description when profile_bio is absent, so the new
+// fallback is non-destructive for the old shape X may still serve during rollout.
+func TestParseUserResult_BioLegacyFallback(t *testing.T) {
+	body := []byte(`{
+		"data": {
+			"user": {
+				"result": {
+					"__typename": "User",
+					"id": "VXNlcjoxMDE=",
+					"rest_id": "101",
+					"legacy": {
+						"name": "Legacy Bio User",
+						"screen_name": "legacy_bio",
+						"description": "bio from legacy.description",
+						"followers_count": 5
+					},
+					"is_blue_verified": false
+				}
+			}
+		}
+	}`)
+
+	user, err := parseUserByScreenName(body)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	const wantBio = "bio from legacy.description"
+	if user.Bio != wantBio {
+		t.Fatalf("Bio: want %q from legacy.description fallback, got %q", wantBio, user.Bio)
+	}
+	if !user.HasBio {
+		t.Fatal("HasBio: want true from legacy.description fallback, got false")
+	}
 }
 
 // TestParseUserResult_LegacyFallback proves the fix is non-destructive across

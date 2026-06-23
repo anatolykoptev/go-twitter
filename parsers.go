@@ -421,6 +421,12 @@ type userResult struct {
 	Verification struct {
 		Verified bool `json:"verified"`
 	} `json:"verification"`
+	// ProfileBio is the post-migration bio location; the live cz_binance
+	// capture (2026-06-23) carries it alongside a still-populated
+	// legacy.description, the same migration-in-progress signature as core.*.
+	ProfileBio struct {
+		Description string `json:"description"`
+	} `json:"profile_bio"`
 	Legacy struct {
 		Name            string `json:"name"`
 		ScreenName      string `json:"screen_name"`
@@ -470,8 +476,18 @@ func (r userResult) avatarURL() string {
 	return r.Legacy.ProfileImageURL
 }
 
-// isVerified reports verification across both shapes: blue check, the
-// post-migration verification.verified, or the pre-migration legacy.verified.
+// bio returns the profile description, preferring the post-migration
+// profile_bio.description then the pre-migration legacy.description.
+func (r userResult) bio() string {
+	if r.ProfileBio.Description != "" {
+		return r.ProfileBio.Description
+	}
+	return r.Legacy.Description
+}
+
+// isVerified reports verification from any of three sources: the blue check
+// (is_blue_verified), the post-migration verification.verified, or the
+// pre-migration legacy.verified.
 func (r userResult) isVerified() bool {
 	return r.IsBlueVerified || r.Verification.Verified || r.Legacy.Verified
 }
@@ -573,6 +589,27 @@ func extractTweetsFromTimeline(tl timelineObj, defaultAuthorID string) ([]*Tweet
 	return tweets, nil
 }
 
+// parseTwitterTime parses X's created_at format. An empty input yields the zero
+// time silently (absent field is normal). A non-empty value that fails to parse
+// also yields the zero time but logs a breadcrumb: this is the silent-zero
+// failure class — if X migrates the created_at format the way it migrated the
+// identity fields out of legacy.*, the field would otherwise zero with no
+// signal. The site label identifies which path surfaced the unparseable value.
+func parseTwitterTime(raw, site string) time.Time {
+	if raw == "" {
+		return time.Time{}
+	}
+	t, err := time.Parse("Mon Jan 02 15:04:05 +0000 2006", raw)
+	if err != nil {
+		slog.Debug("created_at non-empty but unparseable; field zeroed",
+			slog.String("site", site),
+			slog.String("raw", raw),
+			slog.Any("error", err))
+		return time.Time{}
+	}
+	return t
+}
+
 func parseUserResult(r userResult) (*TwitterUser, error) {
 	if r.TypeName == "UserUnavailable" {
 		return nil, fmt.Errorf("user unavailable (suspended or restricted)")
@@ -580,14 +617,8 @@ func parseUserResult(r userResult) (*TwitterUser, error) {
 	if r.RestID == "" {
 		return nil, fmt.Errorf("empty user rest_id (typename=%s)", r.TypeName)
 	}
-	var createdAt time.Time
-	if raw := r.createdAtRaw(); raw != "" {
-		t, err := time.Parse("Mon Jan 02 15:04:05 +0000 2006", raw)
-		if err == nil {
-			createdAt = t
-		}
-	}
-	bio := strings.TrimSpace(r.Legacy.Description)
+	createdAt := parseTwitterTime(r.createdAtRaw(), "user")
+	bio := strings.TrimSpace(r.bio())
 	avatarURL := r.avatarURL()
 	return &TwitterUser{
 		ID:          r.RestID,
@@ -615,13 +646,7 @@ func parseTweetResult(r tweetResult, defaultAuthorID string) (*Tweet, error) {
 		authorID = r.Legacy.UserIDStr
 	}
 
-	var createdAt time.Time
-	if r.Legacy.CreatedAt != "" {
-		t, err := time.Parse("Mon Jan 02 15:04:05 +0000 2006", r.Legacy.CreatedAt)
-		if err == nil {
-			createdAt = t
-		}
-	}
+	createdAt := parseTwitterTime(r.Legacy.CreatedAt, "tweet")
 
 	views := 0
 	if r.Views.Count != "" {
