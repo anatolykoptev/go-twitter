@@ -1,0 +1,40 @@
+name: release-please
+
+# Conventional-commit-driven versioning: opens a release PR on every push to main;
+# merging the release PR cuts the tag + creates the GitHub Release.
+# Go module: the tag IS the release — proxy.golang.org serves it automatically,
+# no publish job needed (go-release-setup skill).
+#
+# Auth: the krolik-release-bot GitHub App (App 4335933) signs the release PR + tag,
+# NOT the default GITHUB_TOKEN. App-created PRs get real CI runs and App-created
+# tags trigger downstream `on: push: tags` workflows.
+# Creds: RELEASE_BOT_APP_ID (var) + RELEASE_BOT_PRIVATE_KEY (secret), fleet standard.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  release-please:
+    permissions:
+      contents: write
+      pull-requests: write
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 10
+    steps:
+      - uses: actions/create-github-app-token@v2
+        id: bot-token
+        with:
+          app-id: ${{ vars.RELEASE_BOT_APP_ID }}
+          private-key: ${{ secrets.RELEASE_BOT_PRIVATE_KEY }}
+
+      - uses: googleapis/release-please-action@v5.0.0
+        id: release
+        with:
+          token: ${{ steps.bot-token.outputs.token }}
+          target-branch: main
+          config-file: .release-please-config.json
+          manifest-file: .release-please-manifest.json
