@@ -112,7 +112,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 		case status == 429:
 			c.recordAPICall(endpoint, false, true)
 			acc.MarkEndpointRateLimited(endpoint, parseRateLimitReset(respHdrs["x-rate-limit-reset"]))
-			lastErr = &APIError{Status: status, Class: errBanned, Message: "429 rate limited"}
+			lastErr = &APIError{Status: status, Class: errRateLimited, Message: "429 rate limited"}
 			continue
 
 		case status == 401 || status == 403:
@@ -129,7 +129,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 				if reErr := c.relogin(acc); reErr != nil {
 					slog.Warn("relogin failed", slog.String("user", acc.Username), slog.Any("error", reErr))
 					c.pool.SoftDeactivate(acc, c.cfg.AuthCooldown)
-					lastErr = reErr
+					lastErr = &APIError{Class: errAuthExpired, Err: reErr, Message: reErr.Error()}
 					continue
 				}
 				authTok2, ct02, ua2 := acc.Credentials()
@@ -140,7 +140,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 					return body2, respHdrs2, nil
 				}
 				c.pool.SoftDeactivate(acc, c.cfg.AuthCooldown)
-				lastErr = fmt.Errorf("post-relogin request failed")
+				lastErr = &APIError{Status: status2, Codes: extractErrorCodes(body2), Class: errAuthExpired, Err: err2, Message: "post-relogin request failed"}
 				continue
 			default:
 				acc.RecordFailure()
@@ -196,7 +196,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 			if reErr := c.relogin(acc); reErr != nil {
 				slog.Warn("relogin failed, soft-deactivating", slog.String("user", acc.Username), slog.Any("error", reErr))
 				c.pool.SoftDeactivate(acc, c.cfg.AuthCooldown)
-				lastErr = reErr
+				lastErr = &APIError{Class: errAuthExpired, Err: reErr, Message: reErr.Error()}
 				continue
 			}
 			authTok2, ct02, ua2 := acc.Credentials()
@@ -207,9 +207,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 				return body2, respHdrs2, nil
 			}
 			c.pool.SoftDeactivate(acc, c.cfg.AuthCooldown)
-			apiErr := newAPIError(status2, body2, respHdrs2)
-			apiErr.Message = "post-relogin request failed"
-			lastErr = apiErr
+			lastErr = &APIError{Status: status2, Codes: extractErrorCodes(body2), Class: errAuthExpired, Err: err2, Message: "post-relogin request failed"}
 			continue
 
 		case errInternal:
@@ -317,7 +315,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 	if status == 429 {
 		c.recordAPICall(endpoint, false, true)
 		c.markGuestTokenRateLimited(parseRateLimitReset(respHdrs["x-rate-limit-reset"]))
-		return nil, nil, &APIError{Status: status, Class: errBanned, Message: fmt.Sprintf("guest token rate-limited for %s", endpoint)}
+		return nil, nil, &APIError{Status: status, Class: errRateLimited, Message: fmt.Sprintf("guest token rate-limited for %s", endpoint)}
 	}
 	if status == 401 || status == 403 {
 		slog.Warn("guest token expired, reacquiring", slog.String("endpoint", endpoint), slog.Int("status", status))
@@ -387,7 +385,7 @@ func (c *Client) recoverCSRF(acc *Account, bc *stealth.BrowserClient, method, ur
 	if reErr := c.relogin(acc); reErr != nil {
 		slog.Warn("relogin after CSRF failed", slog.String("user", acc.Username), slog.Any("error", reErr))
 		c.pool.SoftDeactivate(acc, c.cfg.AuthCooldown)
-		*lastErr = reErr
+		*lastErr = &APIError{Class: errAuthExpired, Err: reErr, Message: reErr.Error()}
 		return nil, nil, false
 	}
 	authTok3, ct03, ua3 := acc.Credentials()
@@ -398,9 +396,7 @@ func (c *Client) recoverCSRF(acc *Account, bc *stealth.BrowserClient, method, ur
 		return body3, respHdrs3, true
 	}
 	c.pool.SoftDeactivate(acc, c.cfg.AuthCooldown)
-	apiErr := newAPIError(status3, body3, respHdrs3)
-	apiErr.Message = "post-relogin CSRF request failed"
-	*lastErr = apiErr
+	*lastErr = &APIError{Status: status3, Codes: extractErrorCodes(body3), Class: errAuthExpired, Err: err3, Message: "post-relogin CSRF request failed"}
 	return nil, nil, false
 }
 
@@ -434,7 +430,7 @@ func (c *Client) recoverCSRFPost(acc *Account, bc *stealth.BrowserClient, url st
 
 	if reErr := c.relogin(acc); reErr != nil {
 		slog.Warn("doPOST: relogin after CSRF failed", slog.String("user", acc.Username), slog.Any("error", reErr))
-		*lastErr = fmt.Errorf("relogin failed: %w", reErr)
+		*lastErr = &APIError{Class: errAuthExpired, Err: reErr, Message: "relogin failed: " + reErr.Error()}
 		return nil, false
 	}
 	authTok3, ct03, ua3 := acc.Credentials()
@@ -444,9 +440,7 @@ func (c *Client) recoverCSRFPost(acc *Account, bc *stealth.BrowserClient, url st
 		acc.RecordSuccess()
 		return body3, true
 	}
-	apiErr := newAPIError(status3, body3, respHdrs3)
-	apiErr.Message = "post-relogin CSRF request failed"
-	*lastErr = apiErr
+	*lastErr = &APIError{Status: status3, Codes: extractErrorCodes(body3), Class: errAuthExpired, Err: err3, Message: "post-relogin CSRF request failed"}
 	return nil, false
 }
 
@@ -498,7 +492,7 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 		case status == 429:
 			c.recordAPICall(endpoint, false, true)
 			acc.MarkEndpointRateLimited(endpoint, parseRateLimitReset(respHdrs["x-rate-limit-reset"]))
-			lastErr = &APIError{Status: status, Class: errBanned, Message: "429 rate limited"}
+			lastErr = &APIError{Status: status, Class: errRateLimited, Message: "429 rate limited"}
 			continue
 
 		case status == 401 || status == 403:
@@ -513,19 +507,17 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 			case errAuthExpired:
 				slog.Warn("doPOST: auth expired, attempting relogin", slog.String("user", acc.Username))
 				if reErr := c.relogin(acc); reErr != nil {
-					lastErr = fmt.Errorf("relogin failed: %w", reErr)
+					lastErr = &APIError{Class: errAuthExpired, Err: reErr, Message: "relogin failed: " + reErr.Error()}
 					continue
 				}
 				authTok2, ct02, ua2 := acc.Credentials()
-				body2, respHdrs2, status2, err2 := c.doRequestWithBody(bc, "POST", url, twitterHeaders(authTok2, ct02, ua2), bytes.NewReader(payload))
+				body2, _, status2, err2 := c.doRequestWithBody(bc, "POST", url, twitterHeaders(authTok2, ct02, ua2), bytes.NewReader(payload))
 				if err2 == nil && (status2 == 200 || status2 == 201) {
 					c.recordAPICall(endpoint, true, false)
 					acc.RecordSuccess()
 					return body2, nil
 				}
-				apiErr := newAPIError(status2, body2, respHdrs2)
-				apiErr.Message = "post-relogin request failed"
-				lastErr = apiErr
+				lastErr = &APIError{Status: status2, Codes: extractErrorCodes(body2), Class: errAuthExpired, Err: err2, Message: "post-relogin request failed"}
 				continue
 			default:
 				acc.RecordFailure()

@@ -13,7 +13,8 @@ type errorClass int
 
 const (
 	errNone          errorClass = iota
-	errBanned                   // 88 — rate limit abuse (also HTTP 429)
+	errBanned                   // 88 — account banned / rate-limit abuse (durable)
+	errRateLimited              // HTTP 429 — rate limit (transient)
 	errSuspended                // 64 — account suspended
 	errLocked                   // 326 — account locked (captcha needed)
 	errCSRF                     // 353 — csrf token mismatch
@@ -104,15 +105,24 @@ func newAPIError(status int, body []byte, hdrs map[string]string) *APIError {
 	}
 	switch {
 	case e.Class == errNone && status == 429:
-		e.Class = errBanned
+		e.Class = errRateLimited
 	case e.Class == errNone && status == 403:
 		e.Class = errForbidden
 	}
 	return e
 }
 
-// IsRateLimited reports a rate-limit condition (code 88 or HTTP 429).
+// IsRateLimited reports a rate-limit condition (HTTP 429).
 func IsRateLimited(err error) bool {
+	var ae *APIError
+	if errors.As(err, &ae) {
+		return ae.Class == errRateLimited
+	}
+	return false
+}
+
+// IsBanned reports an account-banned condition (code 88).
+func IsBanned(err error) bool {
 	var ae *APIError
 	if errors.As(err, &ae) {
 		return ae.Class == errBanned

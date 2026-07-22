@@ -1,6 +1,7 @@
 package twitter
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -43,7 +44,8 @@ func TestAPIErrorPredicates_WrappedError(t *testing.T) {
 		pred func(error) bool
 		ae   *APIError
 	}{
-		{"IsRateLimited", IsRateLimited, &APIError{Status: 429, Class: errBanned}},
+		{"IsRateLimited", IsRateLimited, &APIError{Status: 429, Class: errRateLimited}},
+		{"IsBanned", IsBanned, &APIError{Status: 200, Class: errBanned, Codes: []int{88}}},
 		{"IsForbidden", IsForbidden, &APIError{Status: 403, Class: errForbidden}},
 		{"IsSuspended", IsSuspended, &APIError{Status: 200, Class: errSuspended}},
 		{"IsLocked", IsLocked, &APIError{Status: 200, Class: errLocked}},
@@ -70,6 +72,7 @@ func TestAPIError_Classification(t *testing.T) {
 		pred func(error) bool
 	}{
 		{"IsRateLimited", IsRateLimited},
+		{"IsBanned", IsBanned},
 		{"IsForbidden", IsForbidden},
 		{"IsSuspended", IsSuspended},
 		{"IsLocked", IsLocked},
@@ -87,8 +90,8 @@ func TestAPIError_Classification(t *testing.T) {
 		class   errorClass
 		trueFor string
 	}{
-		{"rate limit code 88", 200, `{"errors":[{"code":88}]}`, errBanned, "IsRateLimited"},
-		{"rate limit HTTP 429", 429, ``, errBanned, "IsRateLimited"},
+		{"rate limit code 88", 200, `{"errors":[{"code":88}]}`, errBanned, "IsBanned"},
+		{"rate limit HTTP 429", 429, ``, errRateLimited, "IsRateLimited"},
 		{"forbidden HTTP 403", 403, ``, errForbidden, "IsForbidden"},
 		{"suspended 64", 200, `{"errors":[{"code":64}]}`, errSuspended, "IsSuspended"},
 		{"locked 326", 200, `{"errors":[{"code":326}]}`, errLocked, "IsLocked"},
@@ -136,5 +139,65 @@ func TestParseRateLimitReset(t *testing.T) {
 	result = parseRateLimitReset("not-a-number")
 	if time.Until(result) < 14*time.Minute {
 		t.Fatal("expected ~15min fallback for invalid input")
+	}
+}
+
+func TestIsBannedAndRateLimited(t *testing.T) {
+	banned := newAPIError(200, []byte(`{"errors":[{"code":88}]}`), nil)
+	if !IsBanned(banned) {
+		t.Fatal("IsBanned must be true for code 88")
+	}
+	if IsRateLimited(banned) {
+		t.Fatal("IsRateLimited must be false for code 88 after split")
+	}
+
+	rateLimited := newAPIError(429, nil, nil)
+	if !IsRateLimited(rateLimited) {
+		t.Fatalf("IsRateLimited must be true for HTTP 429, got class %d", rateLimited.Class)
+	}
+	if IsBanned(rateLimited) {
+		t.Fatal("IsBanned must be false for HTTP 429")
+	}
+}
+
+func TestAPIError_DoubleWrap(t *testing.T) {
+	cause := errors.New("underlying relogin error")
+	tests := []struct {
+		name      string
+		pred      func(error) bool
+		ae        *APIError
+		wantCause error
+	}{
+		{"IsRateLimited", IsRateLimited, &APIError{Status: 429, Class: errRateLimited, Message: "429 rate limited"}, nil},
+		{"IsSuspended", IsSuspended, &APIError{Status: 200, Class: errSuspended, Message: "account suspended"}, nil},
+		{"IsAuthExpired", IsAuthExpired, &APIError{Status: 401, Class: errAuthExpired, Message: "relogin failed: " + cause.Error(), Err: cause}, cause},
+	}
+
+	endpoint := "TestEndpoint"
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			inner := fmt.Errorf("inner: %w", tt.ae)
+			outer := fmt.Errorf("pool exhausted for %s (requires auth): %w", endpoint, inner)
+			if !tt.pred(outer) {
+				t.Errorf("%s must detect APIError through two wrappers", tt.name)
+			}
+			if tt.wantCause != nil && !errors.Is(outer, tt.wantCause) {
+				t.Errorf("outer error must wrap cause %v", tt.wantCause)
+			}
+		})
+	}
+}
+
+func TestAPIError_Error(t *testing.T) {
+	msg := "exact message passthrough"
+	ae := &APIError{Status: 429, Class: errRateLimited, Message: msg}
+	if got := ae.Error(); got != msg {
+		t.Fatalf("Error() = %q, want %q", got, msg)
+	}
+
+	ae2 := &APIError{Status: 403, Class: errForbidden}
+	want := fmt.Sprintf("twitter: HTTP %d: class %d", ae2.Status, ae2.Class)
+	if got := ae2.Error(); got != want {
+		t.Fatalf("Error() = %q, want %q", got, want)
 	}
 }

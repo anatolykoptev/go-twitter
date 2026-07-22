@@ -429,7 +429,7 @@ func (c *Client) doMediaRequest(ctx context.Context, acc *Account, method, urlSt
 		case status == 429:
 			c.recordAPICall(epUploadMedia, false, true)
 			acc.MarkEndpointRateLimited(epUploadMedia, parseRateLimitReset(respHdrs["x-rate-limit-reset"]))
-			lastErr = &APIError{Status: status, Class: errBanned, Message: "429 rate limited"}
+			lastErr = &APIError{Status: status, Class: errRateLimited, Message: "429 rate limited"}
 			continue
 
 		case status == 401 || status == 403:
