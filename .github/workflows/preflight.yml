@@ -1,0 +1,31 @@
+name: preflight
+
+# Pre-merge build/test gate for the public go-twitter module.
+# Public repo -> free GitHub-hosted `ubuntu-24.04-arm` runners (arm64 = prod parity).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  preflight:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - name: make preflight
+        run: make preflight
