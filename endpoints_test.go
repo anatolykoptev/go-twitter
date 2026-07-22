@@ -208,6 +208,41 @@ func TestEngagementEndpointsRegistered(t *testing.T) {
 	}
 }
 
+// TestQueryIDCompleteness_GeneratedOrManualAllowed asserts every operation in
+// Endpoints is either covered by cmd/gql-sync's generated queryIDs map or listed
+// in knownManualQueryIDs. This makes the manual-only gap fail-closed: a new op
+// added to Endpoints without generated coverage or an explicit allowlist entry
+// cannot ship silently.
+func TestQueryIDCompleteness_GeneratedOrManualAllowed(t *testing.T) {
+	for name := range Endpoints {
+		if id, ok := generatedQueryIDs[name]; ok && id != "" {
+			continue
+		}
+		if reason, ok := knownManualQueryIDs[name]; ok && reason != "" {
+			t.Logf("manual queryID allowed for %s: %s", name, reason)
+			continue
+		}
+		t.Errorf("endpoint %q has no generated queryID and is not in knownManualQueryIDs; add it to generated queryIDs (via gql-sync) or document it as manual", name)
+	}
+	for name := range knownManualQueryIDs {
+		if _, ok := Endpoints[name]; !ok {
+			t.Errorf("knownManualQueryIDs contains stale entry %q not present in Endpoints", name)
+		}
+	}
+}
+
+// TestQueryIDCompleteness_AllowlistNotGrowing asserts a manual allowlist entry
+// must not also appear in generatedQueryIDs. If gql-sync starts extracting a
+// previously manual op, the allowlist entry must be removed so the gap stays
+// visible. This is cheap to run in the weekly gql-sync drift workflow.
+func TestQueryIDCompleteness_AllowlistNotGrowing(t *testing.T) {
+	for name := range knownManualQueryIDs {
+		if id, ok := generatedQueryIDs[name]; ok && id != "" {
+			t.Errorf("manual allowlist entry %q also has generated queryID %q; remove it from knownManualQueryIDs", name, id)
+		}
+	}
+}
+
 func TestApplyEnvOverrides_EmptyEnv(t *testing.T) {
 	orig := Endpoints["TweetDetail"].ID
 	// Ensure env var is unset.
