@@ -142,6 +142,30 @@ var envOverrides = map[string]string{
 	"DeleteRetweet":   "TWITTER_QID_DELETE_RETWEET",
 }
 
+// knownManualQueryIDs is the explicit allowlist of Endpoints operations whose
+// queryID is NOT extracted by cmd/gql-sync from the public unauthenticated x.com
+// bundles. Every entry carries a one-line reason. A new endpoint added to
+// Endpoints without either a generated queryID or an entry here fails
+// TestQueryIDCompleteness.
+var knownManualQueryIDs = map[string]string{
+	// T5 read cluster — route-split chunks for these ops are not reachable from
+	// the unauthenticated x.com/home warm page, so gql-sync cannot seed them.
+	"Bookmarks":                "requires authenticated session; not in the unauthenticated x.com bundles gql-sync walks",
+	"HomeTimeline":             "requires authenticated session; not in the unauthenticated x.com bundles gql-sync walks",
+	"HomeLatestTimeline":       "requires authenticated session; not in the unauthenticated x.com bundles gql-sync walks",
+	"ListLatestTweetsTimeline": "requires authenticated session; not in the unauthenticated x.com bundles gql-sync walks",
+	"CommunityTweetsTimeline":  "requires authenticated session; not in the unauthenticated x.com bundles gql-sync walks",
+	"BlueVerifiedFollowers":    "requires authenticated session; not in the unauthenticated x.com bundles gql-sync walks",
+
+	// T5.5 engagement mutations — the public bundles carry these only as Relay
+	// persisted-query hashes, which are a different identifier and return HTTP 422
+	// when used as GraphQL-path queryIDs.
+	"FavoriteTweet":   "requires authenticated session; public bundles carry the Relay hash, not the GraphQL-path queryID",
+	"UnfavoriteTweet": "requires authenticated session; public bundles carry the Relay hash, not the GraphQL-path queryID",
+	"CreateRetweet":   "requires authenticated session; public bundles carry the Relay hash, not the GraphQL-path queryID",
+	"DeleteRetweet":   "requires authenticated session; public bundles carry the Relay hash, not the GraphQL-path queryID",
+}
+
 // ApplyEnvOverrides reads TWITTER_QID_* env vars and overrides queryIds in Endpoints.
 // Called automatically by init(); can also be called manually in tests.
 func ApplyEnvOverrides() {
