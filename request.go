@@ -112,7 +112,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 		case status == 429:
 			c.recordAPICall(endpoint, false, true)
 			acc.MarkEndpointRateLimited(endpoint, parseRateLimitReset(respHdrs["x-rate-limit-reset"]))
-			lastErr = fmt.Errorf("429 rate limited")
+			lastErr = &APIError{Status: status, Class: errBanned, Message: "429 rate limited"}
 			continue
 
 		case status == 401 || status == 403:
@@ -144,7 +144,9 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 				continue
 			default:
 				acc.RecordFailure()
-				lastErr = fmt.Errorf("%s HTTP %d: %s", endpoint, status, truncateBytes(body, 200))
+				apiErr := newAPIError(status, body, respHdrs)
+				apiErr.Message = fmt.Sprintf("%s HTTP %d: %s", endpoint, status, truncateBytes(body, 200))
+				lastErr = apiErr
 				continue
 			}
 
@@ -165,7 +167,9 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 				// upstream recovers. Permanent removal is reserved for errSuspended.
 				c.pool.SoftDeactivateBackoff(acc, c.nonResponsiveBackoff, trip)
 			}
-			return nil, nil, fmt.Errorf("%s HTTP %d: %s", endpoint, status, truncateBytes(body, 200))
+			apiErr := newAPIError(status, body, respHdrs)
+			apiErr.Message = fmt.Sprintf("%s HTTP %d: %s", endpoint, status, truncateBytes(body, 200))
+			return nil, nil, apiErr
 		}
 
 		// HTTP 200 — check for error codes in response body
@@ -203,7 +207,9 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 				return body2, respHdrs2, nil
 			}
 			c.pool.SoftDeactivate(acc, c.cfg.AuthCooldown)
-			lastErr = fmt.Errorf("post-relogin request failed")
+			apiErr := newAPIError(status2, body2, respHdrs2)
+			apiErr.Message = "post-relogin request failed"
+			lastErr = apiErr
 			continue
 
 		case errInternal:
@@ -219,21 +225,23 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 				return body, respHdrs, nil
 			}
 			slog.Warn("error 131 without data, retrying", slog.String("user", acc.Username), slog.String("endpoint", endpoint))
-			lastErr = fmt.Errorf("Twitter internal error (131)")
+			apiErr := newAPIError(200, body, respHdrs)
+			apiErr.Message = "Twitter internal error (131)"
+			lastErr = apiErr
 			continue
 
 		case errBanned:
 			c.recordAPICall(endpoint, false, false)
 			slog.Warn("account banned (code 88)", slog.String("user", acc.Username))
 			c.pool.SoftDeactivate(acc, c.cfg.BanCooldown)
-			lastErr = fmt.Errorf("account banned")
+			lastErr = &APIError{Status: 200, Class: errBanned, Codes: extractErrorCodes(body), Message: "account banned"}
 			continue
 
 		case errSuspended:
 			c.recordAPICall(endpoint, false, false)
 			slog.Warn("account suspended (code 64), permanently deactivating", slog.String("user", acc.Username))
 			c.pool.DeactivateItem(acc)
-			lastErr = fmt.Errorf("account suspended")
+			lastErr = &APIError{Status: 200, Class: errSuspended, Codes: extractErrorCodes(body), Message: "account suspended"}
 			continue
 
 		case errLocked:
@@ -256,14 +264,16 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 				}
 			}
 			c.pool.SoftDeactivate(acc, c.cfg.BanCooldown)
-			lastErr = fmt.Errorf("account locked")
+			lastErr = &APIError{Status: 200, Class: errLocked, Codes: extractErrorCodes(body), Message: "account locked"}
 			continue
 
 		default: // errBlocked, errNotAuthorized
 			c.recordAPICall(endpoint, false, false)
 			slog.Warn("account error", slog.String("user", acc.Username), slog.Int("class", int(errClass)))
 			c.pool.SoftDeactivate(acc, c.cfg.AuthCooldown)
-			lastErr = fmt.Errorf("account error class %d", errClass)
+			apiErr := newAPIError(200, body, respHdrs)
+			apiErr.Message = fmt.Sprintf("account error class %d", errClass)
+			lastErr = apiErr
 			continue
 		}
 	}
@@ -307,7 +317,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 	if status == 429 {
 		c.recordAPICall(endpoint, false, true)
 		c.markGuestTokenRateLimited(parseRateLimitReset(respHdrs["x-rate-limit-reset"]))
-		return nil, nil, fmt.Errorf("guest token rate-limited for %s", endpoint)
+		return nil, nil, &APIError{Status: status, Class: errBanned, Message: fmt.Sprintf("guest token rate-limited for %s", endpoint)}
 	}
 	if status == 401 || status == 403 {
 		slog.Warn("guest token expired, reacquiring", slog.String("endpoint", endpoint), slog.Int("status", status))
@@ -324,14 +334,18 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 		}
 		if status != 200 {
 			c.recordAPICall(endpoint, false, false)
-			return nil, nil, fmt.Errorf("%s (guest retry) HTTP %d: %s", endpoint, status, truncateBytes(body, 200))
+			apiErr := newAPIError(status, body, respHdrs)
+			apiErr.Message = fmt.Sprintf("%s (guest retry) HTTP %d: %s", endpoint, status, truncateBytes(body, 200))
+			return nil, nil, apiErr
 		}
 		c.recordAPICall(endpoint, true, false)
 		return body, respHdrs, nil
 	}
 	if status != 200 {
 		c.recordAPICall(endpoint, false, false)
-		return nil, nil, fmt.Errorf("%s (guest) HTTP %d: %s", endpoint, status, truncateBytes(body, 200))
+		apiErr := newAPIError(status, body, respHdrs)
+		apiErr.Message = fmt.Sprintf("%s (guest) HTTP %d: %s", endpoint, status, truncateBytes(body, 200))
+		return nil, nil, apiErr
 	}
 	c.recordAPICall(endpoint, true, false)
 	return body, respHdrs, nil
@@ -384,7 +398,9 @@ func (c *Client) recoverCSRF(acc *Account, bc *stealth.BrowserClient, method, ur
 		return body3, respHdrs3, true
 	}
 	c.pool.SoftDeactivate(acc, c.cfg.AuthCooldown)
-	*lastErr = fmt.Errorf("post-relogin CSRF request failed")
+	apiErr := newAPIError(status3, body3, respHdrs3)
+	apiErr.Message = "post-relogin CSRF request failed"
+	*lastErr = apiErr
 	return nil, nil, false
 }
 
@@ -428,7 +444,9 @@ func (c *Client) recoverCSRFPost(acc *Account, bc *stealth.BrowserClient, url st
 		acc.RecordSuccess()
 		return body3, true
 	}
-	*lastErr = fmt.Errorf("post-relogin CSRF request failed")
+	apiErr := newAPIError(status3, body3, respHdrs3)
+	apiErr.Message = "post-relogin CSRF request failed"
+	*lastErr = apiErr
 	return nil, false
 }
 
@@ -480,7 +498,7 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 		case status == 429:
 			c.recordAPICall(endpoint, false, true)
 			acc.MarkEndpointRateLimited(endpoint, parseRateLimitReset(respHdrs["x-rate-limit-reset"]))
-			lastErr = fmt.Errorf("429 rate limited")
+			lastErr = &APIError{Status: status, Class: errBanned, Message: "429 rate limited"}
 			continue
 
 		case status == 401 || status == 403:
@@ -499,23 +517,29 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 					continue
 				}
 				authTok2, ct02, ua2 := acc.Credentials()
-				body2, _, status2, err2 := c.doRequestWithBody(bc, "POST", url, twitterHeaders(authTok2, ct02, ua2), bytes.NewReader(payload))
+				body2, respHdrs2, status2, err2 := c.doRequestWithBody(bc, "POST", url, twitterHeaders(authTok2, ct02, ua2), bytes.NewReader(payload))
 				if err2 == nil && (status2 == 200 || status2 == 201) {
 					c.recordAPICall(endpoint, true, false)
 					acc.RecordSuccess()
 					return body2, nil
 				}
-				lastErr = fmt.Errorf("post-relogin request failed")
+				apiErr := newAPIError(status2, body2, respHdrs2)
+				apiErr.Message = "post-relogin request failed"
+				lastErr = apiErr
 				continue
 			default:
 				acc.RecordFailure()
-				return nil, fmt.Errorf("%s HTTP %d: %s", endpoint, status, truncateBytes(body, 200))
+				apiErr := newAPIError(status, body, respHdrs)
+				apiErr.Message = fmt.Sprintf("%s HTTP %d: %s", endpoint, status, truncateBytes(body, 200))
+				return nil, apiErr
 			}
 
 		case status != 200:
 			c.recordAPICall(endpoint, false, false)
 			acc.RecordFailure()
-			return nil, fmt.Errorf("%s HTTP %d: %s", endpoint, status, truncateBytes(body, 200))
+			apiErr := newAPIError(status, body, respHdrs)
+			apiErr.Message = fmt.Sprintf("%s HTTP %d: %s", endpoint, status, truncateBytes(body, 200))
+			return nil, apiErr
 		}
 
 		// HTTP 200 — check for error codes in response body
@@ -538,7 +562,9 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 		default:
 			c.recordAPICall(endpoint, false, false)
 			acc.RecordFailure()
-			return nil, fmt.Errorf("%s error class %d: %s", endpoint, errClass, truncateBytes(body, 200))
+			apiErr := newAPIError(200, body, respHdrs)
+			apiErr.Message = fmt.Sprintf("%s error class %d: %s", endpoint, errClass, truncateBytes(body, 200))
+			return nil, apiErr
 		}
 	}
 

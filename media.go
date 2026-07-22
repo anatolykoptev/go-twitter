@@ -429,7 +429,7 @@ func (c *Client) doMediaRequest(ctx context.Context, acc *Account, method, urlSt
 		case status == 429:
 			c.recordAPICall(epUploadMedia, false, true)
 			acc.MarkEndpointRateLimited(epUploadMedia, parseRateLimitReset(respHdrs["x-rate-limit-reset"]))
-			lastErr = fmt.Errorf("429 rate limited")
+			lastErr = &APIError{Status: status, Class: errBanned, Message: "429 rate limited"}
 			continue
 
 		case status == 401 || status == 403:
@@ -447,30 +447,38 @@ func (c *Client) doMediaRequest(ctx context.Context, acc *Account, method, urlSt
 					continue
 				}
 				authTok2, ct02, ua2 := acc.Credentials()
-				body2, _, status2, err2 := c.doPoolReq(bc, method, urlStr, payload, mediaHeaders(authTok2, ct02, ua2, contentType))
+				body2, respHdrs2, status2, err2 := c.doPoolReq(bc, method, urlStr, payload, mediaHeaders(authTok2, ct02, ua2, contentType))
 				if err2 == nil && isUploadOK(status2) {
 					c.recordAPICall(epUploadMedia, true, false)
 					acc.RecordSuccess()
 					return body2, nil
 				}
-				lastErr = fmt.Errorf("post-relogin upload failed")
+				apiErr := newAPIError(status2, body2, respHdrs2)
+				apiErr.Message = "post-relogin upload failed"
+				lastErr = apiErr
 				continue
 			default:
 				acc.RecordFailure()
-				return nil, fmt.Errorf("%s HTTP %d: %s", epUploadMedia, status, truncateBytes(body, 200))
+				apiErr := newAPIError(status, body, respHdrs)
+				apiErr.Message = fmt.Sprintf("%s HTTP %d: %s", epUploadMedia, status, truncateBytes(body, 200))
+				return nil, apiErr
 			}
 
 		case !isUploadOK(status):
 			c.recordAPICall(epUploadMedia, false, false)
 			acc.RecordFailure()
-			return nil, fmt.Errorf("%s HTTP %d: %s", epUploadMedia, status, truncateBytes(body, 200))
+			apiErr := newAPIError(status, body, respHdrs)
+			apiErr.Message = fmt.Sprintf("%s HTTP %d: %s", epUploadMedia, status, truncateBytes(body, 200))
+			return nil, apiErr
 		}
 
 		// 2xx — check the body for Twitter error codes.
 		if cls := classifyError(body, respHdrs); cls != errNone {
 			c.recordAPICall(epUploadMedia, false, false)
 			acc.RecordFailure()
-			return nil, fmt.Errorf("%s error class %d: %s", epUploadMedia, cls, truncateBytes(body, 200))
+			apiErr := newAPIError(200, body, respHdrs)
+			apiErr.Message = fmt.Sprintf("%s error class %d: %s", epUploadMedia, cls, truncateBytes(body, 200))
+			return nil, apiErr
 		}
 		if newCT0 := extractCT0FromHeaders(respHdrs); newCT0 != "" && newCT0 != ct0 {
 			acc.SetCT0(newCT0)
@@ -534,7 +542,9 @@ func (c *Client) recoverCSRFMedia(acc *Account, bc *stealth.BrowserClient, metho
 		acc.RecordSuccess()
 		return body3, true
 	}
-	*lastErr = fmt.Errorf("post-relogin upload failed")
+	apiErr := newAPIError(status3, body3, respHdrs3)
+	apiErr.Message = "post-relogin upload failed"
+	*lastErr = apiErr
 	return nil, false
 }
 
