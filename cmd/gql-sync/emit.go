@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"go/format"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -47,4 +48,22 @@ func renderQueryIDs(ids map[string]string, date string) ([]byte, error) {
 		return nil, fmt.Errorf("gofmt generated source: %w", err)
 	}
 	return formatted, nil
+}
+
+// genQueryIDLineRe matches one line of the generatedQueryIDs map literal in
+// queryids_gen.go: `"OpName": "queryID",`. Used by parseGeneratedQueryIDs to
+// recover the committed baseline so syncQueryIDs can merge additively instead
+// of replacing the file wholesale (issue #39 — session-only ops that gql-sync
+// cannot re-extract would otherwise be dropped on every drift run).
+var genQueryIDLineRe = regexp.MustCompile(`"([A-Za-z_][A-Za-z0-9_]*)":\s*"([A-Za-z0-9_-]+)"`)
+
+// parseGeneratedQueryIDs extracts the operationName -> queryId map from the
+// on-disk queryids_gen.go source. Returns an empty map if the file is absent,
+// unreadable, or contains no entries (e.g. first run, or a corrupted file).
+func parseGeneratedQueryIDs(body []byte) map[string]string {
+	out := make(map[string]string)
+	for _, m := range genQueryIDLineRe.FindAllSubmatch(body, -1) {
+		out[string(m[1])] = string(m[2])
+	}
+	return out
 }
