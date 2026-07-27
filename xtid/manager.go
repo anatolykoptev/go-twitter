@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	stealth "github.com/anatolykoptev/go-stealth"
 	"github.com/anatolykoptev/go-twitter/internal/bundle"
 )
 
@@ -134,7 +135,15 @@ func (m *Manager) fetchURL(url string) (string, error) {
 			slog.String("url", url),
 			slog.Int("attempt", attempt),
 			slog.Any("error", err))
-		time.Sleep(fetchBackoffBase * time.Duration(1<<(attempt-1)))
+		// Exponential backoff with ±30% jitter via go-kit/pacing (through
+		// stealth.BackoffConfig, which delegates to pacing.ExponentialBackoff).
+		delay := stealth.BackoffConfig{
+			InitialWait: fetchBackoffBase,
+			MaxWait:     10 * time.Second,
+			Multiplier:  2.0,
+			JitterPct:   0.3,
+		}.Duration(attempt - 1)
+		time.Sleep(delay)
 	}
 	return "", lastErr
 }
