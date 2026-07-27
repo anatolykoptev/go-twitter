@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.10](https://github.com/anatolykoptev/go-twitter/compare/v0.6.9...v0.6.10) (2026-07-27)
+
+
+### Refactoring
+
+* **pacing:** add jitter to xtid fetch retry via stealth.BackoffConfig ([#37](https://github.com/anatolykoptev/go-twitter/issues/37)) ([60a8e59](https://github.com/anatolykoptev/go-twitter/commit/60a8e59281a8261566e0819ae5c04855565b5dc0))
+
 ## [0.6.9](https://github.com/anatolykoptev/go-twitter/compare/v0.6.8...v0.6.9) (2026-07-22)
 
 
