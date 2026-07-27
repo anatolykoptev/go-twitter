@@ -66,17 +66,29 @@ func TestGqlFeatures_GeneratedPreferred(t *testing.T) {
 }
 
 // TestGeneratedFeatures_InitialNoOp proves the committed features_gen.go baseline
-// equals committedFeatures() verbatim, so the first ship of the generated layer is
-// a behavioural no-op (gqlFeatures() returns the same set it did before T4).
+// is a superset of committedFeatures() — every committed flag is present with the
+// same value, so the generated layer preserves the authed-session authority. The
+// generated set MAY contain additional flags discovered by gql-sync drift (new
+// flags x.com ships); those are not in committedFeatures() yet and are flagged
+// for an authed-capture verification via the trailing comment in features_gen.go.
+//
+// The original exact-equality check failed on every drift PR because gql-sync
+// adds new flags — defeating the drift detection pipeline (issue #39).
 func TestGeneratedFeatures_InitialNoOp(t *testing.T) {
 	committed := committedFeatures()
-	if len(generatedFeatures) != len(committed) {
-		t.Fatalf("generatedFeatures has %d flags, committed has %d", len(generatedFeatures), len(committed))
-	}
 	for k, v := range committed {
-		if generatedFeatures[k] != v {
-			t.Errorf("generatedFeatures[%q] = %v, want committed %v", k, generatedFeatures[k], v)
+		got, ok := generatedFeatures[k]
+		if !ok {
+			t.Errorf("committed feature %q is missing from generatedFeatures (drift dropped a known flag)", k)
+			continue
 		}
+		if got != v {
+			t.Errorf("generatedFeatures[%q] = %v, want committed %v", k, got, v)
+		}
+	}
+	if t.Failed() {
+		t.Fatalf("generatedFeatures has %d flags, committed has %d — one or more committed flags were dropped or changed",
+			len(generatedFeatures), len(committed))
 	}
 }
 

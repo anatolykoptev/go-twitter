@@ -104,7 +104,12 @@ func run(args []string) error {
 }
 
 // syncQueryIDs writes queryids_gen.go, honoring the empty-extraction guard so a
-// transient x.com break never clobbers the committed IDs.
+// transient x.com break never clobbers the committed IDs. The write is ADDITIVE:
+// endpoints already present in the on-disk generatedQueryIDs but NOT re-extracted
+// by this run (e.g. session-only ops gql-sync cannot reach from the public
+// bundles) are preserved — gql-sync merges over the committed baseline instead
+// of replacing it wholesale. Without this, every drift run would drop the
+// session-only IDs and fail TestQueryIDCompleteness (issue #39).
 func syncQueryIDs(cfg config, ids map[string]string) error {
 	if len(ids) == 0 {
 		if cfg.failOnEmpty {
@@ -113,7 +118,51 @@ func syncQueryIDs(cfg config, ids map[string]string) error {
 		slog.Warn("gql-sync: extracted 0 operations; leaving " + generatedFileName + " untouched")
 		return nil
 	}
-	return writeGenerated(cfg, ids)
+	merged := mergeCommittedQueryIDs(cfg, ids)
+	return writeGenerated(cfg, merged)
+}
+
+// mergeCommittedQueryIDs reads the on-disk queryids_gen.go and preserves any
+// committed entry that this run did NOT re-extract. Newly extracted IDs override
+// committed ones (x.com rotated the queryID); committed entries absent from the
+// extraction are kept verbatim (session-only ops gql-sync cannot reach).
+func mergeCommittedQueryIDs(cfg config, extracted map[string]string) map[string]string {
+	target := filepath.Join(cfg.out, generatedFileName)
+	body, err := os.ReadFile(target)
+	if err != nil {
+		// No prior file — nothing to merge, write the extraction as-is.
+		return extracted
+	}
+	committed := parseGeneratedQueryIDs(body)
+	if len(committed) == 0 {
+		return extracted
+	}
+	merged := make(map[string]string, len(extracted)+len(committed))
+	for name, id := range committed {
+		merged[name] = id
+	}
+	preserved := 0
+	for name, id := range extracted {
+		if _, ok := merged[name]; !ok {
+			merged[name] = id
+		} else if merged[name] != id {
+			// x.com rotated the queryID — override with the fresh extraction.
+			merged[name] = id
+		}
+	}
+	// Count preserved for logging: committed entries NOT in the extraction.
+	for name := range committed {
+		if _, ok := extracted[name]; !ok {
+			preserved++
+		}
+	}
+	if preserved > 0 {
+		slog.Info("gql-sync: preserved session-only queryIDs from committed baseline",
+			slog.Int("preserved", preserved),
+			slog.Int("extracted", len(extracted)),
+			slog.Int("merged_total", len(merged)))
+	}
+	return merged
 }
 
 // syncFeatures writes features_gen.go from the bundle-declared feature NAMES
