@@ -411,11 +411,7 @@ func (c *Client) doMediaRequest(ctx context.Context, acc *Account, method, urlSt
 		authTok, ct0, ua := acc.Credentials()
 		body, respHdrs, status, err := c.doPoolReq(bc, method, urlStr, payload, mediaHeaders(authTok, ct0, ua, contentType))
 		if err != nil {
-			if acc.Proxy != "" && isProxyError(err) {
-				c.markProxyDown(acc)
-			} else {
-				acc.RecordFailure()
-			}
+			c.attributeTransportError(acc, err)
 			lastErr = err
 			continue
 		}

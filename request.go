@@ -84,11 +84,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 		authTok, ct0, ua := acc.Credentials()
 		body, respHdrs, status, err := c.doPoolReq(bc, method, url, payload, twitterHeaders(authTok, ct0, ua))
 		if err != nil {
-			if acc.Proxy != "" && isProxyError(err) {
-				c.markProxyDown(acc)
-			} else {
-				acc.RecordFailure()
-			}
+			c.attributeTransportError(acc, err)
 			lastErr = err
 			continue
 		}
@@ -470,11 +466,7 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 		authTok, ct0, ua := acc.Credentials()
 		body, respHdrs, status, err := c.doRequestWithBody(bc, "POST", url, twitterHeaders(authTok, ct0, ua), bytes.NewReader(payload))
 		if err != nil {
-			if acc.Proxy != "" && isProxyError(err) {
-				c.markProxyDown(acc)
-			} else {
-				acc.RecordFailure()
-			}
+			c.attributeTransportError(acc, err)
 			lastErr = err
 			continue
 		}
@@ -589,19 +581,64 @@ func requiresAuth(endpoint string) bool {
 }
 
 // isProxyError returns true if the error looks like a proxy connectivity failure.
+//
+// Matching is case-insensitive. The pre-fix lowercase-only predicate missed the
+// single most common way an HTTP proxy dies: tls-client's CONNECT failure
+// (connect.go:229/269) returns `errors.New("Proxy responded with non 200 code: "
+// + resp.Status)` — "Proxy" capitalised twice, no lowercase "proxy" anywhere —
+// so a 407 Proxy Authentication Required was charged to the account, not the
+// proxy (5881 consecutive mis-attributed failures in production, see go-twitter
+// #43).
+//
+// A structural classification (status-code field) is NOT reachable: tls-client
+// returns a plain *errors.errorString with no typed wrapper, no Unwrap, and no
+// extractable status code — the 407 lives only inside the prose. String matching
+// is the only available signal. The case-insensitive widening is bounded by the
+// call sites: isProxyError is only invoked on the transport-error branch (err !=
+// nil) of doPoolReq/doRequestWithBody, where X-side HTTP errors (401/403/429)
+// never arrive — those return err == nil and are handled by the status switch.
+// The X-side counter-test (TestIsProxyError_XSideAuthErrorNotProxy) guards the
+// false-positive direction regardless.
 func isProxyError(err error) bool {
 	if err == nil {
 		return false
 	}
 	msg := err.Error()
-	return strings.Contains(msg, "proxy") ||
-		strings.Contains(msg, "SOCKS") ||
-		strings.Contains(msg, "tunnel") ||
-		strings.Contains(msg, "connection refused") ||
-		strings.Contains(msg, "no such host")
+	return containsFold(msg, "proxy") ||
+		containsFold(msg, "SOCKS") ||
+		containsFold(msg, "tunnel") ||
+		containsFold(msg, "connection refused") ||
+		containsFold(msg, "no such host")
 }
 
-// markProxyDown applies exponential backoff for proxy failures.
+// containsFold reports whether substr appears in s, case-insensitively. Used by
+// isProxyError so a capitalised "Proxy" (tls-client's CONNECT-failure wording)
+// matches the same as a lowercase "proxy" (net/http's proxyconnect wording).
+func containsFold(s, substr string) bool {
+	return strings.Contains(strings.ToLower(s), strings.ToLower(substr))
+}
+
+// attributeTransportError charges a transport-level error to the right layer:
+// if the account uses a proxy and the error looks like a proxy connectivity
+// failure, the proxy is marked down (exponential backoff, observable alert);
+// otherwise the account is charged a failure. This is the single attribution
+// seam for the triplicated transport-error branches in doPoolRequest, doPOST,
+// and doMediaRequest — extracting it keeps the 407 fix in one place and makes
+// the seam falsifiable.
+func (c *Client) attributeTransportError(acc *Account, err error) {
+	if acc.Proxy != "" && isProxyError(err) {
+		c.markProxyDown(acc)
+	} else {
+		acc.RecordFailure()
+	}
+}
+
+// markProxyDown applies exponential backoff for proxy failures and emits a
+// "proxy.down" alert through the PoolAlertHook seam so a consumer can observe a
+// dead proxy pool without grepping logs. Before this alert, a dead proxy could
+// produce thousands of failures with no counter anyone could alert on (the
+// go-twitter #43 field incident: 5881 consecutive failures, zero observable
+// proxy-layer signal).
 func (c *Client) markProxyDown(acc *Account) {
 	acc.mu.Lock()
 	acc.proxyConsecFails++
@@ -624,6 +661,15 @@ func (c *Client) markProxyDown(acc *Account) {
 		slog.String("proxy", stealth.MaskProxy(acc.Proxy)),
 		slog.Int("consec_fails", fails),
 		slog.Duration("backoff", duration))
+
+	if c.alertHook != nil {
+		c.alertHook("proxy.down", map[string]any{
+			"user":         acc.Username,
+			"proxy":        stealth.MaskProxy(acc.Proxy),
+			"consec_fails": fails,
+			"backoff":      duration,
+		})
+	}
 }
 
 func truncateBytes(b []byte, n int) string {
