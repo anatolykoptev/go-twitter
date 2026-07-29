@@ -14,7 +14,7 @@ import (
 // produced empty handle/display_name from /v1/account/cz_binance.
 //
 // Fixture provenance: testdata/ubsn_cz_binance.json is the verbatim body
-// returned by GetUserByScreenName via the deployed go-hully credentials.
+// returned by GetUserByScreenName via a downstream consumer's deployed credentials.
 func TestParseUserByScreenName_CoreShape(t *testing.T) {
 	body, err := os.ReadFile("testdata/ubsn_cz_binance.json")
 	if err != nil {

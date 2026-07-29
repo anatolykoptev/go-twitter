@@ -2,7 +2,7 @@
 
 **Date:** 2026-03-31
 **Status:** RESOLVED — root cause is GET→POST migration; fix shipped in go-twitter v0.4.0 (current release v0.5.3)
-**Affected:** go-twitter, go-job, go-hully (any service using SearchTimeline)
+**Affected:** go-twitter, go-job, and downstream consumers (any service using SearchTimeline)
 
 ## Timeline
 

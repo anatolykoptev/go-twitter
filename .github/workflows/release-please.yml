@@ -5,7 +5,7 @@ name: release-please
 # Go module: the tag IS the release — proxy.golang.org serves it automatically,
 # no publish job needed (go-release-setup skill).
 #
-# Auth: the krolik-release-bot GitHub App (App 4335933) signs the release PR + tag,
+# Auth: a dedicated release-bot GitHub App signs the release PR + tag,
 # NOT the default GITHUB_TOKEN. App-created PRs get real CI runs and App-created
 # tags trigger downstream `on: push: tags` workflows.
 # Creds: RELEASE_BOT_APP_ID (var) + RELEASE_BOT_PRIVATE_KEY (secret), fleet standard.

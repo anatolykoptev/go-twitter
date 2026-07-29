@@ -338,7 +338,7 @@ func TestDefaults_BareConfigFillsPaceAndRateLimit(t *testing.T) {
 }
 
 // TestDefaults_RateLimitOnlyConfigPreserved proves a RateLimit-only config (the
-// social.go / go-hully construction) keeps the caller's RateLimit and still
+// social.go / downstream-consumer construction) keeps the caller's RateLimit and still
 // fills the pace defaults.
 func TestDefaults_RateLimitOnlyConfigPreserved(t *testing.T) {
 	cfg := ClientConfig{RateLimit: ratelimit.Config{RequestsPerWindow: 123, WindowDuration: 10 * time.Minute}}
