@@ -26,9 +26,10 @@ type Client struct {
 	xtidMgr              *xtid.Manager
 	xpffGen              *xpff.Generator
 	cfg                  ClientConfig
-	reloginGate          AutoReloginGate       // nil = always allow
-	nonResponsiveBackoff pool.BackoffConfig    // transient-failure backoff (base from cfg, x2, cap 30m)
-	accountPacer         *ratelimit.KeyedPacer // per-account human-pace spacing (keyed by account, nil = disabled)
+	reloginGate          AutoReloginGate                 // nil = always allow
+	nonResponsiveBackoff pool.BackoffConfig              // transient-failure backoff (base from cfg, x2, cap 30m)
+	accountPacer         *ratelimit.KeyedPacer           // per-account human-pace spacing (keyed by account, nil = disabled)
+	alertHook            func(topic string, payload any) // proxy/pool event sink (PoolAlertHook or slog fallback)
 
 	mu                sync.Mutex
 	guestToken        string
@@ -124,6 +125,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		cfg:                  cfg,
 		nonResponsiveBackoff: nonResponsiveBackoff,
 		accountPacer:         accountPacer,
+		alertHook:            alertHook,
 	}
 
 	// Default per-account relogin circuit breaker: a transient login outage must
@@ -238,6 +240,16 @@ type AccountHealth struct {
 	Total       int
 	Failed      int
 	ConsecFails int
+
+	// ProxyConsecFails is the count of consecutive proxy-layer failures for this
+	// account. Non-zero while a dead proxy is being backed off; reset to 0 on
+	// the next successful HTTP response. Distinguishes a dead proxy from a dead
+	// account — the go-twitter #43 incident mis-attributed 5881 proxy failures
+	// to the account layer because this distinction was not observable.
+	ProxyConsecFails int
+	// ProxyBackoffUntil is when the account's proxy becomes eligible again after
+	// exponential backoff. Zero when no proxy backoff is in effect.
+	ProxyBackoffUntil time.Time
 }
 
 // HealthReport returns health stats for all accounts in the pool.
@@ -246,12 +258,18 @@ func (c *Client) HealthReport() []AccountHealth {
 	report := make([]AccountHealth, 0, len(items))
 	for _, acc := range items {
 		total, failed, consecFails := acc.Stats()
+		acc.mu.Lock()
+		proxyConsec := acc.proxyConsecFails
+		proxyBackoff := acc.proxyBackoff
+		acc.mu.Unlock()
 		report = append(report, AccountHealth{
-			Username:    acc.Username,
-			Active:      acc.IsActive(),
-			Total:       total,
-			Failed:      failed,
-			ConsecFails: consecFails,
+			Username:          acc.Username,
+			Active:            acc.IsActive(),
+			Total:             total,
+			Failed:            failed,
+			ConsecFails:       consecFails,
+			ProxyConsecFails:  proxyConsec,
+			ProxyBackoffUntil: proxyBackoff,
 		})
 	}
 	return report
