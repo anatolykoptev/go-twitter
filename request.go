@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"regexp"
 	"strings"
 	"time"
 
@@ -580,6 +581,14 @@ func requiresAuth(endpoint string) bool {
 	return false
 }
 
+// quotedURLRe matches quoted HTTP(S) URLs embedded in error messages. Go's
+// *url.Error wraps transport errors as `<op> "<url>": <inner>`; tls-client's
+// CONNECT failure is a plain errorString whose prose embeds the request URL via
+// the same wrapper. Stripping the quoted URL leaves only the transport's own
+// message, so user-supplied content in the request URL (SearchTimeline rawQuery,
+// UserByScreenName screenName) cannot false-positive the proxy signal.
+var quotedURLRe = regexp.MustCompile(`"https?://[^"]*"`)
+
 // isProxyError returns true if the error looks like a proxy connectivity failure.
 //
 // Matching is case-insensitive. The pre-fix lowercase-only predicate missed the
@@ -599,11 +608,19 @@ func requiresAuth(endpoint string) bool {
 // never arrive — those return err == nil and are handled by the status switch.
 // The X-side counter-test (TestIsProxyError_XSideAuthErrorNotProxy) guards the
 // false-positive direction regardless.
+//
+// The quoted request URL is stripped before matching so user-supplied content
+// in the URL (rawQuery, screenName) cannot false-positive the proxy signal. A
+// SearchTimeline for the query "proxy" or a UserByScreenName for handle
+// "proxyhandle" embeds that word in the request URL; without stripping, a
+// non-proxy transport error on such a request would be mis-attributed to the
+// proxy — the same class of mis-attribution this branch exists to remove, in
+// the other direction.
 func isProxyError(err error) bool {
 	if err == nil {
 		return false
 	}
-	msg := err.Error()
+	msg := quotedURLRe.ReplaceAllString(err.Error(), "")
 	return containsFold(msg, "proxy") ||
 		containsFold(msg, "SOCKS") ||
 		containsFold(msg, "tunnel") ||
