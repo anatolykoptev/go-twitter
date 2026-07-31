@@ -36,5 +36,5 @@ jobs:
         with:
           token: ${{ steps.bot-token.outputs.token }}
           target-branch: main
-          config-file: .release-please-config.json
+          config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
