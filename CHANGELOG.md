@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.11](https://github.com/anatolykoptev/go-twitter/compare/v0.6.10...v0.6.11) (2026-07-31)
+
+
+### Bug Fixes
+
+* classify proxy 407 as a proxy failure, not an account failure ([#44](https://github.com/anatolykoptev/go-twitter/issues/44)) ([43c4f5e](https://github.com/anatolykoptev/go-twitter/commit/43c4f5e060c6e56831557586c517708c3c7dbca8))
+* gql-sync additive merge + features test subset check ([#39](https://github.com/anatolykoptev/go-twitter/issues/39)) ([#40](https://github.com/anatolykoptev/go-twitter/issues/40)) ([b115ac7](https://github.com/anatolykoptev/go-twitter/commit/b115ac78e5544b3aa7d5de2a5c950c13207d8988))
+
 ## [0.6.10](https://github.com/anatolykoptev/go-twitter/compare/v0.6.9...v0.6.10) (2026-07-27)
 
 
