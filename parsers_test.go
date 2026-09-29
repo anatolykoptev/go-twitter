@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestParseUserByScreenName(t *testing.T) {
@@ -75,6 +78,80 @@ func TestParseUserByScreenName_Unavailable(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for unavailable user")
 	}
+}
+
+func TestParseSearchUsersTimeline(t *testing.T) {
+	body := []byte(`{
+		"data": {"search_by_raw_query": {"search_timeline": {"timeline": {"instructions": [{
+			"type": "TimelineAddEntries",
+			"entries": [
+				{"entryId": "user-12345", "sortIndex": "0", "content": {"entryType": "TimelineTimelineItem", "__typename": "TimelineTimelineItem", "itemContent": {"__typename": "TimelineUser", "user_results": {"result": {"__typename": "User", "rest_id": "12345", "core": {"name": "Jane Dev", "screen_name": "janedev", "created_at": "Wed Jan 15 12:00:00 +0000 2020"}, "is_blue_verified": true, "profile_bio": {"description": "Building things"}, "legacy": {"followers_count": 987, "friends_count": 100, "statuses_count": 500}}}, "user_display_type": "UserDetailed"}}},
+				{"entryId": "cursor-bottom", "content": {"entryType": "TimelineTimelineCursor", "cursorType": "Bottom", "value": "CUR1"}}
+			]}]}}}}
+	}`)
+	users, err := parseSearchUsersTimeline(body)
+	require.NoError(t, err)
+	require.Len(t, users, 1)
+	u := users[0]
+	assert.Equal(t, "12345", u.ID)
+	assert.Equal(t, "janedev", u.Handle)
+	assert.Equal(t, "Jane Dev", u.DisplayName)
+	assert.Equal(t, 987, u.Followers)
+	assert.True(t, u.IsVerified)
+	assert.Equal(t, "Building things", u.Bio)
+}
+
+// TestParseSearchUsersTimeline_SkipsTweets guards the TimelineUser filter:
+// a People-tab page can still carry non-user entries, and dropping the
+// typename check would surface tweets as empty users.
+func TestParseSearchUsersTimeline_SkipsTweets(t *testing.T) {
+	body := []byte(`{
+		"data": {"search_by_raw_query": {"search_timeline": {"timeline": {"instructions": [{
+			"type": "TimelineAddEntries",
+			"entries": [
+				{"entryId": "tweet-9", "content": {"entryType": "TimelineTimelineItem", "itemContent": {"__typename": "TimelineTweet", "tweet_results": {"result": {"__typename": "Tweet", "rest_id": "9", "core": {"user_results": {"result": {"__typename": "User", "rest_id": "7", "core": {"screen_name": "noise"}}}}, "legacy": {"full_text": "not a user"}}}}}},
+				{"entryId": "user-8", "content": {"entryType": "TimelineTimelineItem", "itemContent": {"__typename": "TimelineUser", "user_results": {"result": {"__typename": "User", "rest_id": "8", "core": {"name": "Ann", "screen_name": "ann"}, "legacy": {"followers_count": 5}}}}}}
+			]}]}}}}
+	}`)
+	users, err := parseSearchUsersTimeline(body)
+	require.NoError(t, err)
+	require.Len(t, users, 1)
+	assert.Equal(t, "ann", users[0].Handle)
+}
+
+// TestSplitConversation covers the focal/replies split used by
+// GetTweetConversation: focal is the ID match (else first), replies keep
+// entry order minus the focal.
+func TestSplitConversation(t *testing.T) {
+	focal := &Tweet{ID: "10"}
+	reply1 := &Tweet{ID: "11"}
+	reply2 := &Tweet{ID: "12"}
+
+	main, replies := splitConversation([]*Tweet{focal, reply1, reply2}, "10")
+	assert.Equal(t, "10", main.ID)
+	require.Len(t, replies, 2)
+	assert.Equal(t, "11", replies[0].ID)
+
+	// Focal absent from page (X sometimes omits it) → first entry wins.
+	main, replies = splitConversation([]*Tweet{reply1, reply2}, "10")
+	assert.Equal(t, "11", main.ID)
+	require.Len(t, replies, 1)
+	assert.Equal(t, "12", replies[0].ID)
+
+	main, _ = splitConversation([]*Tweet{focal}, "10")
+	assert.Equal(t, "10", main.ID)
+
+	main, replies = splitConversation(nil, "10")
+	assert.Nil(t, main)
+	assert.Empty(t, replies)
+}
+
+func TestSearchProduct_Valid(t *testing.T) {
+	for _, p := range []SearchProduct{SearchTop, SearchLatest, SearchPeople, SearchMedia} {
+		assert.True(t, p.Valid(), string(p))
+	}
+	assert.False(t, SearchProduct("Bogus").Valid())
+	assert.False(t, SearchProduct("").Valid())
 }
 
 func TestParseSearchTimeline(t *testing.T) {

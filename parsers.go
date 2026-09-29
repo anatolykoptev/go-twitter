@@ -803,3 +803,45 @@ func extractTokenMentions(text string) []string {
 	}
 	return result
 }
+
+// parseSearchUsersTimeline parses a People-tab SearchTimeline response —
+// same envelope as parseSearchTimeline, user entries instead of tweets.
+func parseSearchUsersTimeline(body []byte) ([]*TwitterUser, error) {
+	var raw struct {
+		Data struct {
+			SearchByRawQuery struct {
+				SearchTimeline struct {
+					Timeline timelineObj `json:"timeline"`
+				} `json:"search_timeline"`
+			} `json:"search_by_raw_query"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, fmt.Errorf("unmarshal search users timeline: %w", err)
+	}
+	users, _, err := extractUsersFromTimeline(raw.Data.SearchByRawQuery.SearchTimeline.Timeline)
+	return users, err
+}
+
+// splitConversation picks the focal tweet (ID match, else first entry) out of
+// a TweetDetail conversation page and returns the rest as replies in entry
+// order.
+func splitConversation(tweets []*Tweet, focalID string) (focal *Tweet, replies []*Tweet) {
+	if len(tweets) == 0 {
+		return nil, nil
+	}
+	focalIdx := 0
+	for i, t := range tweets {
+		if t.ID == focalID {
+			focalIdx = i
+			break
+		}
+	}
+	focal = tweets[focalIdx]
+	for i, t := range tweets {
+		if i != focalIdx {
+			replies = append(replies, t)
+		}
+	}
+	return focal, replies
+}

@@ -58,3 +58,52 @@ func TestSearchWithSocial_ReportsErrorOnFailure(t *testing.T) {
 	assert.ErrorContains(t, err, "all 6 accounts failed")
 	assert.Equal(t, "auth_error", reportedStatus)
 }
+
+func TestSearchUsersWithSocial_AcquireError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	sc := social.NewClient(srv.URL, "tok", "test")
+	_, err := SearchUsersWithSocial(context.Background(), sc, "golang", 10)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "all 6 accounts failed")
+	assert.ErrorContains(t, err, "acquire account")
+}
+
+func TestGetTweetConversationWithSocial_AcquireError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+
+	sc := social.NewClient(srv.URL, "tok", "test")
+	_, _, err := GetTweetConversationWithSocial(context.Background(), sc, "123")
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "all 6 accounts failed")
+	assert.ErrorContains(t, err, "acquire account")
+}
+
+// TestSearchTweets_InvalidProduct: validation must reject an unknown tab
+// BEFORE any account is acquired — a typo'd product must not burn pool calls.
+func TestSearchTweets_InvalidProduct(t *testing.T) {
+	var acquires int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		acquires++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	tw, err := NewClient(ClientConfig{})
+	require.NoError(t, err)
+	_, err = tw.SearchTweets(context.Background(), "q", SearchProduct("bogus"), 5)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "invalid product")
+
+	sc := social.NewClient(srv.URL, "tok", "test")
+	_, err = SearchTweetsWithSocial(context.Background(), sc, "q", SearchProduct("bogus"), 5)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "invalid product")
+	assert.Zero(t, acquires, "invalid product must not acquire an account")
+}

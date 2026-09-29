@@ -167,6 +167,16 @@ func (c *Client) fetchTweetUserList(ctx context.Context, operation, tweetID stri
 
 // GetTweetByID fetches a single tweet by its ID.
 func (c *Client) GetTweetByID(ctx context.Context, tweetID string) (*Tweet, error) {
+	tweets, err := c.getTweetDetail(ctx, tweetID)
+	if err != nil {
+		return nil, err
+	}
+	focal, _ := splitConversation(tweets, tweetID)
+	return focal, nil
+}
+
+// getTweetDetail fetches the TweetDetail conversation page for tweetID.
+func (c *Client) getTweetDetail(ctx context.Context, tweetID string) ([]*Tweet, error) {
 	variables := map[string]any{
 		"focalTweetId":                           tweetID,
 		"with_rux_injections":                    false,
@@ -199,18 +209,11 @@ func (c *Client) GetTweetByID(ctx context.Context, tweetID string) (*Tweet, erro
 		return nil, fmt.Errorf("parse TweetDetail: %w", err)
 	}
 	slog.Debug("TweetDetail parsed", slog.Int("count", len(tweets)), slog.String("target", tweetID))
-	for _, t := range tweets {
-		slog.Debug("TweetDetail tweet", slog.String("id", t.ID), slog.String("text_prefix", t.Text[:min(50, len(t.Text))]))
-		if t.ID == tweetID {
-			return t, nil
-		}
+	if len(tweets) == 0 {
+		slog.Warn("TweetDetail no tweets", slog.String("body_prefix", string(body[:min(1000, len(body))])))
+		return nil, fmt.Errorf("tweet %s not found in response", tweetID)
 	}
-	if len(tweets) > 0 {
-		return tweets[0], nil
-	}
-	// Log raw body prefix to understand why parsing returned empty
-	slog.Warn("TweetDetail no tweets", slog.String("body_prefix", string(body[:min(1000, len(body))])))
-	return nil, fmt.Errorf("tweet %s not found in response", tweetID)
+	return tweets, nil
 }
 
 // GetUserTweets fetches recent tweets for a user.
@@ -236,14 +239,44 @@ func (c *Client) GetUserTweets(ctx context.Context, userID string, count int) ([
 	return parseTweetTimeline(body, userID)
 }
 
-// SearchTimeline searches for tweets matching a query.
+// SearchTimeline searches for tweets matching a query on the Latest tab.
 // Uses POST (Twitter migrated this endpoint from GET in March 2026).
 func (c *Client) SearchTimeline(ctx context.Context, query string, count int) ([]*Tweet, error) {
+	return c.searchTimeline(ctx, query, SearchLatest, count)
+}
+
+// SearchTweets searches tweets on an explicit tab — Top or Latest. Anything
+// else is rejected before the request so a typo can't silently read Latest.
+func (c *Client) SearchTweets(ctx context.Context, query string, product SearchProduct, count int) ([]*Tweet, error) {
+	if product != SearchTop && product != SearchLatest {
+		return nil, fmt.Errorf("SearchTweets: invalid product %q (want Top or Latest)", product)
+	}
+	return c.searchTimeline(ctx, query, product, count)
+}
+
+// SearchUsers searches the People tab.
+func (c *Client) SearchUsers(ctx context.Context, query string, count int) ([]*TwitterUser, error) {
+	body, err := c.searchTimelineRaw(ctx, query, SearchPeople, count)
+	if err != nil {
+		return nil, fmt.Errorf("SearchUsers: %w", err)
+	}
+	return parseSearchUsersTimeline(body)
+}
+
+func (c *Client) searchTimeline(ctx context.Context, query string, product SearchProduct, count int) ([]*Tweet, error) {
+	body, err := c.searchTimelineRaw(ctx, query, product, count)
+	if err != nil {
+		return nil, fmt.Errorf("SearchTimeline: %w", err)
+	}
+	return parseSearchTimeline(body)
+}
+
+func (c *Client) searchTimelineRaw(ctx context.Context, query string, product SearchProduct, count int) ([]byte, error) {
 	variables := map[string]any{
 		"rawQuery":    query,
 		"count":       count,
 		"querySource": "typed_query",
-		"product":     "Latest",
+		"product":     string(product),
 	}
 	fieldToggles := map[string]any{
 		"withArticleRichContentState": false,
@@ -265,7 +298,7 @@ func (c *Client) SearchTimeline(ctx context.Context, query string, count int) ([
 	if err != nil {
 		return nil, fmt.Errorf("SearchTimeline: %w", err)
 	}
-	return parseSearchTimeline(body)
+	return body, nil
 }
 
 // CreateTweet posts a tweet from a specific account.
@@ -560,4 +593,15 @@ func (c *Client) PostWithAccount(ctx context.Context, username, text string) (st
 		return "", fmt.Errorf("account %q is not active", username)
 	}
 	return c.CreateTweet(ctx, acc, text)
+}
+
+// GetTweetConversation fetches the focal tweet plus its conversation entries
+// (replies and ancestors, in page order) via TweetDetail.
+func (c *Client) GetTweetConversation(ctx context.Context, tweetID string) (*Tweet, []*Tweet, error) {
+	tweets, err := c.getTweetDetail(ctx, tweetID)
+	if err != nil {
+		return nil, nil, err
+	}
+	focal, replies := splitConversation(tweets, tweetID)
+	return focal, replies, nil
 }
