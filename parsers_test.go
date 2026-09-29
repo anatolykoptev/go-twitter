@@ -243,6 +243,51 @@ func TestParseTweetDetail_ConversationModules(t *testing.T) {
 	assert.Equal(t, "102", replies[1].ID)
 }
 
+// TestParseTweetDetail_VisibilityWrappedFocal: X nests sensitive-tagged
+// tweets as {__typename: TweetWithVisibilityResults, tweet: {…Tweet…}} —
+// without the unwrap the focal decodes with empty rest_id and reports
+// ErrNotFound although the tweet is present and readable.
+func TestParseTweetDetail_VisibilityWrappedFocal(t *testing.T) {
+	wrapped := map[string]any{
+		"__typename": "TimelineTweet",
+		"tweet_results": map[string]any{"result": map[string]any{
+			"__typename":           "TweetWithVisibilityResults",
+			"limitedActionResults": map[string]any{"limited_actions": []any{}},
+			"tweet": map[string]any{
+				"__typename": "Tweet",
+				"rest_id":    "100",
+				"core": map[string]any{"user_results": map[string]any{"result": map[string]any{
+					"__typename": "User",
+					"rest_id":    "u100",
+					"core":       map[string]any{"screen_name": "alice", "name": "alice"},
+				}}},
+				"legacy": map[string]any{
+					"full_text":      "sensitive focal",
+					"created_at":     "Wed Jan 15 12:00:00 +0000 2020",
+					"favorite_count": 3, "retweet_count": 1, "reply_count": 0,
+					"user_id_str": "u100",
+				},
+			},
+		}},
+	}
+	body, err := json.Marshal(map[string]any{
+		"data": map[string]any{"threaded_conversation_with_injections_v2": map[string]any{"instructions": []any{
+			map[string]any{"type": "TimelinePinEntry", "entry": map[string]any{
+				"entryId": "tweet-100",
+				"content": map[string]any{"entryType": "TimelineTimelineItem", "itemContent": wrapped},
+			}},
+		}}},
+	})
+	require.NoError(t, err)
+
+	tweets, err := parseTweetDetail(body, "100")
+	require.NoError(t, err)
+	require.Len(t, tweets, 1)
+	assert.Equal(t, "100", tweets[0].ID)
+	assert.Equal(t, "sensitive focal", tweets[0].Text)
+	assert.Equal(t, "alice", tweets[0].AuthorHandle)
+}
+
 // TestParseTweetDetail_FocalAbsent: a deleted focal's page still carries
 // replies/ancestors — an absent focal must be ErrNotFound, never a silently
 // substituted tweets[0]. This is also the production pin for the pool's
