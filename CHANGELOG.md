@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.12](https://github.com/anatolykoptev/go-twitter/compare/v0.6.11...v0.6.12) (2026-09-29)
+
+
+### Bug Fixes
+
+* **parsers:** release the TweetWithVisibilityResults unwrap ([#53](https://github.com/anatolykoptev/go-twitter/issues/53)) ([2a4bc4e](https://github.com/anatolykoptev/go-twitter/commit/2a4bc4e382b53df9b53e2c141d9a034fb60f941b))
+
 ## [0.6.11](https://github.com/anatolykoptev/go-twitter/compare/v0.6.10...v0.6.11) (2026-09-29)
 
 
