@@ -4,6 +4,9 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestParseUserByScreenName(t *testing.T) {
@@ -72,9 +75,204 @@ func TestParseUserByScreenName_Unavailable(t *testing.T) {
 	}`
 
 	_, err := parseUserByScreenName([]byte(body))
-	if err == nil {
-		t.Fatal("expected error for unavailable user")
+	require.ErrorIs(t, err, ErrNotFound, "unavailable user is a deterministic miss")
+}
+
+// TestParseUserByScreenName_ErrorsWithData: a partial response carrying both
+// errors[] and a typed UserUnavailable result must resolve via the data — the
+// typed result is a deterministic ErrNotFound, not a retryable generic error.
+func TestParseUserByScreenName_ErrorsWithData(t *testing.T) {
+	body := `{
+		"data": {"user": {"result": {"__typename": "UserUnavailable", "rest_id": ""}}},
+		"errors": [{"message": "UserUnavailable"}]
+	}`
+	_, err := parseUserByScreenName([]byte(body))
+	require.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestParseUserByScreenName_ErrorsOnly(t *testing.T) {
+	body := `{"data": {}, "errors": [{"message": "bad query"}]}`
+	_, err := parseUserByScreenName([]byte(body))
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "bad query")
+	assert.NotErrorIs(t, err, ErrNotFound)
+}
+
+func TestParseSearchUsersTimeline(t *testing.T) {
+	body := []byte(`{
+		"data": {"search_by_raw_query": {"search_timeline": {"timeline": {"instructions": [{
+			"type": "TimelineAddEntries",
+			"entries": [
+				{"entryId": "user-12345", "sortIndex": "0", "content": {"entryType": "TimelineTimelineItem", "__typename": "TimelineTimelineItem", "itemContent": {"__typename": "TimelineUser", "user_results": {"result": {"__typename": "User", "rest_id": "12345", "core": {"name": "Jane Dev", "screen_name": "janedev", "created_at": "Wed Jan 15 12:00:00 +0000 2020"}, "is_blue_verified": true, "profile_bio": {"description": "Building things"}, "legacy": {"followers_count": 987, "friends_count": 100, "statuses_count": 500}}}, "user_display_type": "UserDetailed"}}},
+				{"entryId": "cursor-bottom", "content": {"entryType": "TimelineTimelineCursor", "cursorType": "Bottom", "value": "CUR1"}}
+			]}]}}}}
+	}`)
+	users, err := parseSearchUsersTimeline(body)
+	require.NoError(t, err)
+	require.Len(t, users, 1)
+	u := users[0]
+	assert.Equal(t, "12345", u.ID)
+	assert.Equal(t, "janedev", u.Handle)
+	assert.Equal(t, "Jane Dev", u.DisplayName)
+	assert.Equal(t, 987, u.Followers)
+	assert.True(t, u.IsVerified)
+	assert.Equal(t, "Building things", u.Bio)
+}
+
+// TestParseSearchUsersTimeline_SkipsTweets guards the TimelineUser filter:
+// a People-tab page can still carry non-user entries, and dropping the
+// typename check would surface tweets as empty users.
+func TestParseSearchUsersTimeline_SkipsTweets(t *testing.T) {
+	body := []byte(`{
+		"data": {"search_by_raw_query": {"search_timeline": {"timeline": {"instructions": [{
+			"type": "TimelineAddEntries",
+			"entries": [
+				{"entryId": "tweet-9", "content": {"entryType": "TimelineTimelineItem", "itemContent": {"__typename": "TimelineTweet", "tweet_results": {"result": {"__typename": "Tweet", "rest_id": "9", "core": {"user_results": {"result": {"__typename": "User", "rest_id": "7", "core": {"screen_name": "noise"}}}}, "legacy": {"full_text": "not a user"}}}}}},
+				{"entryId": "user-8", "content": {"entryType": "TimelineTimelineItem", "itemContent": {"__typename": "TimelineUser", "user_results": {"result": {"__typename": "User", "rest_id": "8", "core": {"name": "Ann", "screen_name": "ann"}, "legacy": {"followers_count": 5}}}}}}
+			]}]}}}}
+	}`)
+	users, err := parseSearchUsersTimeline(body)
+	require.NoError(t, err)
+	require.Len(t, users, 1)
+	assert.Equal(t, "ann", users[0].Handle)
+}
+
+// TestSplitConversation covers the focal/replies split used by
+// GetTweetConversation: focal is the ID match (else first, defensive —
+// production callers go through parseTweetDetail's ErrNotFound gate),
+// replies keep entry order minus every copy of the focal ID.
+func TestSplitConversation(t *testing.T) {
+	focal := &Tweet{ID: "10"}
+	reply1 := &Tweet{ID: "11"}
+	reply2 := &Tweet{ID: "12"}
+
+	main, replies := splitConversation([]*Tweet{focal, reply1, reply2}, "10")
+	assert.Equal(t, "10", main.ID)
+	require.Len(t, replies, 2)
+	assert.Equal(t, "11", replies[0].ID)
+
+	// The focal reappears as the anchor item of its own conversationthread-*
+	// module — every copy must stay out of replies.
+	dup := &Tweet{ID: "10"}
+	main, replies = splitConversation([]*Tweet{focal, dup, reply1}, "10")
+	assert.Equal(t, "10", main.ID)
+	require.Len(t, replies, 1)
+	assert.Equal(t, "11", replies[0].ID)
+
+	// Defensive fallback only: unreachable through getTweetDetail, which
+	// returns ErrNotFound when the focal is absent.
+	main, replies = splitConversation([]*Tweet{reply1, reply2}, "10")
+	assert.Equal(t, "11", main.ID)
+	require.Len(t, replies, 1)
+	assert.Equal(t, "12", replies[0].ID)
+
+	main, _ = splitConversation([]*Tweet{focal}, "10")
+	assert.Equal(t, "10", main.ID)
+
+	main, replies = splitConversation(nil, "10")
+	assert.Nil(t, main)
+	assert.Empty(t, replies)
+}
+
+// TestParseTweetDetail_ConversationModules exercises the live TweetDetail
+// shape: focal via TimelinePinEntry, replies nested inside
+// conversationthread-* module items, a promoted item excluded.
+func TestParseTweetDetail_ConversationModules(t *testing.T) {
+	tweetIC := func(id, user, text string) map[string]any {
+		return map[string]any{
+			"__typename": "TimelineTweet",
+			"tweet_results": map[string]any{"result": map[string]any{
+				"__typename": "Tweet",
+				"rest_id":    id,
+				"core": map[string]any{"user_results": map[string]any{"result": map[string]any{
+					"__typename": "User",
+					"rest_id":    "u" + id,
+					"core":       map[string]any{"screen_name": user, "name": user},
+				}}},
+				"legacy": map[string]any{
+					"full_text":      text,
+					"created_at":     "Wed Jan 15 12:00:00 +0000 2020",
+					"favorite_count": 3, "retweet_count": 1, "reply_count": 0,
+					"user_id_str": "u" + id,
+				},
+			}},
+		}
 	}
+	promoted := tweetIC("99", "adco", "AD")
+	promoted["promotedMetadata"] = map[string]any{"adId": "x"}
+	promotedInModule := tweetIC("98", "adco2", "MODULE AD")
+	promotedInModule["promotedMetadata"] = map[string]any{"adId": "y"}
+	body, err := json.Marshal(map[string]any{
+		"data": map[string]any{"threaded_conversation_with_injections_v2": map[string]any{"instructions": []any{
+			map[string]any{"type": "TimelinePinEntry", "entry": map[string]any{
+				"entryId": "tweet-100",
+				"content": map[string]any{"entryType": "TimelineTimelineItem", "itemContent": tweetIC("100", "alice", "focal tweet")},
+			}},
+			map[string]any{"type": "TimelineAddEntries", "entries": []any{
+				map[string]any{"entryId": "conversationthread-100", "content": map[string]any{
+					"entryType": "TimelineTimelineModule",
+					"items": []any{
+						// Live modules anchor on the focal tweet itself —
+						// the focal reappears as items[0] and must not leak
+						// into its own replies.
+						map[string]any{"entryId": "conversationthread-100-tweet-100", "item": map[string]any{"itemContent": tweetIC("100", "alice", "focal tweet")}},
+						map[string]any{"entryId": "conversationthread-100-tweet-101", "item": map[string]any{"itemContent": tweetIC("101", "bob", "reply one")}},
+						// Real promoted module items carry a hash-suffixed
+						// entryId with no "promoted" substring — only the
+						// promotedMetadata probe catches them.
+						map[string]any{"entryId": "conversationthread-100-9f8e7d", "item": map[string]any{"itemContent": promotedInModule}},
+						map[string]any{"entryId": "conversationthread-100-tweet-102", "item": map[string]any{"itemContent": tweetIC("102", "carol", "reply two")}},
+					},
+				}},
+				map[string]any{"entryId": "promoted-99", "content": map[string]any{"entryType": "TimelineTimelineItem", "itemContent": promoted}},
+				map[string]any{"entryId": "cursor-bottom", "content": map[string]any{"entryType": "TimelineTimelineCursor", "cursorType": "Bottom", "value": "CUR"}},
+			}},
+		}}},
+	})
+	require.NoError(t, err)
+
+	tweets, err := parseTweetDetail(body, "100")
+	require.NoError(t, err)
+	require.Len(t, tweets, 4, "pin + focal module anchor + 2 replies; both promoted items excluded")
+	focal, replies := splitConversation(tweets, "100")
+	require.NotNil(t, focal)
+	assert.Equal(t, "100", focal.ID)
+	assert.Equal(t, "focal tweet", focal.Text)
+	require.Len(t, replies, 2)
+	assert.Equal(t, "101", replies[0].ID)
+	assert.Equal(t, "102", replies[1].ID)
+}
+
+// TestParseTweetDetail_FocalAbsent: a deleted focal's page still carries
+// replies/ancestors — an absent focal must be ErrNotFound, never a silently
+// substituted tweets[0]. This is also the production pin for the pool's
+// no-retry classification.
+func TestParseTweetDetail_FocalAbsent(t *testing.T) {
+	body := `{"data":{"threaded_conversation_with_injections_v2":{"instructions":[
+		{"type":"TimelineAddEntries","entries":[
+			{"entryId":"conversationthread-9","content":{"entryType":"TimelineTimelineModule","items":[
+				{"entryId":"conversationthread-9-tweet-9","item":{"itemContent":{"__typename":"TimelineTweet","tweet_results":{"result":{"__typename":"Tweet","rest_id":"9","legacy":{"full_text":"orphan reply","created_at":"Wed Jan 15 12:00:00 +0000 2020","user_id_str":"u9"}}}}}}
+			]}}
+		]}
+	]}}}`
+	_, err := parseTweetDetail([]byte(body), "100")
+	require.ErrorIs(t, err, ErrNotFound)
+}
+
+// TestParseTweetDetail_Errors: a 200 response carrying GraphQL errors[] must
+// surface as an error, not an empty conversation.
+func TestParseTweetDetail_Errors(t *testing.T) {
+	body := `{"data":{},"errors":[{"message":"Rate limit exceeded"}]}`
+	_, err := parseTweetDetail([]byte(body), "")
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "Rate limit exceeded")
+}
+
+func TestParseSearchTimeline_Errors(t *testing.T) {
+	body := `{"data":{},"errors":[{"message":"query too long"}]}`
+	_, err := parseSearchTimeline([]byte(body))
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "query too long")
 }
 
 func TestParseSearchTimeline(t *testing.T) {

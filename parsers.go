@@ -28,8 +28,14 @@ func parseUserByScreenName(body []byte) (*TwitterUser, error) {
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, fmt.Errorf("unmarshal UserByScreenName: %w", err)
 	}
-	if len(raw.Errors) > 0 {
+	// Data wins over errors[]: a suspended handle can arrive as a partial
+	// response with both a UserUnavailable result and errors[] — the typed
+	// result yields the deterministic ErrNotFound, errors[] alone is generic.
+	if raw.Data.User.Result.TypeName == "" && len(raw.Errors) > 0 {
 		return nil, fmt.Errorf("twitter API error: %s", raw.Errors[0].Message)
+	}
+	if len(raw.Errors) > 0 {
+		slog.Debug("UserByScreenName errors[] alongside data", slog.String("first", raw.Errors[0].Message))
 	}
 	return parseUserResult(raw.Data.User.Result)
 }
@@ -72,16 +78,33 @@ func parseRetweeterList(body []byte) ([]*TwitterUser, string, error) {
 	return extractUsersFromTimeline(tl)
 }
 
-// parseTweetDetail parses TweetDetail GraphQL response.
-// The response wraps tweets in a threaded conversation timeline.
-func parseTweetDetail(body []byte) ([]*Tweet, error) {
+// parseTweetDetail parses a TweetDetail GraphQL response. focalID is the
+// requested tweet: when non-empty and absent from the extracted page the
+// result is a deterministic miss — ErrNotFound, not a silently substituted
+// tweets[0] (a deleted focal still returns ancestors/replies that would
+// otherwise be misidentified as the requested tweet).
+func parseTweetDetail(body []byte, focalID string) ([]*Tweet, error) {
+	type itemContentRef = json.RawMessage
+	type moduleItem struct {
+		EntryID string `json:"entryId"`
+		Item    struct {
+			ItemContent itemContentRef `json:"itemContent"`
+		} `json:"item"`
+	}
+	type convEntry struct {
+		EntryID string `json:"entryId"`
+		Content struct {
+			ItemContent itemContentRef `json:"itemContent"`
+			// conversationthread-* modules carry replies/ancestors nested
+			// under items[].item.itemContent — the live TweetDetail shape.
+			Items []moduleItem `json:"items"`
+		} `json:"content"`
+	}
 	type conversationData struct {
 		Instructions []struct {
-			Entries []struct {
-				Content struct {
-					ItemContent json.RawMessage `json:"itemContent"`
-				} `json:"content"`
-			} `json:"entries"`
+			Type    string      `json:"type"`
+			Entries []convEntry `json:"entries"`
+			Entry   *convEntry  `json:"entry"` // TimelinePinEntry delivers the focal tweet here
 		} `json:"instructions"`
 	}
 	var raw struct {
@@ -90,6 +113,9 @@ func parseTweetDetail(body []byte) ([]*Tweet, error) {
 			V2 conversationData `json:"threaded_conversation_with_injections_v2"`
 			V1 conversationData `json:"threaded_conversation_with_injections"`
 		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, fmt.Errorf("unmarshal TweetDetail: %w", err)
@@ -99,17 +125,63 @@ func parseTweetDetail(body []byte) ([]*Tweet, error) {
 	if len(conv.Instructions) == 0 {
 		conv = raw.Data.V1
 	}
-	tl := timelineObj{Instructions: make([]timelineInstruction, 0)}
-	for _, instr := range conv.Instructions {
-		entries := make([]timelineEntry, 0, len(instr.Entries))
-		for _, e := range instr.Entries {
-			entries = append(entries, timelineEntry{
-				Content: timelineContent{ItemContent: e.Content.ItemContent},
-			})
-		}
-		tl.Instructions = append(tl.Instructions, timelineInstruction{Entries: entries})
+	// errors[] is fatal only when no usable conversation data arrived —
+	// X routinely ships partial pages alongside non-fatal GraphQL errors.
+	if len(conv.Instructions) == 0 && len(raw.Errors) > 0 {
+		return nil, fmt.Errorf("twitter API error: %s", raw.Errors[0].Message)
 	}
-	return extractTweetsFromTimeline(tl, "")
+	if len(raw.Errors) > 0 {
+		slog.Debug("TweetDetail errors[] alongside data", slog.String("first", raw.Errors[0].Message), slog.Int("count", len(raw.Errors)))
+	}
+	tl := timelineObj{Instructions: make([]timelineInstruction, 0)}
+	pushContent := func(instr *timelineInstruction, entryID string, ic itemContentRef) {
+		if ic == nil || isPromotedItem(entryID, ic) {
+			return
+		}
+		instr.Entries = append(instr.Entries, timelineEntry{
+			EntryID: entryID,
+			Content: timelineContent{ItemContent: ic},
+		})
+	}
+	for _, instr := range conv.Instructions {
+		ti := timelineInstruction{Entries: make([]timelineEntry, 0)}
+		if instr.Entry != nil {
+			pushContent(&ti, instr.Entry.EntryID, instr.Entry.Content.ItemContent)
+		}
+		for _, e := range instr.Entries {
+			pushContent(&ti, e.EntryID, e.Content.ItemContent)
+			for _, it := range e.Content.Items {
+				pushContent(&ti, it.EntryID, it.Item.ItemContent)
+			}
+		}
+		tl.Instructions = append(tl.Instructions, ti)
+	}
+	tweets, err := extractTweetsFromTimeline(tl, "")
+	if err != nil {
+		return nil, err
+	}
+	if focalID != "" {
+		for _, t := range tweets {
+			if t.ID == focalID {
+				return tweets, nil
+			}
+		}
+		return nil, fmt.Errorf("%w: tweet %s absent from conversation page", ErrNotFound, focalID)
+	}
+	return tweets, nil
+}
+
+// isPromotedItem reports whether a timeline item is an ad: promoted entries
+// carry promotedMetadata inside itemContent and/or a promoted-* entryId.
+// Promoted tweets must not surface as conversation replies.
+func isPromotedItem(entryID string, itemContent json.RawMessage) bool {
+	if strings.HasPrefix(entryID, "promoted-") || strings.Contains(entryID, "-promoted-") {
+		return true
+	}
+	var probe struct {
+		Promoted json.RawMessage `json:"promotedMetadata"`
+	}
+	return json.Unmarshal(itemContent, &probe) == nil && probe.Promoted != nil
 }
 
 // parseTweetTimeline parses UserTweets timeline response.
@@ -148,11 +220,21 @@ func parseSearchTimeline(body []byte) ([]*Tweet, error) {
 				} `json:"search_timeline"`
 			} `json:"search_by_raw_query"`
 		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, fmt.Errorf("unmarshal search timeline: %w", err)
 	}
-	return extractTweetsFromTimeline(raw.Data.SearchByRawQuery.SearchTimeline.Timeline, "")
+	tl := raw.Data.SearchByRawQuery.SearchTimeline.Timeline
+	if len(tl.Instructions) == 0 && len(raw.Errors) > 0 {
+		return nil, fmt.Errorf("twitter API error: %s", raw.Errors[0].Message)
+	}
+	if len(raw.Errors) > 0 {
+		slog.Debug("search timeline errors[] alongside data", slog.String("first", raw.Errors[0].Message))
+	}
+	return extractTweetsFromTimeline(tl, "")
 }
 
 // --- T5 read-cluster timeline parsers ---
@@ -612,10 +694,10 @@ func parseTwitterTime(raw, site string) time.Time {
 
 func parseUserResult(r userResult) (*TwitterUser, error) {
 	if r.TypeName == "UserUnavailable" {
-		return nil, fmt.Errorf("user unavailable (suspended or restricted)")
+		return nil, fmt.Errorf("%w: user unavailable (suspended or restricted)", ErrNotFound)
 	}
 	if r.RestID == "" {
-		return nil, fmt.Errorf("empty user rest_id (typename=%s)", r.TypeName)
+		return nil, fmt.Errorf("%w: empty user rest_id (typename=%s)", ErrNotFound, r.TypeName)
 	}
 	createdAt := parseTwitterTime(r.createdAtRaw(), "user")
 	bio := strings.TrimSpace(r.bio())
@@ -802,4 +884,57 @@ func extractTokenMentions(text string) []string {
 		}
 	}
 	return result
+}
+
+// parseSearchUsersTimeline parses a People-tab SearchTimeline response —
+// same envelope as parseSearchTimeline, user entries instead of tweets.
+func parseSearchUsersTimeline(body []byte) ([]*TwitterUser, error) {
+	var raw struct {
+		Data struct {
+			SearchByRawQuery struct {
+				SearchTimeline struct {
+					Timeline timelineObj `json:"timeline"`
+				} `json:"search_timeline"`
+			} `json:"search_by_raw_query"`
+		} `json:"data"`
+		Errors []struct {
+			Message string `json:"message"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, fmt.Errorf("unmarshal search users timeline: %w", err)
+	}
+	tl := raw.Data.SearchByRawQuery.SearchTimeline.Timeline
+	if len(tl.Instructions) == 0 && len(raw.Errors) > 0 {
+		return nil, fmt.Errorf("twitter API error: %s", raw.Errors[0].Message)
+	}
+	if len(raw.Errors) > 0 {
+		slog.Debug("search users errors[] alongside data", slog.String("first", raw.Errors[0].Message))
+	}
+	users, _, err := extractUsersFromTimeline(tl)
+	return users, err
+}
+
+// splitConversation picks the focal tweet (ID match, else first entry) out of
+// a TweetDetail conversation page and returns the rest as replies in entry
+// order. Every copy of the focal ID is excluded from replies — the focal
+// reappears inside its own conversationthread-* module as the anchor item.
+func splitConversation(tweets []*Tweet, focalID string) (focal *Tweet, replies []*Tweet) {
+	if len(tweets) == 0 {
+		return nil, nil
+	}
+	focalIdx := 0
+	for i, t := range tweets {
+		if t.ID == focalID {
+			focalIdx = i
+			break
+		}
+	}
+	focal = tweets[focalIdx]
+	for i, t := range tweets {
+		if i != focalIdx && t.ID != focal.ID {
+			replies = append(replies, t)
+		}
+	}
+	return focal, replies
 }

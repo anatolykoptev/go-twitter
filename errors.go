@@ -8,6 +8,12 @@ import (
 	"time"
 )
 
+// ErrNotFound marks deterministic "the resource does not exist" outcomes —
+// deleted tweets, suspended/unavailable handles. Pool callers treat it as a
+// healthy-account response (no retry, no auth_error report): the credential
+// worked; the thing asked for simply isn't there.
+var ErrNotFound = errors.New("twitter: resource not found")
+
 // errorClass categorizes Twitter API error responses for targeted handling.
 type errorClass int
 

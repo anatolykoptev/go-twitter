@@ -59,3 +59,13 @@ type DMMessage struct {
 	Text           string
 	CreatedAt      time.Time
 }
+
+// SearchProduct selects the SearchTimeline results tab.
+type SearchProduct string
+
+const (
+	SearchTop    SearchProduct = "Top"
+	SearchLatest SearchProduct = "Latest"
+	SearchPeople SearchProduct = "People"
+	SearchMedia  SearchProduct = "Media"
+)
