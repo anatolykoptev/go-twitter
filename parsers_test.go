@@ -75,9 +75,27 @@ func TestParseUserByScreenName_Unavailable(t *testing.T) {
 	}`
 
 	_, err := parseUserByScreenName([]byte(body))
-	if err == nil {
-		t.Fatal("expected error for unavailable user")
-	}
+	require.ErrorIs(t, err, ErrNotFound, "unavailable user is a deterministic miss")
+}
+
+// TestParseUserByScreenName_ErrorsWithData: a partial response carrying both
+// errors[] and a typed UserUnavailable result must resolve via the data — the
+// typed result is a deterministic ErrNotFound, not a retryable generic error.
+func TestParseUserByScreenName_ErrorsWithData(t *testing.T) {
+	body := `{
+		"data": {"user": {"result": {"__typename": "UserUnavailable", "rest_id": ""}}},
+		"errors": [{"message": "UserUnavailable"}]
+	}`
+	_, err := parseUserByScreenName([]byte(body))
+	require.ErrorIs(t, err, ErrNotFound)
+}
+
+func TestParseUserByScreenName_ErrorsOnly(t *testing.T) {
+	body := `{"data": {}, "errors": [{"message": "bad query"}]}`
+	_, err := parseUserByScreenName([]byte(body))
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "bad query")
+	assert.NotErrorIs(t, err, ErrNotFound)
 }
 
 func TestParseSearchUsersTimeline(t *testing.T) {
@@ -172,6 +190,8 @@ func TestParseTweetDetail_ConversationModules(t *testing.T) {
 	}
 	promoted := tweetIC("99", "adco", "AD")
 	promoted["promotedMetadata"] = map[string]any{"adId": "x"}
+	promotedInModule := tweetIC("98", "adco2", "MODULE AD")
+	promotedInModule["promotedMetadata"] = map[string]any{"adId": "y"}
 	body, err := json.Marshal(map[string]any{
 		"data": map[string]any{"threaded_conversation_with_injections_v2": map[string]any{"instructions": []any{
 			map[string]any{"type": "TimelinePinEntry", "entry": map[string]any{
@@ -182,7 +202,15 @@ func TestParseTweetDetail_ConversationModules(t *testing.T) {
 				map[string]any{"entryId": "conversationthread-100", "content": map[string]any{
 					"entryType": "TimelineTimelineModule",
 					"items": []any{
+						// Live modules anchor on the focal tweet itself —
+						// the focal reappears as items[0] and must not leak
+						// into its own replies.
+						map[string]any{"entryId": "conversationthread-100-tweet-100", "item": map[string]any{"itemContent": tweetIC("100", "alice", "focal tweet")}},
 						map[string]any{"entryId": "conversationthread-100-tweet-101", "item": map[string]any{"itemContent": tweetIC("101", "bob", "reply one")}},
+						// Real promoted module items carry a hash-suffixed
+						// entryId with no "promoted" substring — only the
+						// promotedMetadata probe catches them.
+						map[string]any{"entryId": "conversationthread-100-9f8e7d", "item": map[string]any{"itemContent": promotedInModule}},
 						map[string]any{"entryId": "conversationthread-100-tweet-102", "item": map[string]any{"itemContent": tweetIC("102", "carol", "reply two")}},
 					},
 				}},
@@ -193,9 +221,9 @@ func TestParseTweetDetail_ConversationModules(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	tweets, err := parseTweetDetail(body)
+	tweets, err := parseTweetDetail(body, "100")
 	require.NoError(t, err)
-	require.Len(t, tweets, 3, "pin + 2 module replies; promoted excluded")
+	require.Len(t, tweets, 4, "pin + focal module anchor + 2 replies; both promoted items excluded")
 	focal, replies := splitConversation(tweets, "100")
 	require.NotNil(t, focal)
 	assert.Equal(t, "100", focal.ID)
@@ -205,11 +233,27 @@ func TestParseTweetDetail_ConversationModules(t *testing.T) {
 	assert.Equal(t, "102", replies[1].ID)
 }
 
+// TestParseTweetDetail_FocalAbsent: a deleted focal's page still carries
+// replies/ancestors — an absent focal must be ErrNotFound, never a silently
+// substituted tweets[0]. This is also the production pin for the pool's
+// no-retry classification.
+func TestParseTweetDetail_FocalAbsent(t *testing.T) {
+	body := `{"data":{"threaded_conversation_with_injections_v2":{"instructions":[
+		{"type":"TimelineAddEntries","entries":[
+			{"entryId":"conversationthread-9","content":{"entryType":"TimelineTimelineModule","items":[
+				{"entryId":"conversationthread-9-tweet-9","item":{"itemContent":{"__typename":"TimelineTweet","tweet_results":{"result":{"__typename":"Tweet","rest_id":"9","legacy":{"full_text":"orphan reply","created_at":"Wed Jan 15 12:00:00 +0000 2020","user_id_str":"u9"}}}}}}
+			]}}
+		]}
+	]}}}`
+	_, err := parseTweetDetail([]byte(body), "100")
+	require.ErrorIs(t, err, ErrNotFound)
+}
+
 // TestParseTweetDetail_Errors: a 200 response carrying GraphQL errors[] must
 // surface as an error, not an empty conversation.
 func TestParseTweetDetail_Errors(t *testing.T) {
 	body := `{"data":{},"errors":[{"message":"Rate limit exceeded"}]}`
-	_, err := parseTweetDetail([]byte(body))
+	_, err := parseTweetDetail([]byte(body), "")
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "Rate limit exceeded")
 }

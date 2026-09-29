@@ -28,7 +28,10 @@ func parseUserByScreenName(body []byte) (*TwitterUser, error) {
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, fmt.Errorf("unmarshal UserByScreenName: %w", err)
 	}
-	if len(raw.Errors) > 0 {
+	// Data wins over errors[]: a suspended handle can arrive as a partial
+	// response with both a UserUnavailable result and errors[] — the typed
+	// result yields the deterministic ErrNotFound, errors[] alone is generic.
+	if raw.Data.User.Result.TypeName == "" && len(raw.Errors) > 0 {
 		return nil, fmt.Errorf("twitter API error: %s", raw.Errors[0].Message)
 	}
 	return parseUserResult(raw.Data.User.Result)
@@ -72,9 +75,12 @@ func parseRetweeterList(body []byte) ([]*TwitterUser, string, error) {
 	return extractUsersFromTimeline(tl)
 }
 
-// parseTweetDetail parses TweetDetail GraphQL response.
-// The response wraps tweets in a threaded conversation timeline.
-func parseTweetDetail(body []byte) ([]*Tweet, error) {
+// parseTweetDetail parses a TweetDetail GraphQL response. focalID is the
+// requested tweet: when non-empty and absent from the extracted page the
+// result is a deterministic miss — ErrNotFound, not a silently substituted
+// tweets[0] (a deleted focal still returns ancestors/replies that would
+// otherwise be misidentified as the requested tweet).
+func parseTweetDetail(body []byte, focalID string) ([]*Tweet, error) {
 	type itemContentRef = json.RawMessage
 	type moduleItem struct {
 		EntryID string `json:"entryId"`
@@ -111,13 +117,15 @@ func parseTweetDetail(body []byte) ([]*Tweet, error) {
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, fmt.Errorf("unmarshal TweetDetail: %w", err)
 	}
-	if len(raw.Errors) > 0 {
-		return nil, fmt.Errorf("twitter API error: %s", raw.Errors[0].Message)
-	}
 	// Use v2 if it has instructions, otherwise fall back to v1
 	conv := raw.Data.V2
 	if len(conv.Instructions) == 0 {
 		conv = raw.Data.V1
+	}
+	// errors[] is fatal only when no usable conversation data arrived —
+	// X routinely ships partial pages alongside non-fatal GraphQL errors.
+	if len(conv.Instructions) == 0 && len(raw.Errors) > 0 {
+		return nil, fmt.Errorf("twitter API error: %s", raw.Errors[0].Message)
 	}
 	tl := timelineObj{Instructions: make([]timelineInstruction, 0)}
 	pushContent := func(instr *timelineInstruction, entryID string, ic itemContentRef) {
@@ -142,7 +150,19 @@ func parseTweetDetail(body []byte) ([]*Tweet, error) {
 		}
 		tl.Instructions = append(tl.Instructions, ti)
 	}
-	return extractTweetsFromTimeline(tl, "")
+	tweets, err := extractTweetsFromTimeline(tl, "")
+	if err != nil {
+		return nil, err
+	}
+	if focalID != "" {
+		for _, t := range tweets {
+			if t.ID == focalID {
+				return tweets, nil
+			}
+		}
+		return nil, fmt.Errorf("%w: tweet %s absent from conversation page", ErrNotFound, focalID)
+	}
+	return tweets, nil
 }
 
 // isPromotedItem reports whether a timeline item is an ad: promoted entries
@@ -201,10 +221,11 @@ func parseSearchTimeline(body []byte) ([]*Tweet, error) {
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, fmt.Errorf("unmarshal search timeline: %w", err)
 	}
-	if len(raw.Errors) > 0 {
+	tl := raw.Data.SearchByRawQuery.SearchTimeline.Timeline
+	if len(tl.Instructions) == 0 && len(raw.Errors) > 0 {
 		return nil, fmt.Errorf("twitter API error: %s", raw.Errors[0].Message)
 	}
-	return extractTweetsFromTimeline(raw.Data.SearchByRawQuery.SearchTimeline.Timeline, "")
+	return extractTweetsFromTimeline(tl, "")
 }
 
 // --- T5 read-cluster timeline parsers ---
@@ -874,16 +895,18 @@ func parseSearchUsersTimeline(body []byte) ([]*TwitterUser, error) {
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, fmt.Errorf("unmarshal search users timeline: %w", err)
 	}
-	if len(raw.Errors) > 0 {
+	tl := raw.Data.SearchByRawQuery.SearchTimeline.Timeline
+	if len(tl.Instructions) == 0 && len(raw.Errors) > 0 {
 		return nil, fmt.Errorf("twitter API error: %s", raw.Errors[0].Message)
 	}
-	users, _, err := extractUsersFromTimeline(raw.Data.SearchByRawQuery.SearchTimeline.Timeline)
+	users, _, err := extractUsersFromTimeline(tl)
 	return users, err
 }
 
 // splitConversation picks the focal tweet (ID match, else first entry) out of
 // a TweetDetail conversation page and returns the rest as replies in entry
-// order.
+// order. Every copy of the focal ID is excluded from replies — the focal
+// reappears inside its own conversationthread-* module as the anchor item.
 func splitConversation(tweets []*Tweet, focalID string) (focal *Tweet, replies []*Tweet) {
 	if len(tweets) == 0 {
 		return nil, nil
@@ -897,7 +920,7 @@ func splitConversation(tweets []*Tweet, focalID string) (focal *Tweet, replies [
 	}
 	focal = tweets[focalIdx]
 	for i, t := range tweets {
-		if i != focalIdx {
+		if i != focalIdx && t.ID != focal.ID {
 			replies = append(replies, t)
 		}
 	}
