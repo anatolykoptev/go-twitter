@@ -177,6 +177,9 @@ func (c *Client) GetTweetByID(ctx context.Context, tweetID string) (*Tweet, erro
 
 // getTweetDetail fetches the TweetDetail conversation page for tweetID.
 func (c *Client) getTweetDetail(ctx context.Context, tweetID string) ([]*Tweet, error) {
+	if tweetID == "" {
+		return nil, fmt.Errorf("tweet ID required")
+	}
 	variables := map[string]any{
 		"focalTweetId":                           tweetID,
 		"with_rux_injections":                    false,

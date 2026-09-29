@@ -34,6 +34,9 @@ func parseUserByScreenName(body []byte) (*TwitterUser, error) {
 	if raw.Data.User.Result.TypeName == "" && len(raw.Errors) > 0 {
 		return nil, fmt.Errorf("twitter API error: %s", raw.Errors[0].Message)
 	}
+	if len(raw.Errors) > 0 {
+		slog.Debug("UserByScreenName errors[] alongside data", slog.String("first", raw.Errors[0].Message))
+	}
 	return parseUserResult(raw.Data.User.Result)
 }
 
@@ -126,6 +129,9 @@ func parseTweetDetail(body []byte, focalID string) ([]*Tweet, error) {
 	// X routinely ships partial pages alongside non-fatal GraphQL errors.
 	if len(conv.Instructions) == 0 && len(raw.Errors) > 0 {
 		return nil, fmt.Errorf("twitter API error: %s", raw.Errors[0].Message)
+	}
+	if len(raw.Errors) > 0 {
+		slog.Debug("TweetDetail errors[] alongside data", slog.String("first", raw.Errors[0].Message), slog.Int("count", len(raw.Errors)))
 	}
 	tl := timelineObj{Instructions: make([]timelineInstruction, 0)}
 	pushContent := func(instr *timelineInstruction, entryID string, ic itemContentRef) {
@@ -224,6 +230,9 @@ func parseSearchTimeline(body []byte) ([]*Tweet, error) {
 	tl := raw.Data.SearchByRawQuery.SearchTimeline.Timeline
 	if len(tl.Instructions) == 0 && len(raw.Errors) > 0 {
 		return nil, fmt.Errorf("twitter API error: %s", raw.Errors[0].Message)
+	}
+	if len(raw.Errors) > 0 {
+		slog.Debug("search timeline errors[] alongside data", slog.String("first", raw.Errors[0].Message))
 	}
 	return extractTweetsFromTimeline(tl, "")
 }
@@ -898,6 +907,9 @@ func parseSearchUsersTimeline(body []byte) ([]*TwitterUser, error) {
 	tl := raw.Data.SearchByRawQuery.SearchTimeline.Timeline
 	if len(tl.Instructions) == 0 && len(raw.Errors) > 0 {
 		return nil, fmt.Errorf("twitter API error: %s", raw.Errors[0].Message)
+	}
+	if len(raw.Errors) > 0 {
+		slog.Debug("search users errors[] alongside data", slog.String("first", raw.Errors[0].Message))
 	}
 	users, _, err := extractUsersFromTimeline(tl)
 	return users, err

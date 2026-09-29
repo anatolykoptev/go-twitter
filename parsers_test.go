@@ -138,8 +138,9 @@ func TestParseSearchUsersTimeline_SkipsTweets(t *testing.T) {
 }
 
 // TestSplitConversation covers the focal/replies split used by
-// GetTweetConversation: focal is the ID match (else first), replies keep
-// entry order minus the focal.
+// GetTweetConversation: focal is the ID match (else first, defensive —
+// production callers go through parseTweetDetail's ErrNotFound gate),
+// replies keep entry order minus every copy of the focal ID.
 func TestSplitConversation(t *testing.T) {
 	focal := &Tweet{ID: "10"}
 	reply1 := &Tweet{ID: "11"}
@@ -150,7 +151,16 @@ func TestSplitConversation(t *testing.T) {
 	require.Len(t, replies, 2)
 	assert.Equal(t, "11", replies[0].ID)
 
-	// Focal absent from page (X sometimes omits it) → first entry wins.
+	// The focal reappears as the anchor item of its own conversationthread-*
+	// module — every copy must stay out of replies.
+	dup := &Tweet{ID: "10"}
+	main, replies = splitConversation([]*Tweet{focal, dup, reply1}, "10")
+	assert.Equal(t, "10", main.ID)
+	require.Len(t, replies, 1)
+	assert.Equal(t, "11", replies[0].ID)
+
+	// Defensive fallback only: unreachable through getTweetDetail, which
+	// returns ErrNotFound when the focal is absent.
 	main, replies = splitConversation([]*Tweet{reply1, reply2}, "10")
 	assert.Equal(t, "11", main.ID)
 	require.Len(t, replies, 1)
