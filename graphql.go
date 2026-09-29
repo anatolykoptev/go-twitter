@@ -211,7 +211,20 @@ func (c *Client) getTweetDetail(ctx context.Context, tweetID string) ([]*Tweet, 
 	slog.Debug("TweetDetail parsed", slog.Int("count", len(tweets)), slog.String("target", tweetID))
 	if len(tweets) == 0 {
 		slog.Warn("TweetDetail no tweets", slog.String("body_prefix", string(body[:min(1000, len(body))])))
-		return nil, fmt.Errorf("tweet %s not found in response", tweetID)
+		return nil, fmt.Errorf("%w: tweet %s absent from response", ErrNotFound, tweetID)
+	}
+	// Observability for the focal-absent fallback in splitConversation: X
+	// sometimes omits the requested tweet from its own conversation page, and
+	// tweets[0] silently wins downstream — make that visible.
+	found := false
+	for _, t := range tweets {
+		if t.ID == tweetID {
+			found = true
+			break
+		}
+	}
+	if !found {
+		slog.Warn("TweetDetail focal tweet missing from page", slog.String("target", tweetID), slog.Int("count", len(tweets)))
 	}
 	return tweets, nil
 }
@@ -291,12 +304,12 @@ func (c *Client) searchTimelineRaw(ctx context.Context, query string, product Se
 		"fieldToggles": fieldToggles,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("SearchTimeline: marshal payload: %w", err)
+		return nil, fmt.Errorf("marshal payload: %w", err)
 	}
 
 	body, _, err := c.doPoolPOST(ctx, "SearchTimeline", url, payload)
 	if err != nil {
-		return nil, fmt.Errorf("SearchTimeline: %w", err)
+		return nil, err
 	}
 	return body, nil
 }

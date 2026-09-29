@@ -69,12 +69,3 @@ const (
 	SearchPeople SearchProduct = "People"
 	SearchMedia  SearchProduct = "Media"
 )
-
-// Valid reports whether p is a tab the SearchTimeline op accepts.
-func (p SearchProduct) Valid() bool {
-	switch p {
-	case SearchTop, SearchLatest, SearchPeople, SearchMedia:
-		return true
-	}
-	return false
-}

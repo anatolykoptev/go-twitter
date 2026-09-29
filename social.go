@@ -2,6 +2,7 @@ package twitter
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -83,6 +84,9 @@ func withSocialAccount[T any](ctx context.Context, sc *social.Client, fn func(co
 		if err == nil {
 			return res, nil
 		}
+		if errors.Is(err, ErrNotFound) {
+			return zero, err
+		}
 		lastErr = err
 		slog.Warn("social request attempt failed, retrying",
 			slog.Int("attempt", attempt+1),
@@ -118,6 +122,13 @@ func tryWithAccount[T any](ctx context.Context, sc *social.Client, fn func(conte
 
 	res, err := fn(ctx, tw)
 	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			// The account completed the request fine — the resource is just
+			// absent. Healthy account, deterministic miss: report success and
+			// propagate untouched so withSocialAccount doesn't retry.
+			_ = sc.ReportUsage(ctx, "twitter", creds.ID, "success")
+			return zero, err
+		}
 		_ = sc.ReportUsage(ctx, "twitter", creds.ID, "auth_error")
 		return zero, fmt.Errorf("%s: %w", acc.Username, err)
 	}

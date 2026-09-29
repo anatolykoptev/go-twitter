@@ -146,12 +146,79 @@ func TestSplitConversation(t *testing.T) {
 	assert.Empty(t, replies)
 }
 
-func TestSearchProduct_Valid(t *testing.T) {
-	for _, p := range []SearchProduct{SearchTop, SearchLatest, SearchPeople, SearchMedia} {
-		assert.True(t, p.Valid(), string(p))
+// TestParseTweetDetail_ConversationModules exercises the live TweetDetail
+// shape: focal via TimelinePinEntry, replies nested inside
+// conversationthread-* module items, a promoted item excluded.
+func TestParseTweetDetail_ConversationModules(t *testing.T) {
+	tweetIC := func(id, user, text string) map[string]any {
+		return map[string]any{
+			"__typename": "TimelineTweet",
+			"tweet_results": map[string]any{"result": map[string]any{
+				"__typename": "Tweet",
+				"rest_id":    id,
+				"core": map[string]any{"user_results": map[string]any{"result": map[string]any{
+					"__typename": "User",
+					"rest_id":    "u" + id,
+					"core":       map[string]any{"screen_name": user, "name": user},
+				}}},
+				"legacy": map[string]any{
+					"full_text":      text,
+					"created_at":     "Wed Jan 15 12:00:00 +0000 2020",
+					"favorite_count": 3, "retweet_count": 1, "reply_count": 0,
+					"user_id_str": "u" + id,
+				},
+			}},
+		}
 	}
-	assert.False(t, SearchProduct("Bogus").Valid())
-	assert.False(t, SearchProduct("").Valid())
+	promoted := tweetIC("99", "adco", "AD")
+	promoted["promotedMetadata"] = map[string]any{"adId": "x"}
+	body, err := json.Marshal(map[string]any{
+		"data": map[string]any{"threaded_conversation_with_injections_v2": map[string]any{"instructions": []any{
+			map[string]any{"type": "TimelinePinEntry", "entry": map[string]any{
+				"entryId": "tweet-100",
+				"content": map[string]any{"entryType": "TimelineTimelineItem", "itemContent": tweetIC("100", "alice", "focal tweet")},
+			}},
+			map[string]any{"type": "TimelineAddEntries", "entries": []any{
+				map[string]any{"entryId": "conversationthread-100", "content": map[string]any{
+					"entryType": "TimelineTimelineModule",
+					"items": []any{
+						map[string]any{"entryId": "conversationthread-100-tweet-101", "item": map[string]any{"itemContent": tweetIC("101", "bob", "reply one")}},
+						map[string]any{"entryId": "conversationthread-100-tweet-102", "item": map[string]any{"itemContent": tweetIC("102", "carol", "reply two")}},
+					},
+				}},
+				map[string]any{"entryId": "promoted-99", "content": map[string]any{"entryType": "TimelineTimelineItem", "itemContent": promoted}},
+				map[string]any{"entryId": "cursor-bottom", "content": map[string]any{"entryType": "TimelineTimelineCursor", "cursorType": "Bottom", "value": "CUR"}},
+			}},
+		}}},
+	})
+	require.NoError(t, err)
+
+	tweets, err := parseTweetDetail(body)
+	require.NoError(t, err)
+	require.Len(t, tweets, 3, "pin + 2 module replies; promoted excluded")
+	focal, replies := splitConversation(tweets, "100")
+	require.NotNil(t, focal)
+	assert.Equal(t, "100", focal.ID)
+	assert.Equal(t, "focal tweet", focal.Text)
+	require.Len(t, replies, 2)
+	assert.Equal(t, "101", replies[0].ID)
+	assert.Equal(t, "102", replies[1].ID)
+}
+
+// TestParseTweetDetail_Errors: a 200 response carrying GraphQL errors[] must
+// surface as an error, not an empty conversation.
+func TestParseTweetDetail_Errors(t *testing.T) {
+	body := `{"data":{},"errors":[{"message":"Rate limit exceeded"}]}`
+	_, err := parseTweetDetail([]byte(body))
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "Rate limit exceeded")
+}
+
+func TestParseSearchTimeline_Errors(t *testing.T) {
+	body := `{"data":{},"errors":[{"message":"query too long"}]}`
+	_, err := parseSearchTimeline([]byte(body))
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "query too long")
 }
 
 func TestParseSearchTimeline(t *testing.T) {
