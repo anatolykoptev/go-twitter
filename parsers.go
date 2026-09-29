@@ -594,6 +594,9 @@ type tweetResult struct {
 	Views struct {
 		Count string `json:"count"`
 	} `json:"views"`
+	// TweetWithVisibilityResults nests the real tweet under "tweet";
+	// any future *Results wrapper would land in the same field.
+	Tweet *tweetResult `json:"tweet"`
 }
 
 // --- Extraction helpers ---
@@ -719,8 +722,14 @@ func parseUserResult(r userResult) (*TwitterUser, error) {
 }
 
 func parseTweetResult(r tweetResult, defaultAuthorID string) (*Tweet, error) {
+	// Unwrap *Results shells (TweetWithVisibilityResults for sensitive
+	// tweets): the payload nests the real tweet one level down. Loop —
+	// not a fixed depth — so a stacked wrapper still decodes.
+	for r.RestID == "" && r.Tweet != nil {
+		r = *r.Tweet
+	}
 	if r.RestID == "" {
-		return nil, fmt.Errorf("empty tweet rest_id")
+		return nil, fmt.Errorf("empty tweet rest_id (typename=%s)", r.TypeName)
 	}
 
 	authorID := defaultAuthorID
