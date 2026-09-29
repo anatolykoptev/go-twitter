@@ -729,7 +729,7 @@ func parseTweetResult(r tweetResult, defaultAuthorID string) (*Tweet, error) {
 		r = *r.Tweet
 	}
 	if r.RestID == "" {
-		return nil, fmt.Errorf("empty tweet rest_id")
+		return nil, fmt.Errorf("empty tweet rest_id (typename=%s)", r.TypeName)
 	}
 
 	authorID := defaultAuthorID
