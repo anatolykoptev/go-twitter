@@ -73,18 +73,7 @@ func instructions(ids ...string) string {
 // request (path ends in the operation name).
 func newMetricsFixture(t *testing.T, handler http.HandlerFunc, username string) *metricsFixture {
 	t.Helper()
-
-	srv := httptest.NewServer(handler)
-	t.Cleanup(srv.Close)
-
-	origBase, origJitter, origBackoff := twitterBase, stealth.DefaultJitter, stealth.DefaultBackoff
-	twitterBase = srv.URL + "/i/api/graphql"
-	stealth.DefaultJitter.Min, stealth.DefaultJitter.Max = time.Millisecond, 2*time.Millisecond
-	stealth.DefaultBackoff.InitialWait, stealth.DefaultBackoff.MaxWait = time.Millisecond, 2*time.Millisecond
-	t.Cleanup(func() { twitterBase, stealth.DefaultJitter, stealth.DefaultBackoff = origBase, origJitter, origBackoff })
-
-	bc, err := stealth.NewClient(stealth.WithoutSSRFGuard()) // test-only: the fake x.com is loopback
-	require.NoError(t, err)
+	bc := startFakeX(t, handler)
 
 	acc := &Account{Username: username, AuthToken: "auth", CT0: "ct0", UserAgent: defaultUserAgent}
 	acc.active = true
@@ -108,6 +97,26 @@ func newMetricsFixture(t *testing.T, handler http.HandlerFunc, username string) 
 	c.registerPoolGauge(mp)
 
 	return &metricsFixture{c: c, reader: reader, acc: acc, now: now}
+}
+
+// startFakeX starts an httptest server standing in for x.com, points twitterBase
+// at it, shortens the jitter/backoff, and returns a stealth client that may dial
+// loopback (test-only: the SSRF guard is cleared).
+func startFakeX(t *testing.T, handler http.HandlerFunc) *stealth.BrowserClient {
+	t.Helper()
+
+	srv := httptest.NewServer(handler)
+	t.Cleanup(srv.Close)
+
+	origBase, origJitter, origBackoff := twitterBase, stealth.DefaultJitter, stealth.DefaultBackoff
+	twitterBase = srv.URL + "/i/api/graphql"
+	stealth.DefaultJitter.Min, stealth.DefaultJitter.Max = time.Millisecond, 2*time.Millisecond
+	stealth.DefaultBackoff.InitialWait, stealth.DefaultBackoff.MaxWait = time.Millisecond, 2*time.Millisecond
+	t.Cleanup(func() { twitterBase, stealth.DefaultJitter, stealth.DefaultBackoff = origBase, origJitter, origBackoff })
+
+	bc, err := stealth.NewClient(stealth.WithoutSSRFGuard()) // test-only: the fake x.com is loopback
+	require.NoError(t, err)
+	return bc
 }
 
 func (f *metricsFixture) collect(t *testing.T) map[string]metricdata.Metrics {
@@ -308,28 +317,31 @@ func TestAttemptOutcome(t *testing.T) {
 		status int
 		body   string
 		err    error
+		direct bool // true: the attempt did not go through a per-account proxy
 		want   string
 	}{
-		{"ok", 200, `{"data":{}}`, nil, outcomeOK},
-		{"created", 201, ``, nil, outcomeOK},
-		{"429", 429, `{}`, nil, outcomeRateLimited},
-		{"403 bare", 403, `{}`, nil, outcomeForbidden},
-		{"401 bare", 401, `{}`, nil, outcomeAuth},
-		{"404", 404, `{}`, nil, outcomeNotFound},
-		{"500", 500, `oops`, nil, outcomeOther},
-		{"code 32", 401, `{"errors":[{"code":32}]}`, nil, outcomeAuth},
-		{"code 353", 403, `{"errors":[{"code":353}]}`, nil, outcomeCSRF},
-		{"code 88 in a 200", 200, `{"errors":[{"code":88}]}`, nil, outcomeBanned},
-		{"code 64", 200, `{"errors":[{"code":64}]}`, nil, outcomeSuspended},
-		{"code 326", 200, `{"errors":[{"code":326}]}`, nil, outcomeLocked},
-		{"code 161", 200, `{"errors":[{"code":161}]}`, nil, outcomeBlocked},
-		{"code 131", 200, `{"errors":[{"code":131}]}`, nil, outcomeInternal},
-		{"transport", 0, ``, errors.New("EOF"), outcomeTransport},
-		{"proxy", 0, ``, errors.New("Proxy responded with non 200 code: 407"), outcomeProxy},
+		{"ok", 200, `{"data":{}}`, nil, false, outcomeOK},
+		{"created", 201, ``, nil, false, outcomeOK},
+		{"429", 429, `{}`, nil, false, outcomeRateLimited},
+		{"403 bare", 403, `{}`, nil, false, outcomeForbidden},
+		{"401 bare", 401, `{}`, nil, false, outcomeAuth},
+		{"404", 404, `{}`, nil, false, outcomeNotFound},
+		{"500", 500, `oops`, nil, false, outcomeOther},
+		{"code 32", 401, `{"errors":[{"code":32}]}`, nil, false, outcomeAuth},
+		{"code 353", 403, `{"errors":[{"code":353}]}`, nil, false, outcomeCSRF},
+		{"code 88 in a 200", 200, `{"errors":[{"code":88}]}`, nil, false, outcomeBanned},
+		{"code 64", 200, `{"errors":[{"code":64}]}`, nil, false, outcomeSuspended},
+		{"code 326", 200, `{"errors":[{"code":326}]}`, nil, false, outcomeLocked},
+		{"code 161", 200, `{"errors":[{"code":161}]}`, nil, false, outcomeBlocked},
+		{"code 131", 200, `{"errors":[{"code":131}]}`, nil, false, outcomeInternal},
+		{"transport", 0, ``, errors.New("EOF"), false, outcomeTransport},
+		{"proxy", 0, ``, errors.New("Proxy responded with non 200 code: 407"), false, outcomeProxy},
+		// A direct account's DNS / connection-refused is not a proxy failure.
+		{"direct no such host", 0, ``, errors.New("dial tcp: lookup x.com: no such host"), true, outcomeTransport},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, attemptOutcome(tc.status, []byte(tc.body), nil, tc.err))
+			assert.Equal(t, tc.want, attemptOutcome(tc.status, []byte(tc.body), nil, tc.err, !tc.direct))
 		})
 	}
 }

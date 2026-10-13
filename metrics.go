@@ -169,16 +169,39 @@ func (c *Client) registerPoolGauge(mp metric.MeterProvider) {
 			slog.String("instrument", metricPoolAccounts), slog.Any("error", err))
 		return
 	}
-	if _, err := meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
+	reg, err := meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
 		counts := c.poolAccountStates(time.Now())
 		for _, st := range accountStates {
 			o.ObserveInt64(g, counts[st], metric.WithAttributes(attribute.String(attrAccountState, st)))
 		}
 		return nil
-	}, g); err != nil {
+	}, g)
+	if err != nil {
 		slog.Warn("twitter: metric callback registration failed",
 			slog.String("instrument", metricPoolAccounts), slog.Any("error", err))
+		return
 	}
+	c.mu.Lock()
+	c.poolGaugeReg = reg
+	c.mu.Unlock()
+}
+
+// Close unregisters the client's pool.accounts gauge callback so the client can
+// be garbage collected and a replacement client can report on the same
+// MeterProvider. It is idempotent and safe on a nil client; it does not stop
+// in-flight requests.
+func (c *Client) Close() error {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	reg := c.poolGaugeReg
+	c.poolGaugeReg = nil
+	c.mu.Unlock()
+	if reg == nil {
+		return nil
+	}
+	return reg.Unregister()
 }
 
 // poolAccountStates buckets every pool account into exactly one state.
@@ -194,15 +217,17 @@ func (c *Client) poolAccountStates(now time.Time) map[string]int64 {
 }
 
 func accountState(acc *Account, now time.Time) string {
-	if !acc.IsActive() {
-		if acc.ReactivateAt().IsZero() {
+	// One locked snapshot: reading the fields separately could pair a stale
+	// active flag with a fresh reactivateAt while the pool deactivates it.
+	acc.mu.Lock()
+	active, reactivateAt, backoff := acc.active, acc.reactivateAt, acc.proxyBackoff
+	acc.mu.Unlock()
+	if !active {
+		if reactivateAt.IsZero() {
 			return accountStateDeactivated
 		}
 		return accountStateCoolingDown
 	}
-	acc.mu.Lock()
-	backoff := acc.proxyBackoff
-	acc.mu.Unlock()
 	if backoff.After(now) {
 		return accountStateProxyBackoff
 	}
@@ -228,7 +253,7 @@ func (m *clientMetrics) recordFreshness(endpoint string, tweets []*Tweet) {
 	}
 	var newest time.Time
 	for _, t := range tweets {
-		if t == nil {
+		if t == nil || t.promoted {
 			continue
 		}
 		ts, err := SnowflakeTime(t.ID)
@@ -288,12 +313,14 @@ func (e *snowflakeError) Error() string {
 
 func (e *snowflakeError) Unwrap() error { return e.err }
 
-// attemptOutcome classifies one HTTP attempt into a bounded twitter.outcome
+// attemptOutcome classifies (proxied: the attempt went through a per-account
+// proxy; only then can a transport failure be attributed to the proxy, the same
+// gate attributeTransportError uses for proxy.failures) one HTTP attempt into a bounded twitter.outcome
 // value using the same classifier the retry loop uses (classifyError via
 // newAPIError), so the enum cannot drift from the real error taxonomy.
-func attemptOutcome(status int, body []byte, hdrs map[string]string, err error) string {
+func attemptOutcome(status int, body []byte, hdrs map[string]string, err error, proxied bool) string {
 	if err != nil {
-		if isProxyError(err) {
+		if proxied && isProxyError(err) {
 			return outcomeProxy
 		}
 		return outcomeTransport

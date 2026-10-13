@@ -38,7 +38,10 @@ instrumented.
 - `twitter.operation`: the GraphQL operation / endpoint name (`UserTweets`,
   `SearchTimeline`, `ListLatestTweetsTimeline`, ...), bounded by the `Endpoints`
   registry plus the fixed REST names `DMInbox` and `SendDM`.
-- `twitter.outcome`: derived from the same classifier the retry loop uses
+- `twitter.outcome` is the truth about that one HTTP attempt, **not** call-level
+  success: a call that eventually succeeds after a retry still records the failed
+  attempts, and a code-131 response that the client accepts because it carries
+  usable data is recorded as `internal`, not `ok`. Derived from the same classifier the retry loop uses
   (`classifyError` / `newAPIError`), so it cannot drift from the error taxonomy:
 
 | Value | Meaning |
@@ -54,8 +57,8 @@ instrumented.
 | `forbidden` | HTTP 403 without a recognized code |
 | `internal` | code 131 (recorded as `internal` even when the client then accepts usable data) |
 | `not_found` | HTTP 404 |
-| `transport` | the request failed before an HTTP response (timeout, reset, ...) |
-| `proxy` | transport failure that looks like a proxy failure (`isProxyError`) |
+| `transport` | the request failed before an HTTP response (timeout, reset, DNS on a direct account, ...) |
+| `proxy` | transport failure that looks like a proxy failure (`isProxyError`) on an attempt made through a per-account proxy; the same gate as `proxy.failures` |
 | `other` | anything else (e.g. 5xx) |
 
 Buckets (seconds): `0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30` - sized for a
@@ -68,7 +71,8 @@ For every successful tweet-timeline response (`UserTweets`, `SearchTimeline`,
 `ListLatestTweetsTimeline`, `HomeTimeline`, `HomeLatestTimeline`,
 `CommunityTweetsTimeline`, `Bookmarks`; one record per page for paginated
 operations) the client records `now - createdAt(newest tweet in the response)`,
-where `createdAt` is decoded from the tweet's snowflake ID
+ignoring promoted (ad) entries - their IDs are minted at serve time and would
+mask staleness - where `createdAt` is decoded from the tweet's snowflake ID
 (`(id >> 22) + 1288834974657` ms).
 
 **Semantics.** This is the age of the freshest item in the response. For a
@@ -93,7 +97,10 @@ Buckets (seconds): `0.5, 1, 2, 3, 5, 8, 12, 20, 30, 45, 60, 120, 300, 900, 3600`
 
 ### `twitter.client.pool.accounts`
 
-Observed on collection. Every pool account is in exactly one state, so the series
+Observed on collection. It carries no per-client attribute, so use **one client
+per `MeterProvider`** for this gauge: two clients on the same provider report the
+same series and the last callback wins. Call `Client.Close()` to unregister the
+callback when a client is discarded (idempotent). Every pool account is in exactly one state, so the series
 sum to the pool size; all four states are always reported (zeros included).
 
 | `twitter.account.state` | Meaning |

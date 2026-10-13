@@ -17,6 +17,7 @@ import (
 	"github.com/anatolykoptev/go-twitter/internal/bundle"
 	"github.com/anatolykoptev/go-twitter/xpff"
 	"github.com/anatolykoptev/go-twitter/xtid"
+	"go.opentelemetry.io/otel/metric"
 )
 
 // Client is the top-level Twitter scraping client.
@@ -31,6 +32,7 @@ type Client struct {
 	accountPacer         *ratelimit.KeyedPacer           // per-account human-pace spacing (keyed by account, nil = disabled)
 	alertHook            func(topic string, payload any) // proxy/pool event sink (PoolAlertHook or slog fallback)
 	metrics              *clientMetrics                  // OpenTelemetry instruments (nil-safe)
+	poolGaugeReg         metric.Registration             // pool.accounts callback; unregistered by Close (guarded by mu)
 
 	mu                sync.Mutex
 	guestToken        string
@@ -200,7 +202,7 @@ func (c *Client) doPoolReq(bc *stealth.BrowserClient, method, urlStr string, pay
 func (c *Client) observedPoolReq(endpoint string, bc *stealth.BrowserClient, method, urlStr string, payload []byte, headers map[string]string) ([]byte, map[string]string, int, error) {
 	start := time.Now()
 	body, hdrs, status, err := c.doPoolReq(bc, method, urlStr, payload, headers)
-	c.metrics.recordRequest(endpoint, time.Since(start), attemptOutcome(status, body, hdrs, err))
+	c.metrics.recordRequest(endpoint, time.Since(start), attemptOutcome(status, body, hdrs, err, bc != c.client))
 	return body, hdrs, status, err
 }
 
@@ -208,7 +210,7 @@ func (c *Client) observedPoolReq(endpoint string, bc *stealth.BrowserClient, met
 func (c *Client) observedRequestWithBody(endpoint string, bc *stealth.BrowserClient, method, urlStr string, headers map[string]string, body io.Reader) ([]byte, map[string]string, int, error) {
 	start := time.Now()
 	respBody, hdrs, status, err := c.doRequestWithBody(bc, method, urlStr, headers, body)
-	c.metrics.recordRequest(endpoint, time.Since(start), attemptOutcome(status, respBody, hdrs, err))
+	c.metrics.recordRequest(endpoint, time.Since(start), attemptOutcome(status, respBody, hdrs, err, bc != c.client))
 	return respBody, hdrs, status, err
 }
 
