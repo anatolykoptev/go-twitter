@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.16](https://github.com/anatolykoptev/go-twitter/compare/v0.6.15...v0.6.16) (2026-10-13)
+
+
+### Bug Fixes
+
+* **auth:** provided credentials override the on-disk session; atomic session writes ([#86](https://github.com/anatolykoptev/go-twitter/issues/86)) ([#88](https://github.com/anatolykoptev/go-twitter/issues/88)) ([c66d296](https://github.com/anatolykoptev/go-twitter/commit/c66d296f33c4696ec8ff106af7731c5b24342ca9))
+
 ## [0.6.15](https://github.com/anatolykoptev/go-twitter/compare/v0.6.14...v0.6.15) (2026-10-13)
 
 
