@@ -23,8 +23,10 @@ const (
 // fakeWarmBackend stands in for x.com: it serves a RECONSTRUCTED authenticated
 // Vite page set (not a capture) and records the headers of every request.
 type fakeWarmBackend struct {
-	mu   sync.Mutex
-	seen map[string]map[string]string
+	mu      sync.Mutex
+	seen    map[string]map[string]string
+	hits    map[string]int // fetch count per URL
+	cookies []string       // cookie of every x.com/tesla warm-page fetch, in order
 }
 
 func (f *fakeWarmBackend) DoCtx(_ context.Context, _, u string, h map[string]string, _ io.Reader) ([]byte, map[string]string, int, error) {
@@ -33,6 +35,13 @@ func (f *fakeWarmBackend) DoCtx(_ context.Context, _, u string, h map[string]str
 		f.seen = map[string]map[string]string{}
 	}
 	f.seen[u] = h
+	if f.hits == nil {
+		f.hits = map[string]int{}
+	}
+	f.hits[u]++
+	if u == "https://x.com/tesla" {
+		f.cookies = append(f.cookies, h["cookie"])
+	}
 	f.mu.Unlock()
 	key := base64.StdEncoding.EncodeToString([]byte{0, 20, 30, 40, 50, 0, 70, 80})
 	switch u {
