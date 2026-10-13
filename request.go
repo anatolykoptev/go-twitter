@@ -133,6 +133,12 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 			if ctx.Err() != nil {
 				return nil, nil, accErr
 			}
+			// Keep the previous attempt's typed error reachable (IsBanned,
+			// IsRateLimited, ...): the pool error alone says nothing about why
+			// the pool ran dry.
+			if lastErr != nil {
+				accErr = fmt.Errorf("%w (previous attempt: %w)", accErr, lastErr)
+			}
 			lastErr = accErr
 			break
 		}
@@ -297,6 +303,15 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 			apiErr := newAPIError(200, body, respHdrs)
 			apiErr.Message = "Twitter internal error (131)"
 			lastErr = apiErr
+			continue
+
+		case errRateLimited:
+			// Code 88 inside a 200 body with an exhausted window: a plain
+			// per-endpoint rate limit. The account is healthy, so block only this
+			// endpoint until the reset instead of benching it for BanCooldown.
+			c.recordAPICall(endpoint, false, true)
+			acc.MarkEndpointRateLimited(endpoint, parseRateLimitReset(respHdrs[xRateLimitReset]))
+			lastErr = &APIError{Status: 200, Class: errRateLimited, Codes: extractErrorCodes(body), Message: "rate limited (code 88)"}
 			continue
 
 		case errBanned:
@@ -618,6 +633,14 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 				return body2, nil
 			}
 			continue
+		case errRateLimited:
+			// Code 88 with an exhausted window: the account is healthy, so do not
+			// charge it a failure; block this endpoint until the reset.
+			c.recordAPICall(endpoint, false, true)
+			acc.MarkEndpointRateLimited(endpoint, parseRateLimitReset(respHdrs[xRateLimitReset]))
+			apiErr := newAPIError(200, body, respHdrs)
+			apiErr.Message = fmt.Sprintf("%s rate limited (code 88)", endpoint)
+			return nil, apiErr
 		default:
 			c.recordAPICall(endpoint, false, false)
 			acc.RecordFailure()
