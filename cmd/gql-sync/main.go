@@ -3,7 +3,8 @@
 // endpoints override chain (env > generated > committed).
 //
 // It builds the chunk map via internal/bundle (an HTTPFetcher that honors
-// -proxy, or a disk fixtures fetcher for -fixtures), WalkImports over the
+// -proxy and, when GQL_SYNC_COOKIES is set, the account cookies of an
+// authenticated session; or a disk fixtures fetcher for -fixtures), WalkImports over the
 // bundles, extracts operationName -> queryId (deduped by source priority), and
 // writes a gofmt'd, sorted, code-generated map. On an empty or failed
 // extraction it leaves queryids_gen.go untouched so a transient x.com break can
@@ -24,7 +25,10 @@ import (
 )
 
 const (
-	warmHome          = "https://x.com/home"
+	warmHome = "https://x.com/home"
+	// cookiesEnv names the env var holding the session cookie header value
+	// ("auth_token=...; ct0=...") for the authenticated warm-page fetch.
+	cookiesEnv        = "GQL_SYNC_COOKIES"
 	generatedFileName = "queryids_gen.go"
 	featuresFileName  = "features_gen.go"
 	// maxWalkBundles bounds the BFS over x.com's chunk graph. Set well above the
@@ -192,6 +196,13 @@ func buildFetcher(cfg config) (bundle.Fetcher, bundle.Options, error) {
 	f, err := bundle.NewHTTPFetcher(cfg.proxy)
 	if err != nil {
 		return nil, bundle.Options{}, fmt.Errorf("build http fetcher: %w", err)
+	}
+	// Logged-out x.com serves a Vite shell without the bundle; an account's
+	// cookies get the real page. Env (not a flag) so the secret stays out of the
+	// process list and CI command logs; sent to x.com hosts only, never logged.
+	if cookie := os.Getenv(cookiesEnv); cookie != "" {
+		f.Cookie = cookie
+		slog.Info("gql-sync: authenticated warm-page fetch enabled (" + cookiesEnv + " set)")
 	}
 	return f, bundle.Options{MaxBundles: maxWalkBundles}, nil
 }

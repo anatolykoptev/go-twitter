@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -33,6 +34,7 @@ type Client struct {
 	alertHook            func(topic string, payload any) // proxy/pool event sink (PoolAlertHook or slog fallback)
 	metrics              *clientMetrics                  // OpenTelemetry instruments (nil-safe)
 	poolGaugeReg         metric.Registration             // pool.accounts callback; unregistered by Close (guarded by mu)
+	warmDoerOverride     warmDoer                        // test seam: replaces the account client for xtid warm-page fetches
 
 	mu                sync.Mutex
 	guestToken        string
@@ -70,16 +72,16 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		}
 	}
 
-	// xtid locates ondemand.s via the bundle core, fetching warm pages through the
-	// stealth client (shared TLS fingerprint + proxy). Unauthenticated/guest is
-	// fine. On failure we degrade — x-client-transaction-id is simply omitted —
-	// and route the alert through the pool hook; NewClient never hard-fails here.
+	// xtid is initialised lazily, on the first request that carries an account's
+	// cookies (see warmFetcher): logged-out x.com serves a Vite shell without the
+	// bundle. The shared-client fetcher below is only the unauthenticated fallback.
+	// On failure we degrade — x-client-transaction-id is simply omitted — and the
+	// alert fires once per ok->failed transition, never per request.
 	fetcher := &bundle.StealthFetcher{Client: bc, UserAgent: defaultUserAgent}
 	mgr := xtid.NewManager(fetcher)
-	if err := mgr.Initialize(); err != nil {
-		slog.Warn("xtid: init failed, x-client-transaction-id will be missing", slog.Any("error", err))
+	mgr.SetInitFailedHook(func(err error) {
 		alertHook("xtid.init_failed", map[string]any{"error": err.Error()})
-	}
+	})
 
 	nonResponsiveBackoff := pool.BackoffConfig{
 		InitialWait: cfg.NonResponsiveCooldown,
@@ -99,15 +101,14 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	}
 	p := pool.New(cfg.Accounts, poolCfg)
 
-	// The guest_id cookie is set by the warm-page fetches above; read it from the
-	// stealth client's jar (xtid no longer surfaces it). Fall back to a generated
-	// id when the fetch was bot-walled. Log which branch fired so a silent
-	// downgrade to a synthetic id (the warm-page fetch was walled and never set a
-	// real cookie) is observable rather than masked behind a well-formed header.
+	// Read the guest_id cookie from the stealth client's jar. xtid's warm-page
+	// fetch is lazy now (first authenticated request), so it has normally not run
+	// yet and the jar is empty here: fall back to a generated id. Log which
+	// branch fired so the synthetic id is observable.
 	xpffGuestID := bc.GetCookieValue("https://x.com", "guest_id")
 	if xpffGuestID == "" {
 		xpffGuestID = xpff.GenerateGuestID()
-		slog.Warn("xpff: guest_id cookie absent, using synthetic GenerateGuestID fallback (warm-page fetch likely bot-walled)")
+		slog.Info("xpff: guest_id cookie absent at construction, using synthetic GenerateGuestID")
 	} else {
 		slog.Info("xpff: using server-set guest_id cookie")
 	}
@@ -219,6 +220,43 @@ func (c *Client) observedRequest(endpoint string, bc *stealth.BrowserClient, met
 	return c.observedRequestWithBody(endpoint, bc, method, urlStr, headers, nil)
 }
 
+// authTokenCookieRe matches a non-empty auth_token cookie pair.
+var authTokenCookieRe = regexp.MustCompile(`(?:^|;\s*)auth_token=[^;\s]+`)
+
+// warmFetcher builds the authenticated warm-page fetcher for xtid from a
+// request's own headers: the account's cookie, sent through that account's
+// client (bc). Returns nil (unauthenticated fallback) for requests without an
+// auth_token cookie. The cookie is never logged.
+func warmFetcher(d warmDoer, headers map[string]string) bundle.Fetcher {
+	cookie := headers["cookie"]
+	if d == nil || !authTokenCookieRe.MatchString(cookie) {
+		return nil
+	}
+	ua := headers["user-agent"]
+	if ua == "" {
+		ua = defaultUserAgent
+	}
+	return &bundle.StealthFetcher{Client: d, UserAgent: ua, Cookie: cookie}
+}
+
+// warmDoer is the request primitive the warm-page fetcher needs; the account's
+// *stealth.BrowserClient in production.
+type warmDoer interface {
+	DoCtx(ctx context.Context, method, urlStr string, headers map[string]string, body io.Reader) ([]byte, map[string]string, int, error)
+}
+
+// warmClient picks the client the warm-page fetch goes through: the request
+// account's own (bc), or the test override.
+func (c *Client) warmClient(bc *stealth.BrowserClient) warmDoer {
+	if c.warmDoerOverride != nil {
+		return c.warmDoerOverride
+	}
+	if bc == nil {
+		return nil
+	}
+	return bc
+}
+
 // doRequest executes a request with xtid header injection (no body).
 func (c *Client) doRequest(bc *stealth.BrowserClient, method, urlStr string, headers map[string]string) ([]byte, map[string]string, int, error) {
 	return c.doRequestWithBody(bc, method, urlStr, headers, nil)
@@ -230,7 +268,7 @@ func (c *Client) doRequestWithBody(bc *stealth.BrowserClient, method, urlStr str
 	if u, parseErr := url.Parse(urlStr); parseErr == nil {
 		urlPath = u.Path
 	}
-	if txID, txErr := c.xtidMgr.GenerateID(method, urlPath); txErr == nil {
+	if txID, txErr := c.xtidMgr.GenerateIDWith(context.Background(), method, urlPath, warmFetcher(c.warmClient(bc), headers)); txErr == nil {
 		headers["x-client-transaction-id"] = txID
 	} else {
 		slog.Debug("xtid: failed to generate transaction id", slog.Any("error", txErr))

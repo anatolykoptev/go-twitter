@@ -2,23 +2,43 @@ package xtid
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
 
 	stealth "github.com/anatolykoptev/go-stealth"
 	"github.com/anatolykoptev/go-twitter/internal/bundle"
+	"golang.org/x/sync/singleflight"
 )
 
-// warmPageURL is the public x.com landing fetched for the twitter-site-verification
-// meta tag and the loading-animation SVGs. Unauthenticated/guest is fine — the
-// warm page is public HTML.
-const warmPageURL = "https://x.com"
+const (
+	// warmPageURL is the public x.com landing used by the unauthenticated attempt.
+	// Logged-out, x.com now serves a Vite shell without the bundle (see
+	// bundle.ErrLoggedOutShell), so this is only the fallback attempt.
+	warmPageURL = "https://x.com"
+	// authedWarmPageURL is the page fetched with an account's cookies. A profile
+	// page is what twscrape (xclid.py) uses; it carries the verification meta, the
+	// loading-animation SVGs and the x-web script links.
+	authedWarmPageURL = "https://x.com/tesla"
 
-// Manager fetches x.com page/JS and caches the ClientTransaction, auto-refreshing every 30 min.
-// Thread-safe. Falls back to old keys on refresh failure.
+	// initTimeout bounds one shared init attempt (it outlives any single caller).
+	initTimeout = 90 * time.Second
+	// Negative-cache backoff after an init failure: base, doubling, capped at max.
+	defaultBackoffBase = 60 * time.Second
+	defaultBackoffMax  = 15 * time.Minute
+)
+
+// ErrUnavailable is returned by GenerateID when no ClientTransaction could be
+// built and the negative cache forbids another attempt yet.
+var ErrUnavailable = errors.New("xtid: transaction id unavailable")
+
+// Manager fetches x.com page/JS and caches the ClientTransaction, auto-refreshing
+// every 30 min. Thread-safe. Falls back to old keys on refresh failure. Init is
+// lazy (first GenerateIDWith), single-flighted, and negatively cached.
 type Manager struct {
 	mu              sync.RWMutex
 	ct              *ClientTransaction
@@ -28,6 +48,42 @@ type Manager struct {
 	// cacheDir overrides the bundle chunk-map disk cache location; empty uses
 	// the bundle package default. Set in tests for isolation.
 	cacheDir string
+
+	// Init-failure state, guarded by mu.
+	sf singleflight.Group
+	// fails is the negative cache, one entry per attempt kind: a failed guest
+	// (unauthenticated) init must never lock out an authenticated one, which
+	// fetches a different page and can succeed where the guest shell cannot.
+	fails        [kindCount]failState
+	failing      bool // alert dedupe: true between an ok->failed transition and the next success
+	onInitFailed func(error)
+
+	now         func() time.Time
+	backoffBase time.Duration
+	backoffMax  time.Duration
+}
+
+// attemptKind separates guest and authenticated init attempts.
+type attemptKind int
+
+const (
+	kindGuest attemptKind = iota
+	kindAuth
+	kindCount
+)
+
+func kindOf(auth bundle.Fetcher) attemptKind {
+	if auth != nil {
+		return kindAuth
+	}
+	return kindGuest
+}
+
+// failState is one kind's negative-cache entry.
+type failState struct {
+	until  time.Time // no attempt of this kind before this instant
+	streak int
+	err    error
 }
 
 // NewManager creates a new transaction ID manager backed by the given Fetcher.
@@ -36,58 +92,111 @@ func NewManager(f bundle.Fetcher) *Manager {
 	return &Manager{
 		refreshInterval: 30 * time.Minute,
 		fetcher:         f,
+		now:             time.Now,
+		backoffBase:     defaultBackoffBase,
+		backoffMax:      defaultBackoffMax,
 	}
 }
 
-// Initialize fetches the warm page, locates ondemand.s, fetches it, and builds the
-// ClientTransaction. Must be called at least once before GenerateID.
-func (m *Manager) Initialize() error {
-	ctx := context.Background()
+// SetInitFailedHook registers fn to be called once per ok->failed transition
+// (never per request). It runs outside the manager's locks.
+func (m *Manager) SetInitFailedHook(fn func(error)) {
+	m.mu.Lock()
+	m.onInitFailed = fn
+	m.mu.Unlock()
+}
 
-	homeHTML, err := m.fetchURL(warmPageURL)
+// Initialize runs one unauthenticated init attempt synchronously, bypassing the
+// negative cache but recording its outcome. GenerateID/GenerateIDWith call init
+// lazily; this is for callers and tests that want it eagerly.
+func (m *Manager) Initialize() error {
+	ctx, cancel := context.WithTimeout(context.Background(), initTimeout)
+	defer cancel()
+	err := m.initialize(ctx, nil)
+	m.recordResult(kindGuest, err)
+	return err
+}
+
+// initialize builds the ClientTransaction. With a non-nil auth fetcher (carrying
+// an account's cookies) it is tried first against the authenticated warm page;
+// the unauthenticated fetcher is the fallback attempt.
+func (m *Manager) initialize(ctx context.Context, auth bundle.Fetcher) error {
+	if auth == nil {
+		return m.initFrom(ctx, retryFetcher{m.fetcher}, warmPageURL)
+	}
+	authErr := m.initFrom(ctx, retryFetcher{auth}, authedWarmPageURL)
+	if authErr == nil {
+		return nil
+	}
+	// Only a logged-out shell (the account's cookies were not honoured) is worth
+	// a guest retry; any other failure would hit the same wall unauthenticated
+	// and just doubles the requests toward x.com.
+	if !errors.Is(authErr, bundle.ErrLoggedOutShell) {
+		return authErr
+	}
+	if err := m.initFrom(ctx, retryFetcher{m.fetcher}, warmPageURL); err != nil {
+		return fmt.Errorf("%w (unauthenticated fallback: %v)", authErr, err)
+	}
+	return nil
+}
+
+// initFrom fetches the warm page through f, locates the indices file, fetches it
+// and builds the ClientTransaction.
+func (m *Manager) initFrom(ctx context.Context, f bundle.Fetcher, pageURL string) error {
+	page, err := bundle.FetchPage(ctx, f, pageURL)
 	if err != nil {
 		return fmt.Errorf("fetch warm page: %w", err)
 	}
+	homeHTML := string(page)
 
-	ondemandURL, err := m.locateOnDemand(ctx, homeHTML)
+	indicesURL, err := m.locateIndices(ctx, f, homeHTML, pageURL)
 	if err != nil {
 		return err
 	}
 
-	ondemandJS, err := m.fetchURL(ondemandURL)
+	indicesJS, err := f.Fetch(ctx, indicesURL)
 	if err != nil {
-		return fmt.Errorf("fetch ondemand.s: %w", err)
+		return fmt.Errorf("fetch indices file: %w", err)
 	}
 
-	ct, err := newClientTransaction(homeHTML, ondemandJS)
+	ct, err := newClientTransaction(homeHTML, string(indicesJS))
 	if err != nil {
 		return fmt.Errorf("build client transaction: %w", err)
 	}
 
 	m.mu.Lock()
 	m.ct = ct
-	m.lastRefresh = time.Now()
+	m.lastRefresh = m.now()
 	m.mu.Unlock()
 
 	logInitialized(ct)
 	return nil
 }
 
-// locateOnDemand resolves the ondemand.s bundle URL.
+// locateIndices resolves the URL of the file holding the key-byte indices
+// (ondemand.s in the legacy webpack build, sign.o-* in the Vite build).
 //
-// It prefers the legacy direct-embed fast-path (`"ondemand.s":"<hash>"`) that
-// still appears on some x.com snapshots — those carry no webpack chunk map to
-// walk, so the bundle-core two-step would miss them. Otherwise it falls back to
-// the bundle core's chunk-map lookup (chunkID by name -> hash -> URL).
-//
-// The webpack-location logic that used to live in xtid/parser.go now belongs to
-// internal/bundle; xtid only chooses between the legacy fast-path and the core.
-func (m *Manager) locateOnDemand(ctx context.Context, homeHTML string) (string, error) {
-	if url := onDemandLegacyURL(homeHTML); url != "" {
-		return url, nil
+// Order: the legacy direct-embed fast-path (`"ondemand.s":"<hash>"`); then, for a
+// Vite page (x-web script links), a bounded scan of those chunks; otherwise the
+// bundle core's webpack chunk-map lookup. A Vite page never falls through to the
+// chunk-map path — it has none, and that path refetches more warm pages.
+func (m *Manager) locateIndices(ctx context.Context, f bundle.Fetcher, homeHTML, pageURL string) (string, error) {
+	if legacy := onDemandLegacyURL(homeHTML); legacy != "" {
+		return legacy, nil
 	}
+	if scripts := bundle.ViteScripts(homeHTML, pageURL); len(scripts) > 0 {
+		if bundle.IsLoggedOutShell(scripts) {
+			return "", bundle.ErrLoggedOutShell
+		}
+		return bundle.FindIndicesURL(ctx, f, scripts, bundle.DefaultScanConcurrency, bundle.DefaultScanMax)
+	}
+	return m.locateOnDemand(ctx, f)
+}
 
-	cm, err := bundle.Build(ctx, m.fetcher, bundle.Options{CacheDir: m.cacheDir})
+// locateOnDemand resolves the ondemand.s bundle URL via the webpack chunk map
+// (chunkID by name -> hash -> URL).
+func (m *Manager) locateOnDemand(ctx context.Context, f bundle.Fetcher) (string, error) {
+	cm, err := bundle.Build(ctx, f, bundle.Options{CacheDir: m.cacheDir})
 	if err != nil {
 		return "", fmt.Errorf("build chunk map: %w", err)
 	}
@@ -95,11 +204,11 @@ func (m *Manager) locateOnDemand(ctx context.Context, homeHTML string) (string, 
 	if !ok {
 		return "", fmt.Errorf("ondemand.s chunk not found in chunk map")
 	}
-	url, ok := cm.BundleURL("ondemand.s")
+	bundleURL, ok := cm.BundleURL("ondemand.s")
 	if !ok {
 		return "", fmt.Errorf("ondemand.s hash missing for chunk %s", id)
 	}
-	return url, nil
+	return bundleURL, nil
 }
 
 func logInitialized(ct *ClientTransaction) {
@@ -118,21 +227,23 @@ const fetchMaxAttempts = 3
 // fetchBackoffBase is the initial backoff between retry attempts.
 const fetchBackoffBase = 500 * time.Millisecond
 
-// fetchURL fetches a URL through the injected Fetcher with retry/backoff. 4xx
-// responses are treated as permanent and not retried.
-func (m *Manager) fetchURL(url string) (string, error) {
+// retryFetcher wraps a Fetcher with retry/backoff on transient failures; 4xx
+// responses are permanent and not retried. It forwards PostForm without retry.
+type retryFetcher struct{ inner bundle.Fetcher }
+
+func (r retryFetcher) Fetch(ctx context.Context, rawURL string) ([]byte, error) {
 	var lastErr error
 	for attempt := 1; attempt <= fetchMaxAttempts; attempt++ {
-		body, err := m.fetcher.Fetch(context.Background(), url)
+		body, err := r.inner.Fetch(ctx, rawURL)
 		if err == nil {
-			return string(body), nil
+			return body, nil
 		}
 		lastErr = err
-		if isPermanentFetchErr(err) || attempt == fetchMaxAttempts {
+		if isPermanentFetchErr(err) || attempt == fetchMaxAttempts || ctx.Err() != nil {
 			break
 		}
 		slog.Warn("xtid: fetch retry",
-			slog.String("url", url),
+			slog.String("url", rawURL),
 			slog.Int("attempt", attempt),
 			slog.Any("error", err))
 		// Exponential backoff with ±30% jitter via go-kit/pacing (through
@@ -143,9 +254,22 @@ func (m *Manager) fetchURL(url string) (string, error) {
 			Multiplier:  2.0,
 			JitterPct:   0.3,
 		}.Duration(attempt - 1)
-		time.Sleep(delay)
+		select {
+		case <-time.After(delay):
+		case <-ctx.Done():
+			return nil, lastErr
+		}
 	}
-	return "", lastErr
+	return nil, lastErr
+}
+
+// PostForm forwards to the inner fetcher when it can POST.
+func (r retryFetcher) PostForm(ctx context.Context, rawURL string, form url.Values) ([]byte, error) {
+	p, ok := r.inner.(bundle.Poster)
+	if !ok {
+		return nil, errors.New("xtid: fetcher cannot POST")
+	}
+	return p.PostForm(ctx, rawURL, form)
 }
 
 // isPermanentFetchErr returns true for errors that should not be retried (HTTP 4xx).
@@ -164,30 +288,124 @@ func isPermanentFetchErr(err error) bool {
 	return false
 }
 
-// GenerateID returns a new x-client-transaction-id for the given HTTP method and URL path.
-// Auto-refreshes keys if they are older than refreshInterval.
+// GenerateID returns a new x-client-transaction-id for the given HTTP method and
+// URL path, initialising unauthenticated if needed. See GenerateIDWith.
 func (m *Manager) GenerateID(method, path string) (string, error) {
-	m.mu.RLock()
-	needRefresh := m.ct == nil || time.Since(m.lastRefresh) > m.refreshInterval
-	m.mu.RUnlock()
+	return m.GenerateIDWith(context.Background(), method, path, nil)
+}
 
-	if needRefresh {
-		if err := m.Initialize(); err != nil {
-			m.mu.RLock()
-			hasOld := m.ct != nil
-			m.mu.RUnlock()
-			if !hasOld {
-				return "", fmt.Errorf("xtid init failed: %w", err)
-			}
-			slog.Warn("xtid: refresh failed, using stale keys", slog.Any("error", err))
+// GenerateIDWith is GenerateID with an optional auth fetcher (an account's
+// cookies through that account's client) used when an init/refresh is needed.
+// Concurrent callers share one init attempt; after a failure no new attempt is
+// made until the backoff expires, and callers get ErrUnavailable (or the stale
+// keys, when a previous init succeeded) immediately.
+func (m *Manager) GenerateIDWith(ctx context.Context, method, path string, auth bundle.Fetcher) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	kind := kindOf(auth)
+	if m.needsInit() {
+		if err := m.awaitInit(ctx, kind, auth); err != nil {
+			return "", err
 		}
 	}
-
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-
 	if m.ct == nil {
-		return "", fmt.Errorf("xtid not initialized")
+		return "", fmt.Errorf("%w: %v", ErrUnavailable, m.lastErrLocked(kind))
 	}
 	return m.ct.GenerateID(method, path), nil
+}
+
+// lastErrLocked returns the most relevant recorded init error; m.mu must be held.
+func (m *Manager) lastErrLocked(kind attemptKind) error {
+	if err := m.fails[kind].err; err != nil {
+		return err
+	}
+	for _, f := range m.fails {
+		if f.err != nil {
+			return f.err
+		}
+	}
+	return nil
+}
+
+func (m *Manager) needsInit() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.ct == nil || m.now().Sub(m.lastRefresh) > m.refreshInterval
+}
+
+func (m *Manager) backoffActive(kind attemptKind) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.now().Before(m.fails[kind].until)
+}
+
+// awaitInit runs (or joins) one init attempt of the given kind unless that
+// kind's negative cache forbids it. The leader runs on its own background
+// context; a waiter's ctx only bounds how long it waits.
+func (m *Manager) awaitInit(ctx context.Context, kind attemptKind, auth bundle.Fetcher) error {
+	if m.backoffActive(kind) {
+		return nil
+	}
+	ch := m.sf.DoChan(fmt.Sprintf("init-%d", kind), func() (any, error) {
+		// Re-check inside the flight: a caller that passed the check above just as
+		// the previous flight finished must not start a second attempt.
+		if !m.needsInit() || m.backoffActive(kind) {
+			return nil, nil
+		}
+		ictx, cancel := context.WithTimeout(context.Background(), initTimeout)
+		defer cancel()
+		err := m.initialize(ictx, auth)
+		m.recordResult(kind, err)
+		return nil, err
+	})
+	select {
+	case <-ch:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// recordResult updates the negative cache and fires the failure alert once per
+// ok->failed transition.
+func (m *Manager) recordResult(kind attemptKind, err error) {
+	m.mu.Lock()
+	if err == nil {
+		wasFailing := m.failing
+		m.failing, m.fails[kind] = false, failState{}
+		m.mu.Unlock()
+		if wasFailing {
+			slog.Info("xtid: recovered")
+		}
+		return
+	}
+	f := &m.fails[kind]
+	f.streak++
+	wait := m.backoffBase
+	for i := 1; i < f.streak && wait < m.backoffMax; i++ {
+		wait *= 2
+	}
+	if wait > m.backoffMax {
+		wait = m.backoffMax
+	}
+	f.until = m.now().Add(wait)
+	f.err = err
+	transition := !m.failing
+	m.failing = true
+	hasKeys := m.ct != nil
+	hook := m.onInitFailed
+	m.mu.Unlock()
+
+	if !transition {
+		return
+	}
+	slog.Warn("xtid: init failed, x-client-transaction-id will be missing or stale",
+		slog.Any("error", err), slog.Bool("stale_keys", hasKeys), slog.Duration("retry_in", wait),
+		slog.Bool("authenticated", kind == kindAuth))
+	if hook != nil {
+		hook(err)
+	}
 }
