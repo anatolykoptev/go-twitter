@@ -87,7 +87,7 @@ type FileSessionStore struct {
 	// Dir is the session directory. Empty means ~/.go-twitter/sessions.
 	Dir string
 	// TTL expires sessions older than this on Load (reported as
-	// ErrSessionNotFound. TTL <= 0 means no expiry; note NewClient defaults
+	// ErrSessionNotFound). TTL <= 0 means no expiry; note NewClient defaults
 	// ClientConfig.SessionTTL 0 to 24h before building the default store.
 	TTL time.Duration
 }
