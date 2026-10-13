@@ -78,6 +78,98 @@ func TestCode88_DoPOST_ExhaustedWindow_NoFailureCharged(t *testing.T) {
 	assert.True(t, acc.IsEndpointRateLimited("CreateTweet"))
 }
 
+// A banned account that answers every endpoint with a code 88 carrying NO
+// rate-limit headers is invisible to the exhausted-window classification: each
+// response looks like a fresh per-endpoint limit. A run of
+// headerless88BanThreshold consecutive header-less 88s (any endpoints, no
+// successful response in between) is the ban signature: the account is benched
+// for BanCooldown and the error satisfies IsBanned. Below the threshold the
+// behaviour is today's — endpoint-limited, IsRateLimited.
+//
+// Mutation: in request.go doPoolRequest drop the noteRateLimited88 escalation
+// check => RED.
+func TestCode88_Headerless_EscalatesToBan(t *testing.T) {
+	fake := newPoolWaitFake(t)
+	// 200 + code 88, no x-rate-limit-* headers at all.
+	fake.body = `{"errors":[{"code":88,"message":"Rate limit exceeded"}]}`
+	c, accs := newPoolWaitClient(t, 1)
+	acc := accs[0]
+	url := func(ep string) string { return fake.srv.URL + "/i/api/graphql/x/" + ep }
+
+	below := []string{"UserTweets", "Followers"}
+	require.Len(t, below, headerless88BanThreshold-1, "test drives threshold-1 responses first")
+	for i, ep := range below {
+		_, _, err := c.doGET(context.Background(), ep, url(ep))
+		require.Error(t, err)
+		assert.True(t, IsRateLimited(err), "call %d: want IsRateLimited, got %v", i+1, err)
+		assert.False(t, IsBanned(err), "call %d: a header-less 88 below the threshold is not a ban: %v", i+1, err)
+		assert.True(t, acc.IsActive(), "call %d: account must stay active below the threshold", i+1)
+	}
+
+	_, _, err := c.doGET(context.Background(), "Bookmarks", url("Bookmarks"))
+	require.Error(t, err)
+	assert.True(t, IsBanned(err), "want IsBanned, got %v", err)
+	assert.False(t, IsRateLimited(err))
+	assert.False(t, acc.IsActive(), "the threshold-th consecutive header-less 88 must soft-deactivate")
+	assert.WithinDuration(t, time.Now().Add(time.Hour), acc.ReactivateAt(), 5*time.Second,
+		"escalation benches for BanCooldown (1h in this client)")
+	assert.EqualValues(t, headerless88BanThreshold, fake.hits.Load(), "one hit per doGET")
+}
+
+// A successful response in the middle of the run proves the credentials work:
+// the header-less-88 count restarts from zero, so threshold more header-less
+// 88s are required before the account is benched.
+//
+// Mutation: in account.go RecordSuccess drop the counter reset => RED.
+func TestCode88_Headerless_SuccessResetsCount(t *testing.T) {
+	fake := newPoolWaitFake(t)
+	c, accs := newPoolWaitClient(t, 1)
+	acc := accs[0]
+	url := func(ep string) string { return fake.srv.URL + "/i/api/graphql/x/" + ep }
+
+	fake.body = `{"errors":[{"code":88,"message":"Rate limit exceeded"}]}`
+	_, _, err := c.doGET(context.Background(), "UserTweets", url("UserTweets"))
+	require.Error(t, err) // count = 1
+
+	fake.body = `{"data":{"ok":true}}`
+	_, _, err = c.doGET(context.Background(), "Followers", url("Followers"))
+	require.NoError(t, err) // success: count resets to 0
+
+	fake.body = `{"errors":[{"code":88,"message":"Rate limit exceeded"}]}`
+	for i, ep := range []string{"Bookmarks", "HomeTimeline"} { // count = 1, 2 post-reset
+		_, _, err = c.doGET(context.Background(), ep, url(ep))
+		require.Error(t, err)
+		assert.True(t, acc.IsActive(),
+			"post-reset header-less 88 #%d must not ban: the count restarted at the success", i+1)
+	}
+	// And the run still escalates once it reaches the threshold again.
+	_, _, err = c.doGET(context.Background(), "SearchTimeline", url("SearchTimeline"))
+	require.Error(t, err)
+	assert.True(t, IsBanned(err), "want IsBanned, got %v", err)
+	assert.False(t, acc.IsActive())
+}
+
+// An 88 WITH x-rate-limit-remaining is explained by its window: it never
+// advances the header-less-88 count, so the account is never escalated.
+//
+// Mutation: in account.go noteRateLimited88 advance the count for every 88
+// (drop the rateLimitRemaining check) => RED.
+func TestCode88_RemainingZero_NeverEscalates(t *testing.T) {
+	fake := newPoolWaitFake(t)
+	fake.hdrs, fake.body = rateLimit88("0", time.Hour)
+	c, accs := newPoolWaitClient(t, 1)
+	acc := accs[0]
+
+	for i, ep := range []string{"UserTweets", "Followers", "Bookmarks", "HomeTimeline"} {
+		_, _, err := c.doGET(context.Background(), ep, fake.srv.URL+"/i/api/graphql/x/"+ep)
+		require.Error(t, err)
+		assert.True(t, IsRateLimited(err), "call %d: want IsRateLimited, got %v", i+1, err)
+		assert.False(t, IsBanned(err))
+		assert.True(t, acc.IsActive(),
+			"call %d: remaining=0 is a windowed limit, never the ban signature", i+1)
+	}
+}
+
 func TestClassifyCode88_HeaderMatrix(t *testing.T) {
 	cases := []struct {
 		name string

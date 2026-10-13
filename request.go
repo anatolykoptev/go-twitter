@@ -314,6 +314,13 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 			continue
 
 		case errRateLimited:
+			// A run of consecutive header-less 88s is the signature of a ban
+			// that omits the rate-limit headers, not of per-endpoint limiting:
+			// escalate past the threshold instead of marking the endpoint again.
+			if acc.noteRateLimited88(respHdrs) >= headerless88BanThreshold {
+				lastErr = c.escalateHeaderless88(acc, endpoint, body)
+				continue
+			}
 			// Code 88 inside a 200 body with an exhausted window: a plain
 			// per-endpoint rate limit. The account is healthy, so block only this
 			// endpoint until the reset instead of benching it for BanCooldown.
@@ -642,6 +649,10 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 			}
 			continue
 		case errRateLimited:
+			// Same header-less-88 escalation as doPoolRequest.
+			if acc.noteRateLimited88(respHdrs) >= headerless88BanThreshold {
+				return nil, c.escalateHeaderless88(acc, endpoint, body)
+			}
 			// Code 88 with an exhausted window: the account is healthy, so do not
 			// charge it a failure; block this endpoint until the reset.
 			c.recordAPICall(endpoint, false, true)
@@ -684,6 +695,19 @@ func requiresAuth(endpoint string) bool {
 		return true
 	}
 	return false
+}
+
+// escalateHeaderless88 benches an account whose run of header-less code-88
+// responses reached headerless88BanThreshold: a ban that omits the rate-limit
+// headers. It mirrors the declared-ban (errBanned) arm — BanCooldown soft
+// deactivation, non-rate-limited MetricsHook outcome, IsBanned-satisfying
+// error — so the doPoolRequest, doPOST and doMediaRequest paths all treat the
+// escalation identically.
+func (c *Client) escalateHeaderless88(acc *Account, endpoint string, body []byte) *APIError {
+	c.recordAPICall(endpoint, false, false)
+	slog.Warn("account banned (repeated header-less code 88)", slog.String("user", acc.Username))
+	c.pool.SoftDeactivate(acc, c.cfg.BanCooldown)
+	return &APIError{Status: 200, Class: errBanned, Codes: extractErrorCodes(body), Message: "account banned (repeated header-less code 88)"}
 }
 
 // quotedURLRe matches quoted HTTP(S) URLs embedded in error messages. Go's

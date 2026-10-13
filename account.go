@@ -31,11 +31,12 @@ type Account struct {
 	reactivateAt time.Time
 	client       *stealth.BrowserClient
 
-	mu               sync.Mutex
-	ct0RefreshedAt   time.Time
-	proxyBackoff     time.Time
-	proxyConsecFails int
-	rateLimiter      *ratelimit.Limiter
+	mu                 sync.Mutex
+	ct0RefreshedAt     time.Time
+	proxyBackoff       time.Time
+	proxyConsecFails   int
+	consecHeaderless88 int // consecutive code-88s with no parseable x-rate-limit-remaining
+	rateLimiter        *ratelimit.Limiter
 
 	pool.HealthTracker
 }
@@ -115,6 +116,36 @@ func (a *Account) SetCredentials(authToken, ct0 string) {
 	a.AuthToken = authToken
 	a.CT0 = ct0
 	a.ct0RefreshedAt = time.Now()
+}
+
+// RecordSuccess records a successful request and clears the consecutive
+// header-less-88 counter: a successful response proves the credentials work,
+// so a later run of header-less 88s starts from zero. It shadows the embedded
+// HealthTracker method on purpose — every success path (200, post-relogin,
+// CSRF recovery, accepted 131) funnels through it, so the reset cannot be
+// missed at a new call site.
+func (a *Account) RecordSuccess() {
+	a.HealthTracker.RecordSuccess()
+	a.mu.Lock()
+	a.consecHeaderless88 = 0
+	a.mu.Unlock()
+}
+
+// noteRateLimited88 examines a code-88 response classified errRateLimited and
+// returns the account's run length of consecutive header-less 88s. The run
+// advances only when the response carried NO parseable x-rate-limit-remaining
+// header: an 88 WITH the header — 0 or more requests remaining — is explained
+// by its window and returns 0 without touching the counter. A banned account
+// that answers header-less 88s on every endpoint crosses
+// headerless88BanThreshold and is escalated to a ban by the caller.
+func (a *Account) noteRateLimited88(respHdrs map[string]string) int {
+	if _, ok := rateLimitRemaining(respHdrs); ok {
+		return 0
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.consecHeaderless88++
+	return a.consecHeaderless88
 }
 
 // AllowRequest checks if this account can make a request to the given endpoint.
