@@ -469,7 +469,17 @@ func (c *Client) doMediaRequest(ctx context.Context, acc *Account, method, urlSt
 		}
 
 		// 2xx — check the body for Twitter error codes.
-		if cls := classifyError(body, respHdrs); cls != errNone {
+		cls := classifyError(body, respHdrs)
+		if cls == errRateLimited {
+			// Code 88 with an exhausted window: the account is healthy. Do not
+			// charge it a failure; block this endpoint until the reset (as doPOST).
+			c.recordAPICall(epUploadMedia, false, true)
+			acc.MarkEndpointRateLimited(epUploadMedia, parseRateLimitReset(respHdrs[xRateLimitReset]))
+			apiErr := newAPIError(200, body, respHdrs)
+			apiErr.Message = fmt.Sprintf("%s rate limited (code 88)", epUploadMedia)
+			return nil, apiErr
+		}
+		if cls != errNone {
 			c.recordAPICall(epUploadMedia, false, false)
 			acc.RecordFailure()
 			apiErr := newAPIError(200, body, respHdrs)

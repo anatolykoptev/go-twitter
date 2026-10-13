@@ -98,3 +98,23 @@ func TestClassifyCode88_HeaderMatrix(t *testing.T) {
 		})
 	}
 }
+
+// UploadMedia's 2xx-body check: an exhausted-window 88 must not charge the
+// healthy account a failure; the endpoint is blocked until the reset instead.
+//
+// Mutation: in media.go add acc.RecordFailure() to the errRateLimited arm of
+// doMediaRequest => RED.
+func TestCode88_DoMediaRequest_ExhaustedWindow_NoFailureCharged(t *testing.T) {
+	fake := newPoolWaitFake(t)
+	fake.hdrs, fake.body = rateLimit88("0", time.Hour)
+	c, accs := newPoolWaitClient(t, 1)
+	acc := accs[0]
+
+	_, err := c.doMediaRequest(context.Background(), acc, "POST", fake.srv.URL+"/i/media/upload.json", []byte(`x`), "application/octet-stream")
+
+	require.Error(t, err)
+	assert.True(t, IsRateLimited(err), "got %v", err)
+	_, failed, _ := acc.Stats()
+	assert.Equal(t, 0, failed, "a rate limit is not an account failure")
+	assert.True(t, acc.IsEndpointRateLimited(epUploadMedia))
+}

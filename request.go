@@ -27,12 +27,14 @@ func (c *Client) doPoolPOST(ctx context.Context, endpoint, url string, payload [
 	return c.doPoolRequest(ctx, "POST", endpoint, url, payload)
 }
 
-// poolWaitCap bounds the total time a request spends waiting for a pool
-// account to become usable for its endpoint.
-const poolWaitCap = 5 * time.Minute
+// poolWaitCap bounds the total time ONE request (all its retry attempts
+// together) spends waiting for a pool account to become usable for its endpoint.
+// A var only so tests can shrink it.
+var poolWaitCap = 5 * time.Minute
 
 // nextAccountWithWait selects an account for an auth-only endpoint, waiting
-// (context-aware, bounded by poolWaitCap) when every account is unusable for now.
+// (context-aware, never past deadline) when every account is unusable for now.
+// The caller computes deadline once per request, so retries share one budget.
 //
 // go-stealth's NextWithWait only waits for deactivated accounts: its AvailableIn
 // returns 0 as soon as any account is active, so a pool whose accounts are all
@@ -40,12 +42,14 @@ const poolWaitCap = 5 * time.Minute
 // gives up, this waits until the earliest moment an account could serve the
 // endpoint (see nextUsableAt) and retries. With no active account the original
 // error is returned unchanged.
-func (c *Client) nextAccountWithWait(ctx context.Context, endpoint string, filter func(*Account) bool) (*Account, error) {
-	deadline := time.Now().Add(poolWaitCap)
+func (c *Client) nextAccountWithWait(ctx context.Context, endpoint string, filter func(*Account) bool, deadline time.Time) (*Account, error) {
 	for {
 		acc, err := c.pool.NextWithWait(ctx, filter, time.Until(deadline))
-		if err == nil || ctx.Err() != nil {
-			return acc, err
+		if err == nil {
+			return acc, nil
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
 		}
 		wake, ok := c.nextUsableAt(endpoint)
 		if !ok {
@@ -106,6 +110,10 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 		return nil, nil, err
 	}
 
+	// One wait budget for the whole request: nextAccountWithWait runs once per
+	// attempt, so a per-call cap would allow maxRetries x poolWaitCap.
+	waitDeadline := time.Now().Add(poolWaitCap)
+
 	var lastErr error
 	for attempt := range maxRetries {
 		if attempt > 0 {
@@ -125,7 +133,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 		}
 
 		if requiresAuth(endpoint) {
-			acc, accErr = c.nextAccountWithWait(ctx, endpoint, filter)
+			acc, accErr = c.nextAccountWithWait(ctx, endpoint, filter, waitDeadline)
 		} else {
 			acc, accErr = c.pool.Next(filter)
 		}

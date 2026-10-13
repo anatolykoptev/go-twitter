@@ -47,10 +47,10 @@ instrumented.
 | Value | Meaning |
 |---|---|
 | `ok` | 2xx, no error code in the body |
-| `rate_limited` | HTTP 429 |
+| `rate_limited` | HTTP 429, or code 88 with `x-rate-limit-remaining` 0 or absent |
 | `auth` | code 32 / 179 / 219, or a bare 401 |
 | `csrf` | code 353 |
-| `banned` | code 88 |
+| `banned` | code 88 with `x-rate-limit-remaining` > 0 |
 | `suspended` | code 64 |
 | `locked` | code 326 |
 | `blocked` | code 161 |

@@ -233,10 +233,19 @@ func IsInternal(err error) bool {
 	return false
 }
 
+// minRateLimitBlock floors a parsed reset: a reset already in the past (clock
+// skew, or a reset that landed between the response and now) would otherwise
+// mark nothing and let the same account be retried at once.
+const minRateLimitBlock = time.Second
+
 // parseRateLimitReset parses the X-Rate-Limit-Reset unix timestamp header.
-// Falls back to 15 minutes from now if missing or invalid.
+// Falls back to 15 minutes from now if missing or invalid; a parsed time less
+// than minRateLimitBlock away is raised to now+minRateLimitBlock.
 func parseRateLimitReset(v string) time.Time {
 	if ts, err := strconv.ParseInt(v, 10, 64); err == nil {
+		if floor := time.Now().Add(minRateLimitBlock); time.Unix(ts, 0).Before(floor) {
+			return floor
+		}
 		return time.Unix(ts, 0)
 	}
 	return time.Now().Add(15 * time.Minute)

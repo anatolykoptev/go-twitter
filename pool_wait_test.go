@@ -28,21 +28,22 @@ type poolWaitFake struct {
 	srv    *httptest.Server
 	hits   atomic.Int32
 	first  atomic.Int64 // UnixNano of the first hit
-	status int
+	status atomic.Int32
 	hdrs   map[string]string
 	body   string
 }
 
 func newPoolWaitFake(t *testing.T) *poolWaitFake {
 	t.Helper()
-	f := &poolWaitFake{status: http.StatusOK, body: `{"data":{"ok":true}}`}
+	f := &poolWaitFake{body: `{"data":{"ok":true}}`}
+	f.status.Store(http.StatusOK)
 	f.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		f.hits.Add(1)
 		f.first.CompareAndSwap(0, time.Now().UnixNano())
 		for k, v := range f.hdrs {
 			w.Header().Set(k, v)
 		}
-		w.WriteHeader(f.status)
+		w.WriteHeader(int(f.status.Load()))
 		_, _ = w.Write([]byte(f.body))
 	}))
 	t.Cleanup(f.srv.Close)
@@ -50,6 +51,15 @@ func newPoolWaitFake(t *testing.T) *poolWaitFake {
 }
 
 func (f *poolWaitFake) url() string { return f.srv.URL + "/i/api/graphql/x/" + poolWaitEndpoint }
+
+// instantFailFetcher fails with a permanent (4xx-shaped) error so the xtid
+// manager gives up without its retry backoff (~1.3s per request with the
+// retrying failingFetcher), keeping these timing tests about the pool wait.
+type instantFailFetcher struct{}
+
+func (instantFailFetcher) Fetch(context.Context, string) ([]byte, error) {
+	return nil, errors.New("test fetcher: offline HTTP 403")
+}
 
 // newPoolWaitClient builds a Client with n healthy accounts over a real stealth
 // transport pointed at the fake. Retry backoff and anti-fingerprint jitter are
@@ -72,7 +82,7 @@ func newPoolWaitClient(t *testing.T, n int) (*Client, []*Account) {
 	c := &Client{
 		client:  bc,
 		pool:    pool.New(accs, pool.DefaultConfig()),
-		xtidMgr: xtid.NewManager(&failingFetcher{}),
+		xtidMgr: xtid.NewManager(&instantFailFetcher{}),
 		xpffGen: xpff.New("test-guest-id", defaultUserAgent),
 		cfg: ClientConfig{
 			DisableGuestFallback: true,
@@ -164,4 +174,65 @@ func TestPoolWait_BeyondCap_FailsFast(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "pool exhausted")
 	assert.Less(t, time.Since(start), 500*time.Millisecond)
+}
+
+// The wait budget is per REQUEST, not per attempt: doPoolRequest calls
+// nextAccountWithWait once per attempt (maxRetries), so a per-call cap would let
+// one request block maxRetries x poolWaitCap.
+//
+// Cap 1.5s; X answers 429 and blocks the endpoint for ~1s each time. Attempt 1
+// waits ~1s (fits), attempt 2 would need another ~1s with only ~0.5s of budget
+// left and must give up.
+//
+// Mutation: in request.go nextAccountWithWait take the deadline as
+// time.Now().Add(poolWaitCap) inside the helper instead of the parameter => RED
+// (3 hits).
+func TestPoolWait_BudgetSharedAcrossAttempts(t *testing.T) {
+	orig := poolWaitCap
+	poolWaitCap = 1500 * time.Millisecond
+	t.Cleanup(func() { poolWaitCap = orig })
+
+	fake := newPoolWaitFake(t)
+	c, _ := newPoolWaitClient(t, 1)
+	// Warm the transport (first request pays a ~1s+ one-off setup that would eat
+	// the budget) before the measured call.
+	_, _, err := c.doGET(context.Background(), poolWaitEndpoint, fake.url())
+	require.NoError(t, err)
+	fake.hits.Store(0)
+
+	fake.status.Store(http.StatusTooManyRequests)
+	fake.hdrs = map[string]string{xRateLimitReset: strconv.FormatInt(time.Now().Add(time.Second).Unix(), 10)}
+	_, _, err = c.doGET(context.Background(), poolWaitEndpoint, fake.url())
+
+	require.Error(t, err)
+	assert.EqualValues(t, 2, fake.hits.Load(), "one wait budget per request: attempt 3 must not get a fresh cap")
+}
+
+// ctx done => the ctx error, even when NextWithWait itself returns its own
+// "all N items are unavailable" (it does not look at ctx before giving up).
+//
+// Mutation: in nextAccountWithWait restore `if err == nil || ctx.Err() != nil
+// { return acc, err }` => RED.
+func TestPoolWait_CancelledCtxReturnsCtxError(t *testing.T) {
+	c, accs := newPoolWaitClient(t, 2)
+	for _, a := range accs {
+		a.MarkEndpointRateLimited(poolWaitEndpoint, time.Now().Add(10*time.Second))
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := c.nextAccountWithWait(ctx, poolWaitEndpoint, func(a *Account) bool { return a.AllowRequest(poolWaitEndpoint) }, time.Now().Add(time.Minute))
+
+	assert.True(t, errors.Is(err, context.Canceled), "want context.Canceled, got %v", err)
+}
+
+// A reset already in the past would mark nothing; it is floored at now+1s.
+//
+// Mutation: in errors.go parseRateLimitReset delete the floor branch => RED.
+func TestParseRateLimitReset_PastIsFloored(t *testing.T) {
+	got := parseRateLimitReset(strconv.FormatInt(time.Now().Add(-time.Hour).Unix(), 10))
+	assert.WithinDuration(t, time.Now().Add(minRateLimitBlock), got, 200*time.Millisecond)
+
+	future := time.Now().Add(time.Hour).Truncate(time.Second)
+	assert.True(t, parseRateLimitReset(strconv.FormatInt(future.Unix(), 10)).Equal(future), "future reset must be kept as is")
 }

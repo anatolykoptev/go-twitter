@@ -141,7 +141,8 @@ Every request makes up to 3 attempts, rotating accounts on pool-based calls. Rec
 | CSRF mismatch | 353 | Adopt the ct0 from the error response's `set-cookie` and retry. If x.com offers none, or the retry fails, relogin (subject to the breaker) and retry once. A random ct0 is never generated. |
 | Auth expired | 32 | Relogin (subject to the breaker) and retry; on failure soft-deactivate the account for `AuthCooldown`. |
 | Rate limited | 429 | Mark the endpoint rate-limited for that account until `x-rate-limit-reset` (15 minutes if absent) and try another account. |
-| Banned | 88 | Soft-deactivate for `BanCooldown`. |
+| Rate limited (in a 200 body) | 88, `x-rate-limit-remaining` 0 or absent | Same as 429: mark only that endpoint rate-limited for that account until `x-rate-limit-reset` (15 minutes if absent; a reset in the past is raised to 1 second from now). The account stays active. |
+| Banned | 88, `x-rate-limit-remaining` > 0 | Soft-deactivate for `BanCooldown`. |
 | Suspended | 64 | Permanent removal from the pool. |
 | Locked | 326 | With a `CaptchaSolver`, relogin to solve the challenge and retry; otherwise, or on failure, soft-deactivate for `BanCooldown`. |
 | Blocked / not authorized | 161, 179, 219 | Soft-deactivate for `AuthCooldown`. |
@@ -153,8 +154,8 @@ Errors returned by the client wrap `*twitter.APIError` (`Status`, `Codes`, `Mess
 
 | Predicate | True for |
 |-----------|----------|
-| `IsRateLimited` | HTTP 429 |
-| `IsBanned` | code 88 |
+| `IsRateLimited` | HTTP 429, or code 88 with `x-rate-limit-remaining` 0 or absent |
+| `IsBanned` | code 88 with `x-rate-limit-remaining` > 0 (a header-less 88 is no longer a ban) |
 | `IsSuspended` | code 64 |
 | `IsLocked` | code 326 |
 | `IsCSRF` | code 353 |
