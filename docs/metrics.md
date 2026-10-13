@@ -21,6 +21,7 @@ metrics.
 | `twitter.client.request.duration` | histogram | `s` | `twitter.operation`, `twitter.outcome` |
 | `twitter.client.timeline.freshness` | histogram | `s` | `twitter.operation` |
 | `twitter.client.pool.accounts` | observable gauge | `{account}` | `twitter.account.state` |
+| `twitter.client.pool.wait.duration` | histogram | `s` | `twitter.operation`, `twitter.result` |
 | `twitter.client.relogins` | counter | `{relogin}` | `twitter.outcome` |
 | `twitter.client.proxy.failures` | counter | `{failure}` | none |
 
@@ -109,6 +110,30 @@ sum to the pool size; all four states are always reported (zeros included).
 | `proxy_backoff` | active, but its proxy is in exponential backoff |
 | `cooling_down` | soft-deactivated (auth/ban/failure cooldown); the pool reactivates it automatically |
 | `deactivated` | permanently deactivated (suspended) |
+
+### `twitter.client.pool.wait.duration`
+
+One record per call that actually waited inside `nextAccountWithWait` — the
+sleep taken when every pool account is momentarily unusable for the endpoint
+(all active but endpoint-rate-limited or in proxy backoff). Calls served
+without waiting record nothing, so the series only exists while the pool is
+contended. The value is the total time the call slept, which can add up to
+minutes of latency per request (bounded by `poolWaitCap`, 5 min). The wait
+inside `pool.NextWithWait` itself (all accounts deactivated) is not covered —
+that path returns before the wait this histogram measures begins.
+
+- `twitter.operation`: same bounded endpoint label as `request.duration`.
+- `twitter.result` is how the waited call ended:
+
+| Value | Meaning |
+|---|---|
+| `acquired` | the wait ended with a usable account |
+| `gave_up` | waited, then no account could serve the endpoint within the wait budget |
+| `ctx_done` | the caller's context (cancel or deadline) ended the wait |
+
+Buckets (seconds): `0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300` —
+same resolution as `request.duration` up to 30 s, extended to the 5-minute
+wait cap.
 
 ### `twitter.client.relogins`
 

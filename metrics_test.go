@@ -275,6 +275,50 @@ func TestMetrics_AttributesAreBoundedAndAccountFree(t *testing.T) {
 	}
 }
 
+// A pool wait is invisible without a metric: a call whose accounts are all
+// usable-but-endpoint-limited waits inside nextAccountWithWait, and one
+// twitter.client.pool.wait.duration sample with result=acquired must be
+// recorded. A wait cut short by the caller's context records ctx_done instead.
+//
+// Mutation: in request.go nextAccountWithWait remove the deferred
+// recordPoolWait call => RED.
+func TestMetrics_PoolWaitDuration_Acquired(t *testing.T) {
+	var f *metricsFixture
+	f = newMetricsFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(userTweetsBody(snowflakeAt(f.now.Add(-2 * time.Second)))))
+	}, "wait_acc")
+	f.acc.MarkEndpointRateLimited("UserTweets", time.Now().Add(150*time.Millisecond))
+
+	_, err := f.c.GetUserTweets(context.Background(), "999", 20)
+	require.NoError(t, err)
+
+	pts := histPoints(t, f.collect(t), metricPoolWait)
+	require.Len(t, pts, 1, "one wait, one sample")
+	assert.Equal(t, map[string]string{attrOperation: "UserTweets", attrResult: waitResultAcquired}, attrMap(pts[0].Attributes))
+	assert.Equal(t, uint64(1), pts[0].Count)
+	assert.Greater(t, pts[0].Sum, 0.1, "the sample is the real ~150ms wait")
+	assert.Equal(t, poolWaitBuckets, pts[0].Bounds)
+}
+
+func TestMetrics_PoolWaitDuration_CtxDone(t *testing.T) {
+	var f *metricsFixture
+	f = newMetricsFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(userTweetsBody(snowflakeAt(f.now.Add(-2 * time.Second)))))
+	}, "wait_ctx_acc")
+	f.acc.MarkEndpointRateLimited("UserTweets", time.Now().Add(10*time.Second))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	defer cancel()
+	_, err := f.c.GetUserTweets(ctx, "999", 20)
+	require.Error(t, err)
+
+	pts := histPoints(t, f.collect(t), metricPoolWait)
+	require.Len(t, pts, 1)
+	assert.Equal(t, map[string]string{attrOperation: "UserTweets", attrResult: waitResultCtxDone}, attrMap(pts[0].Attributes))
+	assert.Equal(t, uint64(1), pts[0].Count)
+	assert.Less(t, pts[0].Sum, 1.0, "the sample is the ~60ms actually waited, not the 10s limit")
+}
+
 func allAttrSets(t *testing.T, m metricdata.Metrics) []attribute.Set {
 	t.Helper()
 	var out []attribute.Set

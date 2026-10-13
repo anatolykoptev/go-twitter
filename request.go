@@ -42,9 +42,26 @@ var poolWaitCap = 5 * time.Minute
 // gives up, this waits until the earliest moment an account could serve the
 // endpoint (see nextUsableAt) and retries. With no active account the original
 // error is returned unchanged.
-func (c *Client) nextAccountWithWait(ctx context.Context, endpoint string, filter func(*Account) bool, deadline time.Time) (*Account, error) {
+func (c *Client) nextAccountWithWait(ctx context.Context, endpoint string, filter func(*Account) bool, deadline time.Time) (acc *Account, err error) {
+	// twitter.client.pool.wait.duration: one sample per call that actually
+	// waited (slept for a usable account), labelled by how the wait ended.
+	var waited time.Duration
+	defer func() {
+		if waited <= 0 {
+			return
+		}
+		result := waitResultAcquired
+		if err != nil {
+			if ctx.Err() != nil {
+				result = waitResultCtxDone
+			} else {
+				result = waitResultGaveUp
+			}
+		}
+		c.metrics.recordPoolWait(endpoint, waited, result)
+	}()
 	for {
-		acc, err := c.pool.NextWithWait(ctx, filter, time.Until(deadline))
+		acc, err = c.pool.NextWithWait(ctx, filter, time.Until(deadline))
 		if err == nil {
 			return acc, nil
 		}
@@ -61,11 +78,14 @@ func (c *Client) nextAccountWithWait(ctx context.Context, endpoint string, filte
 		}
 		slog.Debug("all active accounts limited, waiting",
 			slog.String("endpoint", endpoint), slog.Duration("wait", wait))
+		start := time.Now()
 		t := time.NewTimer(wait)
 		select {
 		case <-t.C:
+			waited += time.Since(start)
 		case <-ctx.Done():
 			t.Stop()
+			waited += time.Since(start)
 			return nil, ctx.Err()
 		}
 	}
