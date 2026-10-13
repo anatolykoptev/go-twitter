@@ -50,16 +50,40 @@ type Manager struct {
 	cacheDir string
 
 	// Init-failure state, guarded by mu.
-	sf           singleflight.Group
-	failUntil    time.Time // no init attempt before this instant
-	failStreak   int
-	failing      bool // true between an ok->failed transition and the next success
-	lastErr      error
+	sf singleflight.Group
+	// fails is the negative cache, one entry per attempt kind: a failed guest
+	// (unauthenticated) init must never lock out an authenticated one, which
+	// fetches a different page and can succeed where the guest shell cannot.
+	fails        [kindCount]failState
+	failing      bool // alert dedupe: true between an ok->failed transition and the next success
 	onInitFailed func(error)
 
 	now         func() time.Time
 	backoffBase time.Duration
 	backoffMax  time.Duration
+}
+
+// attemptKind separates guest and authenticated init attempts.
+type attemptKind int
+
+const (
+	kindGuest attemptKind = iota
+	kindAuth
+	kindCount
+)
+
+func kindOf(auth bundle.Fetcher) attemptKind {
+	if auth != nil {
+		return kindAuth
+	}
+	return kindGuest
+}
+
+// failState is one kind's negative-cache entry.
+type failState struct {
+	until  time.Time // no attempt of this kind before this instant
+	streak int
+	err    error
 }
 
 // NewManager creates a new transaction ID manager backed by the given Fetcher.
@@ -89,7 +113,7 @@ func (m *Manager) Initialize() error {
 	ctx, cancel := context.WithTimeout(context.Background(), initTimeout)
 	defer cancel()
 	err := m.initialize(ctx, nil)
-	m.recordResult(err)
+	m.recordResult(kindGuest, err)
 	return err
 }
 
@@ -103,6 +127,12 @@ func (m *Manager) initialize(ctx context.Context, auth bundle.Fetcher) error {
 	authErr := m.initFrom(ctx, retryFetcher{auth}, authedWarmPageURL)
 	if authErr == nil {
 		return nil
+	}
+	// Only a logged-out shell (the account's cookies were not honoured) is worth
+	// a guest retry; any other failure would hit the same wall unauthenticated
+	// and just doubles the requests toward x.com.
+	if !errors.Is(authErr, bundle.ErrLoggedOutShell) {
+		return authErr
 	}
 	if err := m.initFrom(ctx, retryFetcher{m.fetcher}, warmPageURL); err != nil {
 		return fmt.Errorf("%w (unauthenticated fallback: %v)", authErr, err)
@@ -119,7 +149,7 @@ func (m *Manager) initFrom(ctx context.Context, f bundle.Fetcher, pageURL string
 	}
 	homeHTML := string(page)
 
-	indicesURL, err := m.locateIndices(ctx, f, homeHTML)
+	indicesURL, err := m.locateIndices(ctx, f, homeHTML, pageURL)
 	if err != nil {
 		return err
 	}
@@ -150,11 +180,11 @@ func (m *Manager) initFrom(ctx context.Context, f bundle.Fetcher, pageURL string
 // Vite page (x-web script links), a bounded scan of those chunks; otherwise the
 // bundle core's webpack chunk-map lookup. A Vite page never falls through to the
 // chunk-map path — it has none, and that path refetches more warm pages.
-func (m *Manager) locateIndices(ctx context.Context, f bundle.Fetcher, homeHTML string) (string, error) {
+func (m *Manager) locateIndices(ctx context.Context, f bundle.Fetcher, homeHTML, pageURL string) (string, error) {
 	if legacy := onDemandLegacyURL(homeHTML); legacy != "" {
 		return legacy, nil
 	}
-	if scripts := bundle.ViteScripts(homeHTML); len(scripts) > 0 {
+	if scripts := bundle.ViteScripts(homeHTML, pageURL); len(scripts) > 0 {
 		if bundle.IsLoggedOutShell(scripts) {
 			return "", bundle.ErrLoggedOutShell
 		}
@@ -273,15 +303,31 @@ func (m *Manager) GenerateIDWith(ctx context.Context, method, path string, auth 
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
+	kind := kindOf(auth)
 	if m.needsInit() {
-		m.ensureInit(auth)
+		if err := m.awaitInit(ctx, kind, auth); err != nil {
+			return "", err
+		}
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	if m.ct == nil {
-		return "", fmt.Errorf("%w: %v", ErrUnavailable, m.lastErr)
+		return "", fmt.Errorf("%w: %v", ErrUnavailable, m.lastErrLocked(kind))
 	}
 	return m.ct.GenerateID(method, path), nil
+}
+
+// lastErrLocked returns the most relevant recorded init error; m.mu must be held.
+func (m *Manager) lastErrLocked(kind attemptKind) error {
+	if err := m.fails[kind].err; err != nil {
+		return err
+	}
+	for _, f := range m.fails {
+		if f.err != nil {
+			return f.err
+		}
+	}
+	return nil
 }
 
 func (m *Manager) needsInit() bool {
@@ -290,54 +336,63 @@ func (m *Manager) needsInit() bool {
 	return m.ct == nil || m.now().Sub(m.lastRefresh) > m.refreshInterval
 }
 
-func (m *Manager) backoffActive() bool {
+func (m *Manager) backoffActive(kind attemptKind) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	return m.now().Before(m.failUntil)
+	return m.now().Before(m.fails[kind].until)
 }
 
-// ensureInit runs (or joins) one init attempt unless the negative cache forbids it.
-func (m *Manager) ensureInit(auth bundle.Fetcher) {
-	if m.backoffActive() {
-		return
+// awaitInit runs (or joins) one init attempt of the given kind unless that
+// kind's negative cache forbids it. The leader runs on its own background
+// context; a waiter's ctx only bounds how long it waits.
+func (m *Manager) awaitInit(ctx context.Context, kind attemptKind, auth bundle.Fetcher) error {
+	if m.backoffActive(kind) {
+		return nil
 	}
-	_, _, _ = m.sf.Do("init", func() (any, error) {
+	ch := m.sf.DoChan(fmt.Sprintf("init-%d", kind), func() (any, error) {
 		// Re-check inside the flight: a caller that passed the check above just as
 		// the previous flight finished must not start a second attempt.
-		if !m.needsInit() || m.backoffActive() {
+		if !m.needsInit() || m.backoffActive(kind) {
 			return nil, nil
 		}
-		ctx, cancel := context.WithTimeout(context.Background(), initTimeout)
+		ictx, cancel := context.WithTimeout(context.Background(), initTimeout)
 		defer cancel()
-		err := m.initialize(ctx, auth)
-		m.recordResult(err)
+		err := m.initialize(ictx, auth)
+		m.recordResult(kind, err)
 		return nil, err
 	})
+	select {
+	case <-ch:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // recordResult updates the negative cache and fires the failure alert once per
 // ok->failed transition.
-func (m *Manager) recordResult(err error) {
+func (m *Manager) recordResult(kind attemptKind, err error) {
 	m.mu.Lock()
 	if err == nil {
 		wasFailing := m.failing
-		m.failing, m.failStreak, m.failUntil, m.lastErr = false, 0, time.Time{}, nil
+		m.failing, m.fails[kind] = false, failState{}
 		m.mu.Unlock()
 		if wasFailing {
 			slog.Info("xtid: recovered")
 		}
 		return
 	}
-	m.failStreak++
+	f := &m.fails[kind]
+	f.streak++
 	wait := m.backoffBase
-	for i := 1; i < m.failStreak && wait < m.backoffMax; i++ {
+	for i := 1; i < f.streak && wait < m.backoffMax; i++ {
 		wait *= 2
 	}
 	if wait > m.backoffMax {
 		wait = m.backoffMax
 	}
-	m.failUntil = m.now().Add(wait)
-	m.lastErr = err
+	f.until = m.now().Add(wait)
+	f.err = err
 	transition := !m.failing
 	m.failing = true
 	hasKeys := m.ct != nil
@@ -348,7 +403,8 @@ func (m *Manager) recordResult(err error) {
 		return
 	}
 	slog.Warn("xtid: init failed, x-client-transaction-id will be missing or stale",
-		slog.Any("error", err), slog.Bool("stale_keys", hasKeys), slog.Duration("retry_in", wait))
+		slog.Any("error", err), slog.Bool("stale_keys", hasKeys), slog.Duration("retry_in", wait),
+		slog.Bool("authenticated", kind == kindAuth))
 	if hook != nil {
 		hook(err)
 	}

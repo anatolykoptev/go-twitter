@@ -34,6 +34,7 @@ type Client struct {
 	alertHook            func(topic string, payload any) // proxy/pool event sink (PoolAlertHook or slog fallback)
 	metrics              *clientMetrics                  // OpenTelemetry instruments (nil-safe)
 	poolGaugeReg         metric.Registration             // pool.accounts callback; unregistered by Close (guarded by mu)
+	warmDoerOverride     warmDoer                        // test seam: replaces the account client for xtid warm-page fetches
 
 	mu                sync.Mutex
 	guestToken        string
@@ -226,16 +227,34 @@ var authTokenCookieRe = regexp.MustCompile(`(?:^|;\s*)auth_token=[^;\s]+`)
 // request's own headers: the account's cookie, sent through that account's
 // client (bc). Returns nil (unauthenticated fallback) for requests without an
 // auth_token cookie. The cookie is never logged.
-func warmFetcher(bc *stealth.BrowserClient, headers map[string]string) bundle.Fetcher {
+func warmFetcher(d warmDoer, headers map[string]string) bundle.Fetcher {
 	cookie := headers["cookie"]
-	if bc == nil || !authTokenCookieRe.MatchString(cookie) {
+	if d == nil || !authTokenCookieRe.MatchString(cookie) {
 		return nil
 	}
 	ua := headers["user-agent"]
 	if ua == "" {
 		ua = defaultUserAgent
 	}
-	return &bundle.StealthFetcher{Client: bc, UserAgent: ua, Cookie: cookie}
+	return &bundle.StealthFetcher{Client: d, UserAgent: ua, Cookie: cookie}
+}
+
+// warmDoer is the request primitive the warm-page fetcher needs; the account's
+// *stealth.BrowserClient in production.
+type warmDoer interface {
+	DoCtx(ctx context.Context, method, urlStr string, headers map[string]string, body io.Reader) ([]byte, map[string]string, int, error)
+}
+
+// warmClient picks the client the warm-page fetch goes through: the request
+// account's own (bc), or the test override.
+func (c *Client) warmClient(bc *stealth.BrowserClient) warmDoer {
+	if c.warmDoerOverride != nil {
+		return c.warmDoerOverride
+	}
+	if bc == nil {
+		return nil
+	}
+	return bc
 }
 
 // doRequest executes a request with xtid header injection (no body).
@@ -249,7 +268,7 @@ func (c *Client) doRequestWithBody(bc *stealth.BrowserClient, method, urlStr str
 	if u, parseErr := url.Parse(urlStr); parseErr == nil {
 		urlPath = u.Path
 	}
-	if txID, txErr := c.xtidMgr.GenerateIDWith(context.Background(), method, urlPath, warmFetcher(bc, headers)); txErr == nil {
+	if txID, txErr := c.xtidMgr.GenerateIDWith(context.Background(), method, urlPath, warmFetcher(c.warmClient(bc), headers)); txErr == nil {
 		headers["x-client-transaction-id"] = txID
 	} else {
 		slog.Debug("xtid: failed to generate transaction id", slog.Any("error", txErr))

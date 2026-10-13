@@ -37,7 +37,7 @@ func TestViteScripts_FiltersHostsAndDedupes(t *testing.T) {
 		`<link href="https://abs.twimg.com/x-web/x-web/a-1.js">` +
 		`<script src="https://evil.example/x-web/x-web/b.js"></script>` +
 		`<script src="https://abs.twimg.com/responsive-web/client-web/main.js"></script>`
-	got := ViteScripts(page)
+	got := ViteScripts(page, "https://x.com/tesla")
 	if len(got) != 1 || got[0] != "https://abs.twimg.com/x-web/x-web/a-1.js" {
 		t.Fatalf("ViteScripts = %v, want only the deduped allowlisted x-web link", got)
 	}

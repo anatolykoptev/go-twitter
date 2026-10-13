@@ -63,6 +63,12 @@ func checkBundleRedirect(req *http.Request, _ []*http.Request) error {
 	return nil
 }
 
+// cookieURLOK reports whether the session cookie may be sent to u: https only,
+// and only to x.com / twitter.com hosts (see cookieHostOK).
+func cookieURLOK(u *url.URL) bool {
+	return u != nil && u.Scheme == "https" && cookieHostOK(u.Hostname())
+}
+
 // cookieHostOK reports whether host may receive the session cookie: x.com and
 // twitter.com (and their subdomains) only. The auth_token is scoped to those
 // domains; sending it to abs.twimg.com would leak it to a CDN origin.
@@ -139,7 +145,7 @@ func (f *HTTPFetcher) Fetch(ctx context.Context, rawURL string) ([]byte, error) 
 		return nil, fmt.Errorf("new request %s: %w", rawURL, err)
 	}
 	f.setHeaders(req)
-	if f.Cookie != "" && cookieHostOK(req.URL.Hostname()) {
+	if f.Cookie != "" && cookieURLOK(req.URL) {
 		req.Header.Set("Cookie", f.Cookie)
 	}
 
@@ -214,7 +220,7 @@ func (f *StealthFetcher) Fetch(ctx context.Context, rawURL string) ([]byte, erro
 		"Accept-Language": acceptLangHeader,
 	}
 	if f.Cookie != "" {
-		if u, perr := url.Parse(rawURL); perr == nil && cookieHostOK(u.Hostname()) {
+		if u, perr := url.Parse(rawURL); perr == nil && cookieURLOK(u) {
 			headers["cookie"] = f.Cookie
 		}
 	}
@@ -224,6 +230,9 @@ func (f *StealthFetcher) Fetch(ctx context.Context, rawURL string) ([]byte, erro
 	}
 	if status != http.StatusOK {
 		return nil, fmt.Errorf("stealth fetch %s: HTTP %d", rawURL, status)
+	}
+	if len(body) > maxBundleBytes {
+		return nil, fmt.Errorf("stealth fetch %s: body exceeds %d bytes", rawURL, maxBundleBytes)
 	}
 	return body, nil
 }
@@ -250,7 +259,7 @@ func (f *HTTPFetcher) PostForm(ctx context.Context, rawURL string, form url.Valu
 	}
 	f.setHeaders(req)
 	req.Header.Set("Content-Type", formContentType)
-	if f.Cookie != "" && cookieHostOK(req.URL.Hostname()) {
+	if f.Cookie != "" && cookieURLOK(req.URL) {
 		req.Header.Set("Cookie", f.Cookie)
 	}
 	resp, err := f.httpClient().Do(req)
@@ -281,7 +290,7 @@ func (f *StealthFetcher) PostForm(ctx context.Context, rawURL string, form url.V
 		"Content-Type":    formContentType,
 	}
 	if f.Cookie != "" {
-		if u, perr := url.Parse(rawURL); perr == nil && cookieHostOK(u.Hostname()) {
+		if u, perr := url.Parse(rawURL); perr == nil && cookieURLOK(u) {
 			headers["cookie"] = f.Cookie
 		}
 	}
@@ -291,6 +300,9 @@ func (f *StealthFetcher) PostForm(ctx context.Context, rawURL string, form url.V
 	}
 	if status != http.StatusOK {
 		return nil, fmt.Errorf("stealth post %s: HTTP %d", rawURL, status)
+	}
+	if len(body) > maxBundleBytes {
+		return nil, fmt.Errorf("stealth post %s: body exceeds %d bytes", rawURL, maxBundleBytes)
 	}
 	return body, nil
 }

@@ -263,7 +263,7 @@ x.com rotates GraphQL queryIDs and feature-flag defaults inside its JS bundle; a
 ```bash
 go run ./cmd/gql-sync -proxy "$PROXY_URL" -fail-on-empty
 # logged-out x.com serves a shell without the bundle; pass an account's cookies
-# via the environment (never as a flag; sent to x.com hosts only, never logged):
+# via the environment (never as a flag; sent to x.com and twitter.com hosts only, over https, never logged):
 GQL_SYNC_COOKIES='auth_token=...; ct0=...' go run ./cmd/gql-sync -fail-on-empty
 ```
 

@@ -34,6 +34,9 @@ var (
 	// xWebScriptRe matches Vite-era script links: https://<host>/x-web/<path>.js.
 	// Hosts are re-checked against the allowlist in ViteScripts.
 	xWebScriptRe = regexp.MustCompile(`https://[\w.-]+/x-web/[\w./-]+\.js`)
+	// xWebAttrRe matches any src/href whose value is an x-web script: absolute,
+	// root-relative (/x-web/...) or protocol-relative (//host/x-web/...).
+	xWebAttrRe = regexp.MustCompile(`(?:src|href)=["']([^"'\s]*/x-web/[^"'\s]*\.js)["']`)
 	// loggedOutEntryRe recognises entry-client-logged-out(-hash).js.
 	loggedOutEntryRe = regexp.MustCompile(`(?:^|/)entry-client-logged-out(?:[-.][^/?#]+)?\.js(?:[?#].*)?$`)
 	// indicesFileRe finds the indices file reference inside a chunk or URL: the
@@ -50,18 +53,35 @@ var (
 	jsEscapes     = strings.NewReplacer(`\/`, `/`, `&`, `&`, `\x26`, `&`)
 )
 
-// ViteScripts returns the unique x-web script URLs linked in the page, in order,
-// restricted to allowlisted hosts (page HTML is third-party data).
-func ViteScripts(page string) []string {
+// ViteScripts returns the unique x-web script URLs referenced by the page, in
+// order. Absolute, root-relative (/x-web/...) and protocol-relative
+// (//host/x-web/...) src/href values are all resolved against pageURL, then
+// restricted to https + allowlisted hosts (page HTML is third-party data).
+func ViteScripts(page, pageURL string) []string {
+	base, err := url.Parse(pageURL)
+	if err != nil {
+		base = &url.URL{Scheme: "https", Host: "x.com"}
+	}
+	var refs []string
+	for _, m := range xWebAttrRe.FindAllStringSubmatch(page, -1) {
+		refs = append(refs, m[1])
+	}
+	refs = append(refs, xWebScriptRe.FindAllString(page, -1)...)
+
 	var out []string
 	seen := map[string]bool{}
-	for _, m := range xWebScriptRe.FindAllString(page, -1) {
-		u, err := url.Parse(m)
-		if err != nil || !allowedBundleHost(u.Hostname()) || seen[m] {
+	for _, ref := range refs {
+		rel, perr := url.Parse(jsEscapes.Replace(ref))
+		if perr != nil {
 			continue
 		}
-		seen[m] = true
-		out = append(out, m)
+		u := base.ResolveReference(rel)
+		abs := u.String()
+		if u.Scheme != "https" || !allowedBundleHost(u.Hostname()) || seen[abs] {
+			continue
+		}
+		seen[abs] = true
+		out = append(out, abs)
 	}
 	return out
 }
@@ -77,9 +97,11 @@ func IsLoggedOutShell(scripts []string) bool {
 }
 
 // FindIndicesURL locates the indices file among the page's x-web scripts: a
-// script URL that names it directly wins; otherwise chunks are fetched with
-// bounded concurrency and the first one referencing it is resolved against its
-// own URL. Resolved URLs must be https + allowlisted.
+// script URL that names it directly wins; otherwise the listed chunks are
+// fetched with bounded concurrency, then (one level only) the chunks they
+// dynamically import, all within maxScan fetches. The first body referencing the
+// indices file is resolved against its own URL. Resolved URLs must be https +
+// allowlisted.
 func FindIndicesURL(ctx context.Context, f Fetcher, scripts []string, concurrency, maxScan int) (string, error) {
 	if concurrency <= 0 {
 		concurrency = DefaultScanConcurrency
@@ -96,56 +118,126 @@ func FindIndicesURL(ctx context.Context, f Fetcher, scripts []string, concurrenc
 		scripts = scripts[:maxScan]
 	}
 
+	seen := make(map[string]bool, len(scripts))
+	for _, s := range scripts {
+		seen[s] = true
+	}
+	res := scanBatch(ctx, f, scripts, concurrency)
+	if res.hit != "" {
+		return res.hit, nil
+	}
+
+	var children []string
+	for _, c := range res.children {
+		if !seen[c] {
+			seen[c] = true
+			children = append(children, c)
+		}
+	}
+	if room := maxScan - len(scripts); len(children) > room {
+		children = children[:max(room, 0)]
+	}
+	loaded, failed := res.loaded, res.failed
+	if len(children) > 0 {
+		r2 := scanBatch(ctx, f, children, concurrency)
+		if r2.hit != "" {
+			return r2.hit, nil
+		}
+		loaded += r2.loaded
+		failed += r2.failed
+	}
+	return "", fmt.Errorf("%w (chunks: %d loaded, %d failed)", ErrIndicesNotFound, loaded, failed)
+}
+
+// scanResult is the outcome of fetching one batch of chunks.
+type scanResult struct {
+	hit      string   // resolved indices-file URL, "" when none
+	children []string // dynamic-import targets seen in the bodies, in order
+	loaded   int
+	failed   int
+}
+
+// scanBatch fetches urls with bounded concurrency, stopping at the first body
+// that references the indices file. Children are returned in input order of the
+// chunk they came from so the second-level scan is deterministic.
+func scanBatch(ctx context.Context, f Fetcher, urls []string, concurrency int) scanResult {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	jobs := make(chan string)
-	found := make(chan string, concurrency)
-	var mu sync.Mutex
-	loaded, failed := 0, 0
+	type item struct {
+		idx      int
+		hit      string
+		children []string
+		err      error
+	}
+	jobs := make(chan int)
+	out := make(chan item, len(urls))
 	var wg sync.WaitGroup
 	for i := 0; i < concurrency; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for u := range jobs {
-				body, err := f.Fetch(ctx, u)
-				mu.Lock()
+			for idx := range jobs {
+				body, err := f.Fetch(ctx, urls[idx])
 				if err != nil {
-					failed++
-				} else {
-					loaded++
-				}
-				mu.Unlock()
-				if err != nil {
+					out <- item{idx: idx, err: err}
 					continue
 				}
-				if hit, ok := resolveIndicesRef(u, body); ok {
-					found <- hit
+				if hit, ok := resolveIndicesRef(urls[idx], body); ok {
+					out <- item{idx: idx, hit: hit}
 					cancel()
-					return
+					continue
 				}
+				out <- item{idx: idx, children: importChildren(urls[idx], body)}
 			}
 		}()
 	}
 feed:
-	for _, s := range scripts {
+	for idx := range urls {
 		select {
-		case jobs <- s:
+		case jobs <- idx:
 		case <-ctx.Done():
 			break feed
 		}
 	}
 	close(jobs)
 	wg.Wait()
-	close(found)
+	close(out)
 
-	if hit, ok := <-found; ok {
-		return hit, nil
+	var res scanResult
+	perChunk := make(map[int][]string)
+	for it := range out {
+		switch {
+		case it.err != nil:
+			res.failed++
+		case it.hit != "":
+			res.loaded++
+			if res.hit == "" {
+				res.hit = it.hit
+			}
+		default:
+			res.loaded++
+			perChunk[it.idx] = it.children
+		}
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	return "", fmt.Errorf("%w (chunks: %d loaded, %d failed)", ErrIndicesNotFound, loaded, failed)
+	for idx := range urls {
+		res.children = append(res.children, perChunk[idx]...)
+	}
+	return res
+}
+
+// importChildren lists the relative dynamic imports of a chunk, resolved against
+// its URL and restricted to https + allowlisted hosts.
+func importChildren(chunkURL string, body []byte) []string {
+	var out []string
+	for _, m := range importRe.FindAllSubmatch(body, -1) {
+		child, ok := resolveImport(chunkURL, string(m[1]))
+		if !ok || !safePageURL(child) {
+			continue
+		}
+		out = append(out, child)
+	}
+	return out
 }
 
 // resolveIndicesRef finds the indices-file reference in a chunk body and
