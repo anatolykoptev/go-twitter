@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.6.13](https://github.com/anatolykoptev/go-twitter/compare/v0.6.12...v0.6.13) (2026-10-13)
+
+
+### Features
+
+* **metrics:** OpenTelemetry instruments ([#77](https://github.com/anatolykoptev/go-twitter/issues/77)) ([1135e7f](https://github.com/anatolykoptev/go-twitter/commit/1135e7fe04446a05fc4df8abf67eb0408ca876d8))
+
+
+### Documentation
+
+* refresh README against current API surface ([#55](https://github.com/anatolykoptev/go-twitter/issues/55)) ([3a6b741](https://github.com/anatolykoptev/go-twitter/commit/3a6b74138dd565a611bad75b31f216803d1342b6))
+
 ## [0.6.12](https://github.com/anatolykoptev/go-twitter/compare/v0.6.11...v0.6.12) (2026-09-29)
 
 
