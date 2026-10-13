@@ -22,6 +22,11 @@ type Account struct {
 	UserAgent  string
 	Profile    stealth.BrowserProfile
 
+	// credsAuthoritative marks AuthToken/CT0 as freshly leased by a credential
+	// service: loadOrLogin then ignores the on-disk session entirely. Set only
+	// by tryWithAccount; unexported on purpose (no public API).
+	credsAuthoritative bool
+
 	active       bool
 	reactivateAt time.Time
 	client       *stealth.BrowserClient

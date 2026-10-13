@@ -2,9 +2,11 @@ package twitter
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -12,30 +14,105 @@ import (
 	"time"
 
 	stealth "github.com/anatolykoptev/go-stealth"
+	"github.com/anatolykoptev/go-twitter/social"
 	"github.com/anatolykoptev/go-twitter/xtid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// F1 — journey: a credential service rotated the account's auth_token (A -> B)
-// while an old session file with A is still on disk. A *WithSocial-style client
-// is built with the leased token B and makes one request against a fake x.com:
-// the request must carry auth_token=B, never A, and the disk file must now hold B.
-func TestLoadOrLogin_ProvidedCredentialsBeatStaleDiskSession(t *testing.T) {
-	dir := t.TempDir()
+// cookieRecorder is a fake x.com handler recording every Cookie header.
+type cookieRecorder struct {
+	mu      sync.Mutex
+	cookies []string
+}
+
+func (r *cookieRecorder) handler(w http.ResponseWriter, req *http.Request) {
+	r.mu.Lock()
+	r.cookies = append(r.cookies, req.Header.Get("Cookie"))
+	r.mu.Unlock()
+	if strings.Contains(req.URL.Path, "UserByScreenName") {
+		_, _ = w.Write([]byte(socialUserBody))
+		return
+	}
+	_, _ = w.Write([]byte(userTweetsBody(snowflakeAt(time.Now()))))
+}
+
+func (r *cookieRecorder) snapshot() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.cookies...)
+}
+
+func readSessionFile(t *testing.T, dir, user string) []byte {
+	t.Helper()
+	p, err := sessionPath(dir, user)
+	require.NoError(t, err)
+	b, err := os.ReadFile(p)
+	require.NoError(t, err)
+	return b
+}
+
+// F1 — journey (*WithSocial path): a credential service rotated the account's
+// auth_token (A -> B) while an old session file with A is still on disk. The
+// public GetUserWithSocial leases B, makes one request against a fake x.com: it
+// must carry auth_token=B, never A, and the session file must be left untouched.
+func TestWithSocial_LeasedCredentialsBeatStaleDiskSession(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".go-twitter", "sessions")
 	require.NoError(t, saveSession(dir, "rotated_acc", "tokenA", "ct0A"))
+	before := readSessionFile(t, dir, "rotated_acc")
 
-	var mu sync.Mutex
-	var cookies []string
-	bc := startFakeX(t, func(w http.ResponseWriter, r *http.Request) {
-		mu.Lock()
-		cookies = append(cookies, r.Header.Get("Cookie"))
-		mu.Unlock()
-		_, _ = w.Write([]byte(userTweetsBody(snowflakeAt(time.Now()))))
-	})
+	rec := &cookieRecorder{}
+	bc := startFakeX(t, rec.handler)
+	testHookSocialClient = func(c *Client) {
+		c.client = bc
+		c.xtidMgr = xtid.NewManager(failFetcher{})
+		c.accountPacer = nil
+	}
+	t.Cleanup(func() { testHookSocialClient = nil })
 
-	acc := &Account{Username: "rotated_acc", AuthToken: "tokenB", CT0: "ct0B"} // what tryWithAccount builds
-	c, err := NewClient(ClientConfig{Accounts: []*Account{acc}, SessionDir: dir, skipPoolGauge: true})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_ = json.NewEncoder(w).Encode(social.Credentials{
+				ID: "acc-1",
+				Credentials: map[string]string{
+					"username": "rotated_acc", "auth_token": "tokenB", "ct0": "ct0B",
+				},
+			})
+		}
+	}))
+	t.Cleanup(srv.Close)
+	sc := social.NewClient(srv.URL, "tok", "test")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_, err := GetUserWithSocial(ctx, sc, "tesla")
+	require.NoError(t, err)
+
+	cookies := rec.snapshot()
+	require.NotEmpty(t, cookies, "fake x.com saw no request")
+	for _, ck := range cookies {
+		assert.Contains(t, ck, "auth_token=tokenB", "request must carry the leased token")
+		assert.NotContains(t, ck, "tokenA", "stale disk token leaked into the request")
+	}
+	assert.Equal(t, before, readSessionFile(t, dir, "rotated_acc"), "leased path must not touch the session file")
+}
+
+// F5 — shape (b), long-lived client from static config (ParseAccounts
+// "user:pass:auth_token:ct0"): an earlier in-process relogin saved the newer
+// token B to disk; after a restart the config still says A. The disk session
+// (B) must win — otherwise A (revoked) forces a password relogin on every restart.
+func TestParseAccounts_FreshDiskSessionBeatsStaticConfigToken(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, saveSession(dir, "cfg_acc", "tokenB", "ct0B"))
+
+	accs := ParseAccounts("cfg_acc:pw:tokenA:ct0A")
+	require.Len(t, accs, 1)
+
+	rec := &cookieRecorder{}
+	bc := startFakeX(t, rec.handler)
+	c, err := NewClient(ClientConfig{Accounts: accs, SessionDir: dir, skipPoolGauge: true})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
 	c.client = bc
@@ -45,20 +122,14 @@ func TestLoadOrLogin_ProvidedCredentialsBeatStaleDiskSession(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	_, err = c.GetUserTweets(ctx, "999", 20)
-	require.NoError(t, err)
+	require.NoError(t, err, "no relogin may be needed: the disk session is the newest token")
 
-	mu.Lock()
-	defer mu.Unlock()
-	require.NotEmpty(t, cookies, "fake x.com saw no request")
+	cookies := rec.snapshot()
+	require.NotEmpty(t, cookies)
 	for _, ck := range cookies {
-		assert.Contains(t, ck, "auth_token=tokenB", "request must carry the provided token")
-		assert.NotContains(t, ck, "tokenA", "stale disk token leaked into the request")
+		assert.Contains(t, ck, "auth_token=tokenB", "restart must resume the newest (disk) token")
+		assert.NotContains(t, ck, "tokenA", "stale static-config token won over the disk session")
 	}
-
-	tok, ct0, err := loadSession(dir, "rotated_acc", time.Hour)
-	require.NoError(t, err)
-	assert.Equal(t, "tokenB", tok, "disk file must be overwritten with the provided credentials")
-	assert.Equal(t, "ct0B", ct0)
 }
 
 // F2 — username+password only (no provided token) and a valid disk session:
@@ -86,21 +157,6 @@ func TestLoadOrLogin_PasswordOnlyAccountUsesDiskSession(t *testing.T) {
 	assert.Equal(t, "diskTok", tok)
 	assert.Equal(t, "diskCT0", ct0)
 	assert.Zero(t, proxyHits.Load(), "no login flow may run when a valid disk session exists")
-}
-
-// A caller-supplied auth_token without ct0 must not be silently replaced by a
-// different token from disk either.
-func TestLoadOrLogin_ProvidedTokenWithoutCT0IgnoresDifferingDisk(t *testing.T) {
-	dir := t.TempDir()
-	require.NoError(t, saveSession(dir, "half_acc", "tokenA", "ct0A"))
-
-	c := &Client{cfg: ClientConfig{SessionDir: dir, SessionTTL: time.Hour}}
-	acc := &Account{Username: "half_acc", AuthToken: "tokenB"} // no ct0, no password
-
-	err := c.loadOrLogin(acc, nil)
-	require.Error(t, err, "must not fall back to the differing disk session")
-	tok, _, _ := acc.Credentials()
-	assert.Equal(t, "tokenB", tok)
 }
 
 // F3 — saveSession is atomic. Writers rewrite a large (256 KiB) session in a loop
@@ -159,7 +215,27 @@ func TestSaveSession_AtomicUnderConcurrentReaders(t *testing.T) {
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
 	assert.Len(t, entries, 1, "temp files must not be left behind")
-	fi, err := os.Stat(sessionPath(dir, "atomic_acc"))
+	p, err := sessionPath(dir, "atomic_acc")
+	require.NoError(t, err)
+	fi, err := os.Stat(p)
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0600), fi.Mode().Perm())
+}
+
+// A username from the credential service must never escape the session dir.
+func TestSessionPath_RejectsTraversal(t *testing.T) {
+	dir := t.TempDir()
+	for _, u := range []string{"", "../evil", "a/b", `a\b`, "..", "x..y", "/abs", "nul\x00byte"} {
+		_, err := sessionPath(dir, u)
+		require.ErrorIs(t, err, errInvalidSessionUsername, "username %q", u)
+		assert.Error(t, saveSession(dir, u, "t", "c"), "save %q", u)
+		_, _, lerr := loadSession(dir, u, time.Hour)
+		assert.Error(t, lerr, "load %q", u)
+	}
+	_, err := os.Stat(filepath.Join(filepath.Dir(dir), "evil.json"))
+	assert.True(t, os.IsNotExist(err), "traversal wrote outside the session dir")
+
+	p, err := sessionPath(dir, "good_user.1")
+	require.NoError(t, err)
+	assert.Equal(t, filepath.Join(dir, "good_user.1.json"), p)
 }
