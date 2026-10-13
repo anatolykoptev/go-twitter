@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.15](https://github.com/anatolykoptev/go-twitter/compare/v0.6.14...v0.6.15) (2026-10-13)
+
+
+### Bug Fixes
+
+* **social:** share xtid state and close per-call clients ([#84](https://github.com/anatolykoptev/go-twitter/issues/84)) ([#85](https://github.com/anatolykoptev/go-twitter/issues/85)) ([21b9b32](https://github.com/anatolykoptev/go-twitter/commit/21b9b32ef88e79ab83dcbb5d3b426ed0fa8be3ad))
+
 ## [0.6.14](https://github.com/anatolykoptev/go-twitter/compare/v0.6.13...v0.6.14) (2026-10-13)
 
 
