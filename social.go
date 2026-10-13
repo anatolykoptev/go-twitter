@@ -176,6 +176,8 @@ func tryWithAccount[T any](ctx context.Context, sc *social.Client, fn func(conte
 		Username:  creds.Credentials["username"],
 		AuthToken: creds.Credentials["auth_token"],
 		CT0:       creds.Credentials["ct0"],
+
+		credsAuthoritative: true, // freshly leased: a stale session file must not override them
 	}
 
 	tw, err := NewClient(ClientConfig{

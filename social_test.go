@@ -28,6 +28,7 @@ func TestSearchWithSocial_AcquireError(t *testing.T) {
 }
 
 func TestSearchWithSocial_ReportsErrorOnFailure(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // sessions are persisted under $HOME
 	var reportedStatus string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
@@ -113,6 +114,7 @@ func TestSearchTweets_InvalidProduct(t *testing.T) {
 // suspended handle) must report the account as SUCCESS — it did its job — and
 // must NOT burn the remaining pool retries.
 func TestWithSocial_NotFoundNoRetry(t *testing.T) {
+	t.Setenv("HOME", t.TempDir()) // sessions are persisted under $HOME
 	var acquires int
 	var lastReport string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

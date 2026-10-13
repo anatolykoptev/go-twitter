@@ -3,6 +3,7 @@ package twitter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -27,9 +28,20 @@ func sessionDir(override string) string {
 	return filepath.Join(home, ".go-twitter", "sessions")
 }
 
-// sessionPath returns the file path for a given username's session.
-func sessionPath(dir, username string) string {
-	return filepath.Join(dir, username+".json")
+// errInvalidSessionUsername is returned for usernames that cannot be a single
+// file name inside the session directory.
+var errInvalidSessionUsername = errors.New("invalid session username")
+
+// sessionPath returns the file path for a given username's session. Usernames
+// that are empty, contain a path separator or "..", or otherwise would not stay
+// a single path element inside dir are rejected: the name comes from a
+// credential service and must never escape the session directory.
+func sessionPath(dir, username string) (string, error) {
+	if username == "" || strings.ContainsAny(username, `/\`+"\x00") ||
+		strings.Contains(username, "..") || filepath.Base(username) != username {
+		return "", fmt.Errorf("%w %q", errInvalidSessionUsername, username)
+	}
+	return filepath.Join(dir, username+".json"), nil
 }
 
 // savedSession holds serialized cookie data for persistence.
@@ -39,9 +51,16 @@ type savedSession struct {
 	SavedAt   time.Time `json:"saved_at"`
 }
 
-// saveSession persists auth_token and ct0 to disk.
+// saveSession persists auth_token and ct0 to disk. The write is atomic: the
+// payload goes to a temp file in the same directory, is fsynced, then renamed
+// over the target, so a concurrent loadSession sees either the previous
+// complete file or the new complete one, never a truncated one.
 func saveSession(dir, username, authToken, ct0 string) error {
 	d := sessionDir(dir)
+	path, err := sessionPath(d, username)
+	if err != nil {
+		return err
+	}
 	if err := os.MkdirAll(d, 0700); err != nil {
 		return fmt.Errorf("create session dir: %w", err)
 	}
@@ -50,17 +69,49 @@ func saveSession(dir, username, authToken, ct0 string) error {
 	if err != nil {
 		return err
 	}
-	path := sessionPath(d, username)
-	if err := os.WriteFile(path, data, 0600); err != nil {
+	if err := writeFileAtomic(path, data, 0600); err != nil {
 		return fmt.Errorf("write session %s: %w", path, err)
 	}
 	slog.Debug("session saved", slog.String("user", username))
 	return nil
 }
 
+// writeFileAtomic writes data to path via temp file + fsync + rename. The temp
+// file lives in path's directory so the rename never crosses a filesystem.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) (err error) {
+	f, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".*.tmp")
+	if err != nil {
+		return err
+	}
+	tmp := f.Name()
+	defer func() {
+		if err != nil {
+			_ = f.Close()
+			_ = os.Remove(tmp)
+		}
+	}()
+	if err = f.Chmod(perm); err != nil {
+		return err
+	}
+	if _, err = f.Write(data); err != nil {
+		return err
+	}
+	if err = f.Sync(); err != nil {
+		return err
+	}
+	if err = f.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 // loadSession loads a persisted session from disk.
 func loadSession(dir, username string, ttl time.Duration) (authToken, ct0 string, err error) {
-	data, err := os.ReadFile(sessionPath(sessionDir(dir), username))
+	path, err := sessionPath(sessionDir(dir), username)
+	if err != nil {
+		return "", "", err
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return "", "", nil
@@ -107,7 +158,9 @@ func (c *Client) relogin(acc *Account) error {
 	bc := c.clientForAccount(acc)
 
 	acc.SetCredentials("", "")
-	_ = os.Remove(sessionPath(sessionDir(c.cfg.SessionDir), acc.Username))
+	if p, perr := sessionPath(sessionDir(c.cfg.SessionDir), acc.Username); perr == nil {
+		_ = os.Remove(p)
+	}
 
 	if err := c.loadOrLogin(acc, bc); err != nil {
 		if rec != nil {
@@ -126,8 +179,25 @@ func (c *Client) relogin(acc *Account) error {
 	return nil
 }
 
-// loadOrLogin attempts to load a persisted session, falling back to login.
+// loadOrLogin establishes the account's credentials.
+//
+// Accounts flagged credsAuthoritative (set only by tryWithAccount: the
+// credential service leases fresh tokens on every call) use the provided pair
+// and never touch the session file — it is neither read nor written here, so a
+// stale file cannot override a leased token.
+//
+// Every other account (ParseAccounts, direct Account literals) keeps the
+// original order, which long-lived clients rely on: an unexpired on-disk
+// session first (it holds the newest token after an in-process relogin, so a
+// restart must not fall back to the stale static config token), then provided
+// credentials, then a fresh password login.
 func (c *Client) loadOrLogin(acc *Account, client *stealth.BrowserClient) error {
+	if acc.credsAuthoritative && acc.AuthToken != "" && acc.CT0 != "" {
+		acc.ct0RefreshedAt = time.Now()
+		slog.Info("using leased credentials", slog.String("user", acc.Username))
+		return nil
+	}
+
 	authToken, ct0, err := loadSession(c.cfg.SessionDir, acc.Username, c.cfg.SessionTTL)
 	if err != nil {
 		slog.Warn("error loading session", slog.String("user", acc.Username), slog.Any("error", err))
