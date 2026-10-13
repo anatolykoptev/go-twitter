@@ -29,6 +29,10 @@ const (
 	errNotAuthorized            // 179, 219 — not authorized
 	errInternal                 // 131 — Twitter internal error
 	errForbidden                // 403 — forbidden (no recognized error code)
+
+	// errClassCount is one past the last class; metrics_test iterates [0, errClassCount)
+	// to prove every class has a twitter.outcome mapping. Keep it LAST.
+	errClassCount
 )
 
 // classifyError inspects a response body for known Twitter error codes.

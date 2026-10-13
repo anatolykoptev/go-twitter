@@ -97,6 +97,7 @@ func (c *Client) relogin(acc *Account) error {
 		if ok, reason := c.reloginGate.Allowed(context.Background(), acc.Username); !ok {
 			slog.Warn("twitter: auto-relogin blocked by gate",
 				slog.String("user", acc.Username), slog.String("reason", reason))
+			c.metrics.recordRelogin(outcomeBreakerOpen)
 			return fmt.Errorf("relogin blocked: %s", reason)
 		}
 	}
@@ -112,6 +113,7 @@ func (c *Client) relogin(acc *Account) error {
 		if rec != nil {
 			rec.RecordFailure(acc.Username)
 		}
+		c.metrics.recordRelogin(outcomeFailed)
 		return fmt.Errorf("relogin %s: %w", acc.Username, err)
 	}
 
@@ -119,6 +121,7 @@ func (c *Client) relogin(acc *Account) error {
 		rec.RecordSuccess(acc.Username)
 	}
 	acc.Reset()
+	c.metrics.recordRelogin(outcomeOK)
 	slog.Info("relogin succeeded", slog.String("user", acc.Username))
 	return nil
 }

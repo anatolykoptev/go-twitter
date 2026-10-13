@@ -235,7 +235,11 @@ func (c *Client) GetUserTweets(ctx context.Context, userID string, count int) ([
 	if err != nil {
 		return nil, fmt.Errorf("UserTweets: %w", err)
 	}
-	return parseTweetTimeline(body, userID)
+	tweets, err := parseTweetTimeline(body, userID)
+	if err == nil {
+		c.metrics.recordFreshness("UserTweets", tweets)
+	}
+	return tweets, err
 }
 
 // SearchTimeline searches for tweets matching a query on the Latest tab.
@@ -267,7 +271,11 @@ func (c *Client) searchTimeline(ctx context.Context, query string, product Searc
 	if err != nil {
 		return nil, fmt.Errorf("SearchTimeline: %w", err)
 	}
-	return parseSearchTimeline(body)
+	tweets, err := parseSearchTimeline(body)
+	if err == nil {
+		c.metrics.recordFreshness("SearchTimeline", tweets)
+	}
+	return tweets, err
 }
 
 func (c *Client) searchTimelineRaw(ctx context.Context, query string, product SearchProduct, count int) ([]byte, error) {
@@ -467,6 +475,7 @@ func (c *Client) fetchTweetTimeline(
 			return tweets, fmt.Errorf("parse %s: %w", operation, err)
 		}
 		tweets = append(tweets, batch...)
+		c.metrics.recordFreshness(operation, batch)
 
 		// Stop on no cursor, an empty page (defends against a stuck cursor), or
 		// reaching the requested ceiling.
@@ -578,6 +587,7 @@ func (c *Client) fetchHomeTimeline(ctx context.Context, operation string, count 
 	if err != nil {
 		return nil, fmt.Errorf("parse %s: %w", operation, err)
 	}
+	c.metrics.recordFreshness(operation, tweets)
 	return tweets, nil
 }
 
