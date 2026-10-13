@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -15,9 +16,14 @@ import (
 )
 
 const (
-	// warmPageURL is the public x.com landing fetched for the twitter-site-verification
-	// meta tag and the loading-animation SVGs.
+	// warmPageURL is the public x.com landing used by the unauthenticated attempt.
+	// Logged-out, x.com now serves a Vite shell without the bundle (see
+	// bundle.ErrLoggedOutShell), so this is only the fallback attempt.
 	warmPageURL = "https://x.com"
+	// authedWarmPageURL is the page fetched with an account's cookies. A profile
+	// page is what twscrape (xclid.py) uses; it carries the verification meta, the
+	// loading-animation SVGs and the x-web script links.
+	authedWarmPageURL = "https://x.com/tesla"
 
 	// initTimeout bounds one shared init attempt (it outlives any single caller).
 	initTimeout = 90 * time.Second
@@ -82,26 +88,38 @@ func (m *Manager) SetInitFailedHook(fn func(error)) {
 func (m *Manager) Initialize() error {
 	ctx, cancel := context.WithTimeout(context.Background(), initTimeout)
 	defer cancel()
-	err := m.initialize(ctx)
+	err := m.initialize(ctx, nil)
 	m.recordResult(err)
 	return err
 }
 
-// initialize builds the ClientTransaction from the unauthenticated warm page.
-func (m *Manager) initialize(ctx context.Context) error {
-	return m.initFrom(ctx, retryFetcher{m.fetcher}, warmPageURL)
+// initialize builds the ClientTransaction. With a non-nil auth fetcher (carrying
+// an account's cookies) it is tried first against the authenticated warm page;
+// the unauthenticated fetcher is the fallback attempt.
+func (m *Manager) initialize(ctx context.Context, auth bundle.Fetcher) error {
+	if auth == nil {
+		return m.initFrom(ctx, retryFetcher{m.fetcher}, warmPageURL)
+	}
+	authErr := m.initFrom(ctx, retryFetcher{auth}, authedWarmPageURL)
+	if authErr == nil {
+		return nil
+	}
+	if err := m.initFrom(ctx, retryFetcher{m.fetcher}, warmPageURL); err != nil {
+		return fmt.Errorf("%w (unauthenticated fallback: %v)", authErr, err)
+	}
+	return nil
 }
 
 // initFrom fetches the warm page through f, locates the indices file, fetches it
 // and builds the ClientTransaction.
 func (m *Manager) initFrom(ctx context.Context, f bundle.Fetcher, pageURL string) error {
-	page, err := f.Fetch(ctx, pageURL)
+	page, err := bundle.FetchPage(ctx, f, pageURL)
 	if err != nil {
 		return fmt.Errorf("fetch warm page: %w", err)
 	}
 	homeHTML := string(page)
 
-	indicesURL, err := m.locateOnDemand(ctx, f, homeHTML)
+	indicesURL, err := m.locateIndices(ctx, f, homeHTML)
 	if err != nil {
 		return err
 	}
@@ -125,13 +143,29 @@ func (m *Manager) initFrom(ctx context.Context, f bundle.Fetcher, pageURL string
 	return nil
 }
 
-// locateOnDemand resolves the ondemand.s bundle URL. It prefers the legacy
-// direct-embed fast-path (`"ondemand.s":"<hash>"`), otherwise the bundle core's
-// webpack chunk-map lookup (chunkID by name -> hash -> URL).
-func (m *Manager) locateOnDemand(ctx context.Context, f bundle.Fetcher, homeHTML string) (string, error) {
+// locateIndices resolves the URL of the file holding the key-byte indices
+// (ondemand.s in the legacy webpack build, sign.o-* in the Vite build).
+//
+// Order: the legacy direct-embed fast-path (`"ondemand.s":"<hash>"`); then, for a
+// Vite page (x-web script links), a bounded scan of those chunks; otherwise the
+// bundle core's webpack chunk-map lookup. A Vite page never falls through to the
+// chunk-map path — it has none, and that path refetches more warm pages.
+func (m *Manager) locateIndices(ctx context.Context, f bundle.Fetcher, homeHTML string) (string, error) {
 	if legacy := onDemandLegacyURL(homeHTML); legacy != "" {
 		return legacy, nil
 	}
+	if scripts := bundle.ViteScripts(homeHTML); len(scripts) > 0 {
+		if bundle.IsLoggedOutShell(scripts) {
+			return "", bundle.ErrLoggedOutShell
+		}
+		return bundle.FindIndicesURL(ctx, f, scripts, bundle.DefaultScanConcurrency, bundle.DefaultScanMax)
+	}
+	return m.locateOnDemand(ctx, f)
+}
+
+// locateOnDemand resolves the ondemand.s bundle URL via the webpack chunk map
+// (chunkID by name -> hash -> URL).
+func (m *Manager) locateOnDemand(ctx context.Context, f bundle.Fetcher) (string, error) {
 	cm, err := bundle.Build(ctx, f, bundle.Options{CacheDir: m.cacheDir})
 	if err != nil {
 		return "", fmt.Errorf("build chunk map: %w", err)
@@ -164,7 +198,7 @@ const fetchMaxAttempts = 3
 const fetchBackoffBase = 500 * time.Millisecond
 
 // retryFetcher wraps a Fetcher with retry/backoff on transient failures; 4xx
-// responses are permanent and not retried.
+// responses are permanent and not retried. It forwards PostForm without retry.
 type retryFetcher struct{ inner bundle.Fetcher }
 
 func (r retryFetcher) Fetch(ctx context.Context, rawURL string) ([]byte, error) {
@@ -199,6 +233,15 @@ func (r retryFetcher) Fetch(ctx context.Context, rawURL string) ([]byte, error) 
 	return nil, lastErr
 }
 
+// PostForm forwards to the inner fetcher when it can POST.
+func (r retryFetcher) PostForm(ctx context.Context, rawURL string, form url.Values) ([]byte, error) {
+	p, ok := r.inner.(bundle.Poster)
+	if !ok {
+		return nil, errors.New("xtid: fetcher cannot POST")
+	}
+	return p.PostForm(ctx, rawURL, form)
+}
+
 // isPermanentFetchErr returns true for errors that should not be retried (HTTP 4xx).
 // Network errors, timeouts, and 5xx are retried. Matches anywhere in the message
 // because Fetcher impls format the status as a suffix ("... HTTP 403").
@@ -216,12 +259,22 @@ func isPermanentFetchErr(err error) bool {
 }
 
 // GenerateID returns a new x-client-transaction-id for the given HTTP method and
-// URL path, initialising lazily. Concurrent callers share one init attempt; after
-// a failure no new attempt is made until the backoff expires, and callers get
-// ErrUnavailable (or the stale keys, when a previous init succeeded) immediately.
+// URL path, initialising unauthenticated if needed. See GenerateIDWith.
 func (m *Manager) GenerateID(method, path string) (string, error) {
+	return m.GenerateIDWith(context.Background(), method, path, nil)
+}
+
+// GenerateIDWith is GenerateID with an optional auth fetcher (an account's
+// cookies through that account's client) used when an init/refresh is needed.
+// Concurrent callers share one init attempt; after a failure no new attempt is
+// made until the backoff expires, and callers get ErrUnavailable (or the stale
+// keys, when a previous init succeeded) immediately.
+func (m *Manager) GenerateIDWith(ctx context.Context, method, path string, auth bundle.Fetcher) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if m.needsInit() {
-		m.ensureInit()
+		m.ensureInit(auth)
 	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -244,7 +297,7 @@ func (m *Manager) backoffActive() bool {
 }
 
 // ensureInit runs (or joins) one init attempt unless the negative cache forbids it.
-func (m *Manager) ensureInit() {
+func (m *Manager) ensureInit(auth bundle.Fetcher) {
 	if m.backoffActive() {
 		return
 	}
@@ -256,7 +309,7 @@ func (m *Manager) ensureInit() {
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), initTimeout)
 		defer cancel()
-		err := m.initialize(ctx)
+		err := m.initialize(ctx, auth)
 		m.recordResult(err)
 		return nil, err
 	})

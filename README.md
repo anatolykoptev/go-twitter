@@ -198,7 +198,7 @@ On top of that, each account is paced individually on pool requests: a random de
 
 ## Anti-Detection
 
-- **xtid** — `x-client-transaction-id` generated from x.com page animation keys, refreshed every 30 minutes. If initialization fails, the header is omitted and a `xtid.init_failed` alert is sent to `PoolAlertHook`.
+- **xtid** — `x-client-transaction-id` generated from x.com page animation keys, refreshed every 30 minutes. Initialised lazily on the first request carrying an account's cookies (logged-out x.com serves a shell without the bundle). If initialization fails, the header is omitted, retries back off from 60 s to 15 min, and one `xtid.init_failed` alert per failure episode is sent to `PoolAlertHook`.
 - **xpff** — `x-xp-forwarded-for` generated from the session's `guest_id` and user agent.
 - **CT0** — never rotated on a timer or replaced with a client-generated value on an established session; x.com validates it server-side, so doing so causes CSRF 353 errors. The client adopts the ct0 from each successful response's `set-cookie`, persists it to the session file, and on a 353 adopts the server-offered ct0 before falling back to relogin. A generated ct0 is used only at login, when x.com sets none.
 - **TLS** — browser-grade JA3 fingerprints via go-stealth, with a per-account browser profile (`AssignBrowserProfile`).
@@ -262,6 +262,9 @@ x.com rotates GraphQL queryIDs and feature-flag defaults inside its JS bundle; a
 
 ```bash
 go run ./cmd/gql-sync -proxy "$PROXY_URL" -fail-on-empty
+# logged-out x.com serves a shell without the bundle; pass an account's cookies
+# via the environment (never as a flag; sent to x.com hosts only, never logged):
+GQL_SYNC_COOKIES='auth_token=...; ct0=...' go run ./cmd/gql-sync -fail-on-empty
 ```
 
 Flags: `-out` (repo root, default `.`), `-proxy`, `-fixtures` (read from a directory instead of the network), `-date`, `-fail-on-empty` (exit non-zero instead of leaving the files untouched when nothing is extracted).

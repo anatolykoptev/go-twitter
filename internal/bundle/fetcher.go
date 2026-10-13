@@ -11,6 +11,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -30,7 +31,8 @@ const (
 	// maxBundleBytes caps the body read — these are adversarial third-party
 	// responses. Legitimate warm pages / bundles are a few MB; 32 MiB is safe
 	// headroom against a memory-exhaustion body.
-	maxBundleBytes = 32 << 20
+	maxBundleBytes  = 32 << 20
+	formContentType = "application/x-www-form-urlencoded"
 )
 
 // allowedBundleHosts is the exact set of hosts the HTTP fetcher may dial or be
@@ -61,6 +63,18 @@ func checkBundleRedirect(req *http.Request, _ []*http.Request) error {
 	return nil
 }
 
+// cookieHostOK reports whether host may receive the session cookie: x.com and
+// twitter.com (and their subdomains) only. The auth_token is scoped to those
+// domains; sending it to abs.twimg.com would leak it to a CDN origin.
+func cookieHostOK(host string) bool {
+	for _, d := range []string{"x.com", "twitter.com"} {
+		if host == d || strings.HasSuffix(host, "."+d) {
+			return true
+		}
+	}
+	return false
+}
+
 // Fetcher fetches a URL and returns the body. The runtime wires a stealth-backed
 // impl (added in T1); the gql-sync CLI / CI uses HTTPFetcher.
 type Fetcher interface {
@@ -73,6 +87,10 @@ type Fetcher interface {
 type HTTPFetcher struct {
 	Client    *http.Client
 	UserAgent string
+	// Cookie, when non-empty, is sent as the Cookie header — but only to x.com /
+	// twitter.com hosts (see cookieHostOK), never to the abs.twimg.com CDN.
+	// X serves the real web build only to authenticated sessions. Never logged.
+	Cookie string
 
 	// skipInitialHostCheck disables the belt-and-suspenders initial-URL
 	// allowlist guard in Fetch. Test-only seam (the httptest harness dials
@@ -121,6 +139,9 @@ func (f *HTTPFetcher) Fetch(ctx context.Context, rawURL string) ([]byte, error) 
 		return nil, fmt.Errorf("new request %s: %w", rawURL, err)
 	}
 	f.setHeaders(req)
+	if f.Cookie != "" && cookieHostOK(req.URL.Hostname()) {
+		req.Header.Set("Cookie", f.Cookie)
+	}
 
 	resp, err := f.httpClient().Do(req)
 	if err != nil {
@@ -170,6 +191,9 @@ type stealthDoer interface {
 type StealthFetcher struct {
 	Client    stealthDoer
 	UserAgent string
+	// Cookie, when non-empty, is sent as the cookie header to x.com / twitter.com
+	// hosts only (see cookieHostOK). Never logged.
+	Cookie string
 }
 
 // Fetch issues a GET via the BrowserClient and returns the body, erroring on a
@@ -189,12 +213,84 @@ func (f *StealthFetcher) Fetch(ctx context.Context, rawURL string) ([]byte, erro
 		"Accept":          acceptHeader,
 		"Accept-Language": acceptLangHeader,
 	}
+	if f.Cookie != "" {
+		if u, perr := url.Parse(rawURL); perr == nil && cookieHostOK(u.Hostname()) {
+			headers["cookie"] = f.Cookie
+		}
+	}
 	body, _, status, err := f.Client.DoCtx(ctx, http.MethodGet, rawURL, headers, nil)
 	if err != nil {
 		return nil, fmt.Errorf("stealth fetch %s: %w", rawURL, err)
 	}
 	if status != http.StatusOK {
 		return nil, fmt.Errorf("stealth fetch %s: HTTP %d", rawURL, status)
+	}
+	return body, nil
+}
+
+// Poster is the optional capability a Fetcher implements to submit the
+// x.com/x/migrate form some warm pages redirect through (see FetchPage).
+type Poster interface {
+	PostForm(ctx context.Context, rawURL string, form url.Values) ([]byte, error)
+}
+
+// PostForm submits form as application/x-www-form-urlencoded and returns the
+// body, erroring on a non-200 status. Same host allowlist as Fetch.
+func (f *HTTPFetcher) PostForm(ctx context.Context, rawURL string, form url.Values) ([]byte, error) {
+	if !f.skipInitialHostCheck {
+		if u, perr := url.Parse(rawURL); perr != nil {
+			return nil, fmt.Errorf("parse url %s: %w", rawURL, perr)
+		} else if u.Scheme != "https" || !allowedBundleHost(u.Hostname()) {
+			return nil, fmt.Errorf("refusing to post to disallowed target %s://%s", u.Scheme, u.Host)
+		}
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, rawURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, fmt.Errorf("new request %s: %w", rawURL, err)
+	}
+	f.setHeaders(req)
+	req.Header.Set("Content-Type", formContentType)
+	if f.Cookie != "" && cookieHostOK(req.URL.Hostname()) {
+		req.Header.Set("Cookie", f.Cookie)
+	}
+	resp, err := f.httpClient().Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("post %s: %w", rawURL, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("post %s: HTTP %d", rawURL, resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBundleBytes))
+	if err != nil {
+		return nil, fmt.Errorf("read body %s: %w", rawURL, err)
+	}
+	return body, nil
+}
+
+// PostForm submits form through the BrowserClient (same contract as Fetch).
+func (f *StealthFetcher) PostForm(ctx context.Context, rawURL string, form url.Values) ([]byte, error) {
+	ua := f.UserAgent
+	if ua == "" {
+		ua = DefaultUserAgent
+	}
+	headers := map[string]string{
+		"User-Agent":      ua,
+		"Accept":          acceptHeader,
+		"Accept-Language": acceptLangHeader,
+		"Content-Type":    formContentType,
+	}
+	if f.Cookie != "" {
+		if u, perr := url.Parse(rawURL); perr == nil && cookieHostOK(u.Hostname()) {
+			headers["cookie"] = f.Cookie
+		}
+	}
+	body, _, status, err := f.Client.DoCtx(ctx, http.MethodPost, rawURL, headers, strings.NewReader(form.Encode()))
+	if err != nil {
+		return nil, fmt.Errorf("stealth post %s: %w", rawURL, err)
+	}
+	if status != http.StatusOK {
+		return nil, fmt.Errorf("stealth post %s: HTTP %d", rawURL, status)
 	}
 	return body, nil
 }
