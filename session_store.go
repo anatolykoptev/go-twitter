@@ -26,10 +26,27 @@ const sessionStoreTimeout = 5 * time.Second
 
 // Session is the persisted credential pair of one account. The JSON tags are
 // the on-disk format of FileSessionStore and are kept stable.
+//
+// String and LogValue redact the tokens so a Session printed or logged by
+// accident does not leak them; JSON marshalling is unaffected.
 type Session struct {
 	AuthToken string    `json:"auth_token"`
 	CT0       string    `json:"ct0"`
 	SavedAt   time.Time `json:"saved_at"`
+}
+
+// String implements fmt.Stringer with the tokens redacted.
+func (s Session) String() string {
+	return fmt.Sprintf("Session{AuthToken:[redacted] CT0:[redacted] SavedAt:%s}", s.SavedAt.Format(time.RFC3339))
+}
+
+// LogValue implements slog.LogValuer with the tokens redacted.
+func (s Session) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("auth_token", "[redacted]"),
+		slog.String("ct0", "[redacted]"),
+		slog.Time("saved_at", s.SavedAt),
+	)
 }
 
 // SessionStore persists per-account sessions (auth_token + ct0) across process
@@ -38,6 +55,14 @@ type Session struct {
 // The client never lets a store failure fail an API request: errors are logged
 // (username only, never tokens) and the request continues. Every call carries a
 // context bounded to a few seconds.
+//
+// Implementations MUST honour ctx: the client bounds every call with a 5s
+// timeout and calls Save synchronously on the request path right after a ct0
+// rotation, so a store that ignores ctx stalls requests. Save is last-write-wins;
+// the client sets Session.SavedAt (stores may compare it). Load must return
+// ErrSessionNotFound for a miss; any other Load error is NOT treated as a miss:
+// an account without provided credentials then fails instead of logging in
+// with a password, so a flaky store cannot cause a login storm.
 //
 // Session lifetime is the store's concern: the client applies no TTL of its
 // own. FileSessionStore honours ClientConfig.SessionTTL; a database-backed
@@ -62,7 +87,8 @@ type FileSessionStore struct {
 	// Dir is the session directory. Empty means ~/.go-twitter/sessions.
 	Dir string
 	// TTL expires sessions older than this on Load (reported as
-	// ErrSessionNotFound). Zero or negative disables expiry.
+	// ErrSessionNotFound. TTL <= 0 means no expiry; note NewClient defaults
+	// ClientConfig.SessionTTL 0 to 24h before building the default store.
 	TTL time.Duration
 }
 
@@ -186,23 +212,34 @@ func (c *Client) sessionStore() SessionStore {
 	return &FileSessionStore{Dir: c.cfg.SessionDir, TTL: c.cfg.SessionTTL}
 }
 
-// loadSession returns the stored credentials for acc, or empty strings when
-// there are none, the store failed, or acc holds leased credentials (which never
-// touch the store). Store errors are logged, never returned.
-func (c *Client) loadSession(acc *Account) (authToken, ct0 string) {
+// sessionLoadedMsg keeps the historical "loaded session from disk" log line for
+// the default file store (dashboards grep it); other stores say "store".
+func (c *Client) sessionLoadedMsg() string {
+	if _, ok := c.sessionStore().(*FileSessionStore); ok {
+		return "loaded session from disk"
+	}
+	return "loaded session from store"
+}
+
+// loadSession returns the stored credentials for acc. A miss
+// (ErrSessionNotFound) and leased accounts (which never touch the store) yield
+// empty strings and a nil error. Any other store error is logged (username
+// only) and returned: the stored state is unknown, which is not a miss.
+func (c *Client) loadSession(acc *Account) (authToken, ct0 string, err error) {
 	if acc.credsAuthoritative {
-		return "", ""
+		return "", "", nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), sessionStoreTimeout)
 	defer cancel()
 	s, err := c.sessionStore().Load(ctx, acc.Username)
 	if err != nil {
-		if !errors.Is(err, ErrSessionNotFound) {
-			slog.Warn("error loading session", slog.String("user", acc.Username), slog.Any("error", err))
+		if errors.Is(err, ErrSessionNotFound) {
+			return "", "", nil
 		}
-		return "", ""
+		slog.Warn("error loading session", slog.String("user", acc.Username), slog.Any("error", err))
+		return "", "", err
 	}
-	return s.AuthToken, s.CT0
+	return s.AuthToken, s.CT0, nil
 }
 
 // saveSession persists acc's credentials. Leased (credsAuthoritative) accounts
@@ -221,14 +258,16 @@ func (c *Client) saveSession(acc *Account, authToken, ct0 string) {
 }
 
 // deleteSession removes acc's stored session (relogin). Leased accounts are
-// skipped; failures are logged.
-func (c *Client) deleteSession(acc *Account) {
+// skipped; failures are logged and returned.
+func (c *Client) deleteSession(acc *Account) error {
 	if acc.credsAuthoritative {
-		return
+		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), sessionStoreTimeout)
 	defer cancel()
 	if err := c.sessionStore().Delete(ctx, acc.Username); err != nil {
 		slog.Warn("session delete failed", slog.String("user", acc.Username), slog.Any("error", err))
+		return err
 	}
+	return nil
 }

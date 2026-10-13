@@ -12,6 +12,12 @@ import (
 	"testing"
 	"time"
 
+	"bytes"
+	"fmt"
+	"log/slog"
+	"sync/atomic"
+
+	stealth "github.com/anatolykoptev/go-stealth"
 	"github.com/anatolykoptev/go-twitter/social"
 	"github.com/anatolykoptev/go-twitter/xtid"
 	"github.com/stretchr/testify/assert"
@@ -28,6 +34,9 @@ type recordingStore struct {
 	saves   []savedCall
 	deletes []string
 	saveErr error
+	loadErr error
+	delErr  error
+	ops     []string // call order: "load:<u>", "save:<u>", "delete:<u>"
 }
 
 type savedCall struct {
@@ -41,6 +50,10 @@ func (r *recordingStore) Load(_ context.Context, u string) (Session, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.loads = append(r.loads, u)
+	r.ops = append(r.ops, "load:"+u)
+	if r.loadErr != nil {
+		return Session{}, r.loadErr
+	}
 	s, ok := r.data[u]
 	if !ok {
 		return Session{}, ErrSessionNotFound
@@ -52,6 +65,7 @@ func (r *recordingStore) Save(_ context.Context, u string, s Session) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.saves = append(r.saves, savedCall{u, s})
+	r.ops = append(r.ops, "save:"+u)
 	if r.saveErr != nil {
 		return r.saveErr
 	}
@@ -63,6 +77,10 @@ func (r *recordingStore) Delete(_ context.Context, u string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.deletes = append(r.deletes, u)
+	r.ops = append(r.ops, "delete:"+u)
+	if r.delErr != nil {
+		return r.delErr
+	}
 	delete(r.data, u)
 	return nil
 }
@@ -232,4 +250,96 @@ func TestFileSessionStore_TTL(t *testing.T) {
 	require.NoError(t, fresh.Delete(ctx, "x"), "deleting a missing session is not an error")
 	_, err = fresh.Load(ctx, "x")
 	assert.ErrorIs(t, err, ErrSessionNotFound)
+}
+
+// failingClient answers 500 to everything: a login attempt against it fails fast.
+func failingClient(t *testing.T, store SessionStore) *Client {
+	t.Helper()
+	return &Client{cfg: ClientConfig{SessionStore: store}, client: startFakeX(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	})}
+}
+
+// A non-NotFound Load error leaves the stored state unknown: a password-only
+// account must NOT fall through to a login (no login storm), provided
+// credentials are used as-is.
+func TestSessionStore_LoadErrorDoesNotTriggerLogin(t *testing.T) {
+	var proxyHits atomic.Int32
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		proxyHits.Add(1)
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	t.Cleanup(proxy.Close)
+	bc, err := stealth.NewClient(stealth.WithProxy(proxy.URL), stealth.WithoutSSRFGuard())
+	require.NoError(t, err)
+
+	boom := errors.New("db timeout")
+	rec := newRecordingStore()
+	rec.loadErr = boom
+	c := &Client{cfg: ClientConfig{SessionStore: rec}}
+
+	err = c.loadOrLogin(&Account{Username: "pwonly", Password: "hunter2"}, bc)
+	require.ErrorIs(t, err, boom)
+	assert.Zero(t, proxyHits.Load(), "store error must not cause a password login")
+
+	prov := &Account{Username: "prov", Password: "pw", AuthToken: "tokP", CT0: "ct0P"}
+	require.NoError(t, c.loadOrLogin(prov, bc), "provided credentials must be used when the store errors")
+	tok, ct0, _ := prov.Credentials()
+	assert.Equal(t, "tokP", tok)
+	assert.Equal(t, "ct0P", ct0)
+	assert.Empty(t, rec.saves, "no save while the store state is unknown")
+	assert.Zero(t, proxyHits.Load())
+}
+
+// relogin deletes BEFORE it loads, so the stale session is never re-adopted.
+func TestSessionStore_ReloginDeletesBeforeLoad(t *testing.T) {
+	rec := newRecordingStore()
+	rec.data["u"] = Session{AuthToken: "old", CT0: "oldct0", SavedAt: time.Now()}
+	c := failingClient(t, rec)
+	acc := &Account{Username: "u", Password: "pw"}
+
+	_ = c.relogin(acc)
+	require.GreaterOrEqual(t, len(rec.ops), 1)
+	assert.Equal(t, "delete:u", rec.ops[0], "Delete must precede any Load; got %v", rec.ops)
+	tok, _, _ := acc.Credentials()
+	assert.NotEqual(t, "old", tok, "relogin adopted the stale session")
+}
+
+// If Delete fails, relogin must not reload from the store (the old session
+// would still be there): it goes straight to the password login.
+func TestSessionStore_ReloginAfterFailedDeleteSkipsLoad(t *testing.T) {
+	rec := newRecordingStore()
+	rec.data["u"] = Session{AuthToken: "old", CT0: "oldct0", SavedAt: time.Now()}
+	rec.delErr = errors.New("delete failed")
+	c := failingClient(t, rec)
+	acc := &Account{Username: "u", Password: "pw"}
+
+	_ = c.relogin(acc)
+	assert.Equal(t, []string{"delete:u"}, rec.ops, "no Load may follow a failed Delete")
+	tok, _, _ := acc.Credentials()
+	assert.NotEqual(t, "old", tok, "relogin adopted the old token after a failed Delete")
+}
+
+// A leased (credsAuthoritative) account never touches the store on relogin.
+func TestSessionStore_LeasedReloginMakesZeroStoreCalls(t *testing.T) {
+	rec := newRecordingStore()
+	c := failingClient(t, rec)
+	acc := &Account{Username: "leased", Password: "pw", AuthToken: "t", CT0: "c", credsAuthoritative: true}
+
+	_ = c.relogin(acc)
+	assert.Empty(t, rec.ops, "leased account relogin touched the store: %v", rec.ops)
+}
+
+func TestSession_RedactsTokens(t *testing.T) {
+	s := Session{AuthToken: "SECRETTOKEN", CT0: "SECRETCT0", SavedAt: time.Now()}
+	for _, out := range []string{fmt.Sprintf("%v", s), fmt.Sprintf("%+v", s), fmt.Sprintf("%s", s), s.String()} {
+		assert.NotContains(t, out, "SECRET")
+	}
+	var buf bytes.Buffer
+	slog.New(slog.NewTextHandler(&buf, nil)).Info("x", slog.Any("session", s))
+	slog.New(slog.NewJSONHandler(&buf, nil)).Info("x", slog.Any("session", s))
+	assert.NotContains(t, buf.String(), "SECRET")
+	b, err := json.Marshal(s)
+	require.NoError(t, err)
+	assert.Contains(t, string(b), "SECRETTOKEN", "JSON persistence format must be unaffected")
 }

@@ -257,7 +257,7 @@ func (s dbStore) Delete(ctx context.Context, user string) error {
 c, err := twitter.NewClient(twitter.ClientConfig{Accounts: accs, SessionStore: dbStore{db}})
 ```
 
-Contract: `Load` returns `ErrSessionNotFound` on a miss. Expiry is the store's job: the client applies no TTL, and `SessionTTL` only configures the default file store. Every call gets a context bounded to 5s, and a store error is logged (username only) but never fails an API request. Stores must be safe for concurrent use. Accounts leased by the `*WithSocial` helpers never touch the store.
+Contract: `Load` returns `ErrSessionNotFound` on a miss. Expiry is the store's job: the client applies no TTL, and `SessionTTL` only configures the default file store. Every call gets a context bounded to 5s, and a store error is logged (username only) but never fails an API request. Stores must be safe for concurrent use. Only credentials leased by the `*WithSocial` helpers bypass the store; static-config accounts still load the stored session first. A `Load` error other than `ErrSessionNotFound` is not treated as a miss: provided credentials are used as-is, and an account with none fails instead of logging in with its password.
 
 ## Types
 

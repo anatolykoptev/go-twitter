@@ -45,9 +45,11 @@ func (c *Client) relogin(acc *Account) error {
 	bc := c.clientForAccount(acc)
 
 	acc.SetCredentials("", "")
-	c.deleteSession(acc)
+	// If the stale session could not be deleted, reloading it would adopt the
+	// token that just failed: go straight to the password login instead.
+	delErr := c.deleteSession(acc)
 
-	if err := c.loadOrLogin(acc, bc); err != nil {
+	if err := c.establishCredentials(acc, bc, delErr != nil); err != nil {
 		if rec != nil {
 			rec.RecordFailure(acc.Username)
 		}
@@ -77,18 +79,41 @@ func (c *Client) relogin(acc *Account) error {
 // restart must not fall back to the stale static config token), then provided
 // credentials, then a fresh password login.
 func (c *Client) loadOrLogin(acc *Account, client *stealth.BrowserClient) error {
+	return c.establishCredentials(acc, client, false)
+}
+
+// establishCredentials is loadOrLogin with an escape hatch: skipStore bypasses
+// the stored-session read (used by relogin after a failed Delete).
+//
+// A store Load error other than ErrSessionNotFound means the stored state is
+// unknown. Provided credentials are then used as-is (nothing is saved); with
+// none, the account fails rather than falling through to a password login,
+// so a flaky store cannot trigger a login storm against x.com.
+func (c *Client) establishCredentials(acc *Account, client *stealth.BrowserClient, skipStore bool) error {
 	if acc.credsAuthoritative && acc.AuthToken != "" && acc.CT0 != "" {
 		acc.ct0RefreshedAt = time.Now()
 		slog.Info("using leased credentials", slog.String("user", acc.Username))
 		return nil
 	}
 
-	authToken, ct0 := c.loadSession(acc)
+	var authToken, ct0 string
+	if !skipStore {
+		var loadErr error
+		authToken, ct0, loadErr = c.loadSession(acc)
+		if loadErr != nil {
+			if acc.AuthToken != "" && acc.CT0 != "" {
+				acc.ct0RefreshedAt = time.Now()
+				slog.Info("using provided credentials (session store unavailable)", slog.String("user", acc.Username))
+				return nil
+			}
+			return fmt.Errorf("session store unavailable for %s, not logging in: %w", acc.Username, loadErr)
+		}
+	}
 	if authToken != "" && ct0 != "" {
 		acc.AuthToken = authToken
 		acc.CT0 = ct0
 		acc.ct0RefreshedAt = time.Now()
-		slog.Info("loaded session from store", slog.String("user", acc.Username), slog.String("sample_key", "session_load"))
+		slog.Info(c.sessionLoadedMsg(), slog.String("user", acc.Username), slog.String("sample_key", "session_load"))
 		return nil
 	}
 
