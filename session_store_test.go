@@ -332,7 +332,7 @@ func TestSessionStore_LeasedReloginMakesZeroStoreCalls(t *testing.T) {
 
 func TestSession_RedactsTokens(t *testing.T) {
 	s := Session{AuthToken: "SECRETTOKEN", CT0: "SECRETCT0", SavedAt: time.Now()}
-	for _, out := range []string{fmt.Sprintf("%v", s), fmt.Sprintf("%+v", s), fmt.Sprintf("%s", s), s.String()} {
+	for _, out := range []string{fmt.Sprintf("%#v", s), fmt.Sprintf("%v", s), fmt.Sprintf("%+v", s), fmt.Sprintf("%s", s), s.String()} {
 		assert.NotContains(t, out, "SECRET")
 	}
 	var buf bytes.Buffer
@@ -342,4 +342,52 @@ func TestSession_RedactsTokens(t *testing.T) {
 	b, err := json.Marshal(s)
 	require.NoError(t, err)
 	assert.Contains(t, string(b), "SECRETTOKEN", "JSON persistence format must be unaffected")
+}
+
+// corruptSession writes a truncated JSON file for the user and returns its path.
+func corruptSession(t *testing.T, dir, user string) string {
+	t.Helper()
+	p := filepath.Join(dir, user+".json")
+	require.NoError(t, os.WriteFile(p, []byte(`{"auth_token":"tok`), 0600))
+	return p
+}
+
+// A corrupt default-store file is a miss, as before: a password-only account
+// proceeds to the login attempt instead of failing permanently.
+func TestFileSessionStore_CorruptFileReachesLogin(t *testing.T) {
+	var proxyHits atomic.Int32
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		proxyHits.Add(1)
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	t.Cleanup(proxy.Close)
+	bc, err := stealth.NewClient(stealth.WithProxy(proxy.URL), stealth.WithoutSSRFGuard())
+	require.NoError(t, err)
+
+	dir := t.TempDir()
+	corruptSession(t, dir, "pwonly")
+	c := &Client{cfg: ClientConfig{SessionStore: &FileSessionStore{Dir: dir}}}
+
+	_ = c.loadOrLogin(&Account{Username: "pwonly", Password: "hunter2"}, bc)
+	assert.GreaterOrEqual(t, proxyHits.Load(), int32(1), "corrupt file must be a miss that reaches the login attempt")
+}
+
+// A corrupt file with provided credentials: the credentials are used AND the
+// file is overwritten with them.
+func TestFileSessionStore_CorruptFileOverwrittenWithProvidedCreds(t *testing.T) {
+	dir := t.TempDir()
+	p := corruptSession(t, dir, "prov")
+	c := &Client{cfg: ClientConfig{SessionStore: &FileSessionStore{Dir: dir}}}
+	acc := &Account{Username: "prov", Password: "pw", AuthToken: "tokP", CT0: "ct0P"}
+
+	require.NoError(t, c.loadOrLogin(acc, nil))
+	tok, _, _ := acc.Credentials()
+	assert.Equal(t, "tokP", tok)
+
+	raw, err := os.ReadFile(p)
+	require.NoError(t, err)
+	var got Session
+	require.NoError(t, json.Unmarshal(raw, &got), "corrupt file must have been repaired")
+	assert.Equal(t, "tokP", got.AuthToken)
+	assert.Equal(t, "ct0P", got.CT0)
 }

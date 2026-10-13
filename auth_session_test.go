@@ -239,7 +239,7 @@ func TestSessionPath_RejectsTraversal(t *testing.T) {
 		require.ErrorIs(t, err, errInvalidSessionUsername, "username %q", u)
 		assert.Error(t, fileSave(dir, u, "t", "c"), "save %q", u)
 		_, lerr := (&FileSessionStore{Dir: dir, TTL: time.Hour}).Load(context.Background(), u)
-		assert.Error(t, lerr, "load %q", u)
+		assert.ErrorIs(t, lerr, ErrSessionNotFound, "load %q is a miss, as before the store was pluggable", u)
 	}
 	_, err := os.Stat(filepath.Join(filepath.Dir(dir), "evil.json"))
 	assert.True(t, os.IsNotExist(err), "traversal wrote outside the session dir")

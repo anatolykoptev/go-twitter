@@ -40,6 +40,9 @@ func (s Session) String() string {
 	return fmt.Sprintf("Session{AuthToken:[redacted] CT0:[redacted] SavedAt:%s}", s.SavedAt.Format(time.RFC3339))
 }
 
+// GoString implements fmt.GoStringer so %#v does not leak the tokens.
+func (s Session) GoString() string { return s.String() }
+
 // LogValue implements slog.LogValuer with the tokens redacted.
 func (s Session) LogValue() slog.Value {
 	return slog.GroupValue(
@@ -137,12 +140,19 @@ func (f *FileSessionStore) Save(_ context.Context, username string, s Session) e
 	return nil
 }
 
-// Load implements SessionStore. A missing or TTL-expired file yields
-// ErrSessionNotFound.
+// Load implements SessionStore. A missing, TTL-expired or undecodable
+// (truncated/corrupt) file yields ErrSessionNotFound, as does a username that
+// is not a valid file name: the file holds nothing usable, and treating it as a
+// miss lets the client log in and overwrite it (Save re-creates a corrupt file;
+// for an invalid name Save still rejects it and logs, exactly as before the
+// store was pluggable). Genuine I/O failures, permission denied included, are
+// returned: the file may hold a newer valid session that cannot be read, and a
+// Save would most likely fail too, so the client must not log in blindly.
 func (f *FileSessionStore) Load(_ context.Context, username string) (Session, error) {
 	path, err := f.path(username)
 	if err != nil {
-		return Session{}, err
+		slog.Warn("session load skipped", slog.String("user", username), slog.Any("error", err))
+		return Session{}, ErrSessionNotFound
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -153,7 +163,9 @@ func (f *FileSessionStore) Load(_ context.Context, username string) (Session, er
 	}
 	var s Session
 	if err := json.Unmarshal(data, &s); err != nil {
-		return Session{}, err
+		slog.Warn("session file undecodable, treating as missing",
+			slog.String("user", username), slog.String("path", path), slog.Any("error", err))
+		return Session{}, ErrSessionNotFound
 	}
 	if f.TTL > 0 && time.Since(s.SavedAt) > f.TTL {
 		slog.Debug("session expired", slog.String("user", username))
