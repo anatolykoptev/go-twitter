@@ -98,6 +98,18 @@ func NewManager(f bundle.Fetcher) *Manager {
 	}
 }
 
+// SetRefreshInterval overrides how long a built ClientTransaction is reused
+// before the next call re-initialises it (default 30 minutes). A non-positive
+// d is ignored.
+func (m *Manager) SetRefreshInterval(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	m.mu.Lock()
+	m.refreshInterval = d
+	m.mu.Unlock()
+}
+
 // SetInitFailedHook registers fn to be called once per ok->failed transition
 // (never per request). It runs outside the manager's locks.
 func (m *Manager) SetInitFailedHook(fn func(error)) {

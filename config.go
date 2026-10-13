@@ -5,6 +5,7 @@ import (
 
 	"github.com/anatolykoptev/go-stealth/ratelimit"
 	"github.com/anatolykoptev/go-twitter/captcha"
+	"github.com/anatolykoptev/go-twitter/xtid"
 	"go.opentelemetry.io/otel/metric"
 )
 
@@ -106,6 +107,18 @@ type ClientConfig struct {
 	// true only the anti-fingerprint jitter applies. Default: false (pacing
 	// enabled with safe defaults).
 	AccountPaceDisabled bool
+
+	// sharedXtid, when set, replaces the per-client xtid manager so key
+	// material, the refresh schedule, the per-kind negative cache, the init
+	// singleflight and the init-failed alert survive across short-lived clients
+	// (the *WithSocial path). The manager's own hook owns the alert; NewClient
+	// does not overwrite it. Unexported: package-internal wiring, no public API.
+	sharedXtid *xtid.Manager
+
+	// skipPoolGauge suppresses the twitter.client.pool.accounts callback. The
+	// gauge has no per-client attribute, so a one-account per-call client would
+	// overwrite the series of the long-lived pool (see docs/metrics.md).
+	skipPoolGauge bool
 }
 
 // defaults fills in zero-value config fields with sensible defaults.

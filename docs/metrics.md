@@ -121,6 +121,23 @@ with `SetAutoReloginGate` - refused the attempt).
 Incremented at the same site that emits the `proxy.down` pool alert: a
 proxy-layer failure that puts an account's proxy into backoff.
 
+## The `*WithSocial` helpers
+
+`SearchWithSocial`, `GetUserTweetsWithSocial` and the other `*WithSocial`
+helpers take no `ClientConfig`; each call builds a short-lived one-account
+client. Supply the `MeterProvider` once, at start-up:
+
+```go
+twitter.SetSocialMeterProvider(mp) // nil restores otel.GetMeterProvider()
+```
+
+Per-call clients record `request.duration`, `timeline.freshness`, `relogins`
+and `proxy.failures` to that provider. They deliberately do **not** register
+`twitter.client.pool.accounts`: the gauge has no per-client attribute, so a
+one-account per-call client would overwrite the series of a long-lived pool.
+Each per-call client is closed when its call returns. If you also run a
+long-lived `NewClient`, give it the same provider; its gauge is unaffected.
+
 ## Wiring a Prometheus exporter
 
 ```go

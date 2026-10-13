@@ -77,11 +77,14 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	// bundle. The shared-client fetcher below is only the unauthenticated fallback.
 	// On failure we degrade — x-client-transaction-id is simply omitted — and the
 	// alert fires once per ok->failed transition, never per request.
-	fetcher := &bundle.StealthFetcher{Client: bc, UserAgent: defaultUserAgent}
-	mgr := xtid.NewManager(fetcher)
-	mgr.SetInitFailedHook(func(err error) {
-		alertHook("xtid.init_failed", map[string]any{"error": err.Error()})
-	})
+	mgr := cfg.sharedXtid
+	if mgr == nil {
+		fetcher := &bundle.StealthFetcher{Client: bc, UserAgent: defaultUserAgent}
+		mgr = xtid.NewManager(fetcher)
+		mgr.SetInitFailedHook(func(err error) {
+			alertHook("xtid.init_failed", map[string]any{"error": err.Error()})
+		})
+	}
 
 	nonResponsiveBackoff := pool.BackoffConfig{
 		InitialWait: cfg.NonResponsiveCooldown,
@@ -132,7 +135,9 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		alertHook:            alertHook,
 		metrics:              newClientMetrics(cfg.MeterProvider),
 	}
-	c.registerPoolGauge(cfg.MeterProvider)
+	if !cfg.skipPoolGauge {
+		c.registerPoolGauge(cfg.MeterProvider)
+	}
 
 	// Default per-account relogin circuit breaker: a transient login outage must
 	// not repeatedly destroy still-valid sessions or storm the WAF-blocked
