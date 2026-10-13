@@ -25,6 +25,7 @@ const (
 	metricRequestDuration = "twitter.client.request.duration"
 	metricFreshness       = "twitter.client.timeline.freshness"
 	metricPoolAccounts    = "twitter.client.pool.accounts"
+	metricPoolWait        = "twitter.client.pool.wait.duration"
 	metricRelogins        = "twitter.client.relogins"
 	metricProxyFailures   = "twitter.client.proxy.failures"
 
@@ -32,6 +33,7 @@ const (
 	attrOperation    = "twitter.operation"
 	attrOutcome      = "twitter.outcome"
 	attrAccountState = "twitter.account.state"
+	attrResult       = "twitter.result"
 )
 
 // Request/relogin outcome values (twitter.outcome). Bounded: request outcomes
@@ -58,6 +60,15 @@ const (
 	outcomeBreakerOpen = "breaker_open"
 )
 
+// Pool-wait results (twitter.result) reported by
+// twitter.client.pool.wait.duration. Exhaustive over the ways a waited
+// nextAccountWithWait call can end.
+const (
+	waitResultAcquired = "acquired" // the wait ended with a usable account
+	waitResultGaveUp   = "gave_up"  // waited, then no account could serve the endpoint within budget
+	waitResultCtxDone  = "ctx_done" // the caller's context ended the wait
+)
+
 // Account states reported by twitter.client.pool.accounts. Mutually exclusive
 // and exhaustive: every pool account is in exactly one.
 const (
@@ -76,6 +87,8 @@ var (
 	requestDurationBuckets = []float64{0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30}
 	// freshnessBuckets (seconds) resolve 0.5 s - 60 s well, with a tail to 1 h.
 	freshnessBuckets = []float64{0.5, 1, 2, 3, 5, 8, 12, 20, 30, 45, 60, 120, 300, 900, 3600}
+	// poolWaitBuckets (seconds) resolve a 50 ms - 5 min pool wait (poolWaitCap).
+	poolWaitBuckets = []float64{0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300}
 )
 
 // clientMetrics holds the instruments. A nil *clientMetrics is valid and
@@ -83,6 +96,7 @@ var (
 type clientMetrics struct {
 	requestDuration metric.Float64Histogram
 	freshness       metric.Float64Histogram
+	poolWait        metric.Float64Histogram
 	relogins        metric.Int64Counter
 	proxyFailures   metric.Int64Counter
 	now             func() time.Time // injectable clock for freshness
@@ -138,6 +152,13 @@ func newClientMetrics(mp metric.MeterProvider) *clientMetrics {
 		metric.WithExplicitBucketBoundaries(freshnessBuckets...)); err != nil {
 		fail(metricFreshness, err)
 		m.freshness = noop.Float64Histogram{}
+	}
+	if m.poolWait, err = meter.Float64Histogram(metricPoolWait,
+		metric.WithUnit("s"),
+		metric.WithDescription("Time a request spent waiting for a usable pool account, by operation and wait result."),
+		metric.WithExplicitBucketBoundaries(poolWaitBuckets...)); err != nil {
+		fail(metricPoolWait, err)
+		m.poolWait = noop.Float64Histogram{}
 	}
 	if m.relogins, err = meter.Int64Counter(metricRelogins,
 		metric.WithUnit("{relogin}"),
@@ -272,6 +293,19 @@ func (m *clientMetrics) recordFreshness(endpoint string, tweets []*Tweet) {
 		age = 0 // local clock behind X's: clamp rather than record a negative age
 	}
 	m.freshness.Record(context.Background(), age, metric.WithAttributes(attribute.String(attrOperation, endpoint)))
+}
+
+// recordPoolWait records the total time one call spent inside
+// nextAccountWithWait actually waiting (sleeping for a usable account), by
+// operation and wait result. Calls that never waited record nothing.
+func (m *clientMetrics) recordPoolWait(endpoint string, d time.Duration, result string) {
+	if m == nil {
+		return
+	}
+	m.poolWait.Record(context.Background(), d.Seconds(), metric.WithAttributes(
+		attribute.String(attrOperation, endpoint),
+		attribute.String(attrResult, result),
+	))
 }
 
 func (m *clientMetrics) recordRelogin(outcome string) {

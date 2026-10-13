@@ -471,6 +471,10 @@ func (c *Client) doMediaRequest(ctx context.Context, acc *Account, method, urlSt
 		// 2xx — check the body for Twitter error codes.
 		cls := classifyError(body, respHdrs)
 		if cls == errRateLimited {
+			// Same header-less-88 escalation as doPoolRequest.
+			if acc.noteRateLimited88(respHdrs) >= headerless88BanThreshold {
+				return nil, c.escalateHeaderless88(acc, epUploadMedia, body)
+			}
 			// Code 88 with an exhausted window: the account is healthy. Do not
 			// charge it a failure; block this endpoint until the reset (as doPOST).
 			c.recordAPICall(epUploadMedia, false, true)

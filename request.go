@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"regexp"
 	"strings"
 	"time"
@@ -32,6 +33,16 @@ func (c *Client) doPoolPOST(ctx context.Context, endpoint, url string, payload [
 // A var only so tests can shrink it.
 var poolWaitCap = 5 * time.Minute
 
+// poolWakeJitterMax bounds the random delay added to a pool wait before
+// retrying selection, so N waiters parked on one freed account do not all
+// re-select at the same instant. 250 ms spreads the herd while staying far
+// under the per-account pace (~1 s) and any realistic endpoint-limit wait.
+const poolWakeJitterMax = 250 * time.Millisecond
+
+// poolWakeJitter samples the actual per-wait delay in [0, poolWakeJitterMax).
+// A var (like poolWaitCap) only so tests can lock it.
+var poolWakeJitter = func() time.Duration { return rand.N(poolWakeJitterMax) }
+
 // nextAccountWithWait selects an account for an auth-only endpoint, waiting
 // (context-aware, never past deadline) when every account is unusable for now.
 // The caller computes deadline once per request, so retries share one budget.
@@ -42,9 +53,26 @@ var poolWaitCap = 5 * time.Minute
 // gives up, this waits until the earliest moment an account could serve the
 // endpoint (see nextUsableAt) and retries. With no active account the original
 // error is returned unchanged.
-func (c *Client) nextAccountWithWait(ctx context.Context, endpoint string, filter func(*Account) bool, deadline time.Time) (*Account, error) {
+func (c *Client) nextAccountWithWait(ctx context.Context, endpoint string, filter func(*Account) bool, deadline time.Time) (acc *Account, err error) {
+	// twitter.client.pool.wait.duration: one sample per call that actually
+	// waited (slept for a usable account), labelled by how the wait ended.
+	var waited time.Duration
+	defer func() {
+		if waited <= 0 {
+			return
+		}
+		result := waitResultAcquired
+		if err != nil {
+			if ctx.Err() != nil {
+				result = waitResultCtxDone
+			} else {
+				result = waitResultGaveUp
+			}
+		}
+		c.metrics.recordPoolWait(endpoint, waited, result)
+	}()
 	for {
-		acc, err := c.pool.NextWithWait(ctx, filter, time.Until(deadline))
+		acc, err = c.pool.NextWithWait(ctx, filter, time.Until(deadline))
 		if err == nil {
 			return acc, nil
 		}
@@ -59,13 +87,24 @@ func (c *Client) nextAccountWithWait(ctx context.Context, endpoint string, filte
 		if wait <= 0 || wait > time.Until(deadline) {
 			return nil, err
 		}
+		// Jitter the wake: N waiters parked on one freed account must not
+		// re-select at the same instant. The jitter is added before the budget
+		// clamp, so the sleep never extends past deadline (poolWaitCap); the
+		// ctx select bounds it by the caller's context separately.
+		wait += poolWakeJitter()
+		if budget := time.Until(deadline); wait > budget {
+			wait = budget
+		}
 		slog.Debug("all active accounts limited, waiting",
 			slog.String("endpoint", endpoint), slog.Duration("wait", wait))
+		start := time.Now()
 		t := time.NewTimer(wait)
 		select {
 		case <-t.C:
+			waited += time.Since(start)
 		case <-ctx.Done():
 			t.Stop()
+			waited += time.Since(start)
 			return nil, ctx.Err()
 		}
 	}
@@ -314,6 +353,13 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 			continue
 
 		case errRateLimited:
+			// A run of consecutive header-less 88s is the signature of a ban
+			// that omits the rate-limit headers, not of per-endpoint limiting:
+			// escalate past the threshold instead of marking the endpoint again.
+			if acc.noteRateLimited88(respHdrs) >= headerless88BanThreshold {
+				lastErr = c.escalateHeaderless88(acc, endpoint, body)
+				continue
+			}
 			// Code 88 inside a 200 body with an exhausted window: a plain
 			// per-endpoint rate limit. The account is healthy, so block only this
 			// endpoint until the reset instead of benching it for BanCooldown.
@@ -642,6 +688,10 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 			}
 			continue
 		case errRateLimited:
+			// Same header-less-88 escalation as doPoolRequest.
+			if acc.noteRateLimited88(respHdrs) >= headerless88BanThreshold {
+				return nil, c.escalateHeaderless88(acc, endpoint, body)
+			}
 			// Code 88 with an exhausted window: the account is healthy, so do not
 			// charge it a failure; block this endpoint until the reset.
 			c.recordAPICall(endpoint, false, true)
@@ -684,6 +734,23 @@ func requiresAuth(endpoint string) bool {
 		return true
 	}
 	return false
+}
+
+// escalateHeaderless88 benches an account whose run of header-less code-88
+// responses reached headerless88BanThreshold: a ban that omits the rate-limit
+// headers. It mirrors the declared-ban (errBanned) arm — BanCooldown soft
+// deactivation, non-rate-limited MetricsHook outcome, IsBanned-satisfying
+// error — so the doPoolRequest, doPOST and doMediaRequest paths all treat the
+// escalation identically. The count restarts at zero, so a reactivated account
+// needs a full fresh run of header-less 88s before it is benched again.
+func (c *Client) escalateHeaderless88(acc *Account, endpoint string, body []byte) *APIError {
+	c.recordAPICall(endpoint, false, false)
+	slog.Warn("account banned (repeated header-less code 88)", slog.String("user", acc.Username))
+	c.pool.SoftDeactivate(acc, c.cfg.BanCooldown)
+	acc.mu.Lock()
+	acc.consecHeaderless88 = 0
+	acc.mu.Unlock()
+	return &APIError{Status: 200, Class: errBanned, Codes: extractErrorCodes(body), Message: "account banned (repeated header-less code 88)"}
 }
 
 // quotedURLRe matches quoted HTTP(S) URLs embedded in error messages. Go's

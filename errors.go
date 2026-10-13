@@ -47,11 +47,36 @@ const (
 // remaining is not explained by the window and is treated as a ban (twscrape
 // queue_client.py does the same). An unparseable header counts as absent.
 func classifyCode88(hdrs map[string]string) errorClass {
-	if n, err := strconv.Atoi(hdrs[xRateLimitRemaining]); err == nil && n > 0 {
+	if n, ok := rateLimitRemaining(hdrs); ok && n > 0 {
 		return errBanned
 	}
 	return errRateLimited
 }
+
+// rateLimitRemaining parses the x-rate-limit-remaining header; ok is false
+// when the header is absent or unparseable. Callers distinguishing "the
+// window explains this response" (header present, any value) from "the
+// response arrived with no rate-limit bookkeeping" must use this — an absent
+// header and a parseable one are NOT interchangeable (see
+// Account.noteRateLimited88).
+func rateLimitRemaining(hdrs map[string]string) (int, bool) {
+	n, err := strconv.Atoi(hdrs[xRateLimitRemaining])
+	if err != nil {
+		return 0, false
+	}
+	return n, true
+}
+
+// headerless88BanThreshold bounds the run of consecutive code-88 responses
+// carrying no parseable x-rate-limit-remaining header that is still tolerated
+// as per-endpoint rate limiting. A banned account answers 88 with NO
+// rate-limit headers on every endpoint: without this escalation it is charged
+// no failure, never benched, and reported as rate_limited — invisible. One
+// header-less 88 can be an endpoint-window quirk (the header genuinely
+// missing); three consecutive with no successful response in between is the
+// ban signature — cheap to reach (one request per count) and short enough to
+// bench a dead account before it burns a full cooldown cycle of retries.
+const headerless88BanThreshold = 3
 
 // classifyError inspects a response body (and its headers, for code 88) for
 // known Twitter error codes.

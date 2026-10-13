@@ -208,6 +208,35 @@ func TestPoolWait_BudgetSharedAcrossAttempts(t *testing.T) {
 	assert.EqualValues(t, 2, fake.hits.Load(), "one wait budget per request: attempt 3 must not get a fresh cap")
 }
 
+// The wake-up jitter spreads waiters parked on one freed account, but it is
+// bounded by the same budget as the wait itself: the jitter is added before
+// the deadline clamp, never after, so a sleep cannot park past poolWaitCap
+// (the ctx select bounds it by the caller's context separately).
+//
+// Mutation: in request.go nextAccountWithWait drop the `wait > budget` clamp
+// after adding the jitter => RED (the call sleeps ~wait+jitter ≈ 700ms, not
+// ~cap).
+func TestPoolWait_JitterStaysInsideBudget(t *testing.T) {
+	origCap, origJitter := poolWaitCap, poolWakeJitter
+	poolWaitCap = 300 * time.Millisecond
+	poolWakeJitter = func() time.Duration { return 500 * time.Millisecond } // deliberately larger than the cap
+	t.Cleanup(func() { poolWaitCap, poolWakeJitter = origCap, origJitter })
+
+	fake := newPoolWaitFake(t)
+	c, accs := newPoolWaitClient(t, 1)
+	// Warm the transport: the first request pays a ~1s one-off setup that
+	// would otherwise eat the measured window.
+	_, _, err := c.doGET(context.Background(), poolWaitEndpoint, fake.url())
+	require.NoError(t, err)
+
+	accs[0].MarkEndpointRateLimited(poolWaitEndpoint, time.Now().Add(200*time.Millisecond))
+	start := time.Now()
+	_, _, err = c.doGET(context.Background(), poolWaitEndpoint, fake.url())
+	require.NoError(t, err)
+	assert.Less(t, time.Since(start), 450*time.Millisecond,
+		"wait+jitter must be clamped to the remaining wait budget, not stacked on top")
+}
+
 // ctx done => the ctx error, even when NextWithWait itself returns its own
 // "all N items are unavailable" (it does not look at ctx before giving up).
 //

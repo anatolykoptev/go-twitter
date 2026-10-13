@@ -21,6 +21,7 @@ metrics.
 | `twitter.client.request.duration` | histogram | `s` | `twitter.operation`, `twitter.outcome` |
 | `twitter.client.timeline.freshness` | histogram | `s` | `twitter.operation` |
 | `twitter.client.pool.accounts` | observable gauge | `{account}` | `twitter.account.state` |
+| `twitter.client.pool.wait.duration` | histogram | `s` | `twitter.operation`, `twitter.result` |
 | `twitter.client.relogins` | counter | `{relogin}` | `twitter.outcome` |
 | `twitter.client.proxy.failures` | counter | `{failure}` | none |
 
@@ -50,7 +51,7 @@ instrumented.
 | `rate_limited` | HTTP 429, or code 88 with `x-rate-limit-remaining` 0 or absent |
 | `auth` | code 32 / 179 / 219, or a bare 401 |
 | `csrf` | code 353 |
-| `banned` | code 88 with `x-rate-limit-remaining` > 0 |
+| `banned` | code 88 with `x-rate-limit-remaining` > 0 (a declared ban; see the escalation note below) |
 | `suspended` | code 64 |
 | `locked` | code 326 |
 | `blocked` | code 161 |
@@ -60,6 +61,17 @@ instrumented.
 | `transport` | the request failed before an HTTP response (timeout, reset, DNS on a direct account, ...) |
 | `proxy` | transport failure that looks like a proxy failure (`isProxyError`) on an attempt made through a per-account proxy; the same gate as `proxy.failures` |
 | `other` | anything else (e.g. 5xx) |
+
+**Header-less-88 escalation.** Three consecutive code-88 responses carrying no
+parseable `x-rate-limit-remaining` (with no successful response in between) are
+a ban signature: the account is soft-deactivated for `BanCooldown` and the call
+fails with an `IsBanned` error. Each of those responses is still recorded here
+as `rate_limited` — this instrument reports the per-response truth, and a
+header-less 88 is per-response a rate limit — so the escalation is **not**
+visible as a `banned` outcome. It is signalled instead by the
+`account banned (repeated header-less code 88)` log warning, a non-rate-limited
+`MetricsHook` call on the escalating response, and the pool's
+`alerts.item_deactivated` alert.
 
 Buckets (seconds): `0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30` - sized for a
 50 ms to 30 s HTTP call. The duration covers the HTTP round trip only, not the
@@ -109,6 +121,30 @@ sum to the pool size; all four states are always reported (zeros included).
 | `proxy_backoff` | active, but its proxy is in exponential backoff |
 | `cooling_down` | soft-deactivated (auth/ban/failure cooldown); the pool reactivates it automatically |
 | `deactivated` | permanently deactivated (suspended) |
+
+### `twitter.client.pool.wait.duration`
+
+One record per call that actually waited inside `nextAccountWithWait` — the
+sleep taken when every pool account is momentarily unusable for the endpoint
+(all active but endpoint-rate-limited or in proxy backoff). Calls served
+without waiting record nothing, so the series only exists while the pool is
+contended. The value is the total time the call slept, which can add up to
+minutes of latency per request (bounded by `poolWaitCap`, 5 min). The wait
+inside `pool.NextWithWait` itself (all accounts deactivated) is not covered —
+that path returns before the wait this histogram measures begins.
+
+- `twitter.operation`: same bounded endpoint label as `request.duration`.
+- `twitter.result` is how the waited call ended:
+
+| Value | Meaning |
+|---|---|
+| `acquired` | the wait ended with a usable account |
+| `gave_up` | waited, then no account could serve the endpoint within the wait budget |
+| `ctx_done` | the caller's context (cancel or deadline) ended the wait |
+
+Buckets (seconds): `0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300` —
+same resolution as `request.duration` up to 30 s, extended to the 5-minute
+wait cap.
 
 ### `twitter.client.relogins`
 

@@ -165,6 +165,11 @@ func withSocialAccount[T any](ctx context.Context, sc *social.Client, fn func(co
 }
 
 // tryWithAccount acquires one account, runs fn, and reports the result.
+// The Account is built fresh for every attempt, so the per-account
+// header-less-88 count (see Account.noteRateLimited88) never reaches the
+// escalation threshold on this path: a leased account that keeps answering 88
+// surfaces as a call error and is reported to the credential service as
+// "auth_error", never "banned".
 func tryWithAccount[T any](ctx context.Context, sc *social.Client, fn func(context.Context, *Client) (T, error)) (T, error) {
 	var zero T
 	creds, err := sc.AcquireAccount(ctx, "twitter")
