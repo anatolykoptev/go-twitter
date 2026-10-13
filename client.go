@@ -73,13 +73,14 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	// xtid locates ondemand.s via the bundle core, fetching warm pages through the
 	// stealth client (shared TLS fingerprint + proxy). Unauthenticated/guest is
 	// fine. On failure we degrade — x-client-transaction-id is simply omitted —
-	// and route the alert through the pool hook; NewClient never hard-fails here.
+	// and the alert fires once per ok->failed transition (never per request)
+	// through the pool hook; NewClient never hard-fails here.
 	fetcher := &bundle.StealthFetcher{Client: bc, UserAgent: defaultUserAgent}
 	mgr := xtid.NewManager(fetcher)
-	if err := mgr.Initialize(); err != nil {
-		slog.Warn("xtid: init failed, x-client-transaction-id will be missing", slog.Any("error", err))
+	mgr.SetInitFailedHook(func(err error) {
 		alertHook("xtid.init_failed", map[string]any{"error": err.Error()})
-	}
+	})
+	_ = mgr.Initialize() // failure is logged + alerted by the manager
 
 	nonResponsiveBackoff := pool.BackoffConfig{
 		InitialWait: cfg.NonResponsiveCooldown,
