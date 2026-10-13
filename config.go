@@ -27,7 +27,9 @@ type ClientConfig struct {
 	// DefaultProxy is the proxy URL for accounts without per-account proxies.
 	DefaultProxy string
 
-	// SessionTTL controls how long saved sessions are considered valid.
+	// SessionTTL controls how long saved sessions are considered valid. It
+	// configures the default file store only; a custom SessionStore owns its
+	// own expiry policy.
 	SessionTTL time.Duration
 
 	// AuthCooldown is the soft-deactivation duration for auth errors.
@@ -64,9 +66,15 @@ type ClientConfig struct {
 	// no-op until the application installs an SDK provider.
 	MeterProvider metric.MeterProvider
 
-	// SessionDir overrides the default session persistence directory.
+	// SessionDir overrides the default session persistence directory used by
+	// the default file store. Ignored when SessionStore is set.
 	// Default: ~/.go-twitter/sessions
 	SessionDir string
+
+	// SessionStore persists per-account sessions. nil = a FileSessionStore
+	// built from SessionDir and SessionTTL (the historical behaviour). Set it
+	// to make an external credential store the single source of truth.
+	SessionStore SessionStore
 
 	// ProxyBackoffInitial is the initial backoff for proxy failures.
 	ProxyBackoffInitial time.Duration
@@ -125,6 +133,9 @@ type ClientConfig struct {
 func (cfg *ClientConfig) defaults() {
 	if cfg.SessionTTL == 0 {
 		cfg.SessionTTL = 24 * time.Hour
+	}
+	if cfg.SessionStore == nil {
+		cfg.SessionStore = &FileSessionStore{Dir: cfg.SessionDir, TTL: cfg.SessionTTL}
 	}
 	if cfg.AuthCooldown == 0 {
 		cfg.AuthCooldown = 1 * time.Hour

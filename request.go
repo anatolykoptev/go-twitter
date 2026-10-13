@@ -264,7 +264,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 			if newCT0 := extractCT0FromHeaders(respHdrs); newCT0 != "" && newCT0 != ct0 {
 				acc.SetCT0(newCT0)
 				authTok2, ct02, _ := acc.Credentials()
-				_ = saveSession(c.cfg.SessionDir, acc.Username, authTok2, ct02)
+				c.saveSession(acc, authTok2, ct02)
 			}
 			c.recordAPICall(endpoint, true, false)
 			acc.RecordSuccess()
@@ -300,7 +300,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 				if newCT0 := extractCT0FromHeaders(respHdrs); newCT0 != "" && newCT0 != ct0 {
 					acc.SetCT0(newCT0)
 					authTok2, ct02, _ := acc.Credentials()
-					_ = saveSession(c.cfg.SessionDir, acc.Username, authTok2, ct02)
+					c.saveSession(acc, authTok2, ct02)
 				}
 				c.recordAPICall(endpoint, true, false)
 				acc.RecordSuccess()
@@ -458,13 +458,13 @@ func (c *Client) recoverCSRF(acc *Account, bc *stealth.BrowserClient, method, ur
 		slog.Warn("CSRF error 353, adopting server ct0", slog.String("user", acc.Username))
 		acc.SetCT0(serverCT0)
 		authTok2, ct02, ua2 := acc.Credentials()
-		_ = saveSession(c.cfg.SessionDir, acc.Username, authTok2, ct02)
+		c.saveSession(acc, authTok2, ct02)
 		body2, respHdrs2, status2, err2 := c.observedPoolReq(endpoint, bc, method, url, payload, twitterHeaders(authTok2, ct02, ua2))
 		if err2 == nil && status2 == 200 && classifyError(body2, respHdrs2) == errNone {
 			if newCT0 := extractCT0FromHeaders(respHdrs2); newCT0 != "" {
 				acc.SetCT0(newCT0)
 				authTok3, ct03, _ := acc.Credentials()
-				_ = saveSession(c.cfg.SessionDir, acc.Username, authTok3, ct03)
+				c.saveSession(acc, authTok3, ct03)
 			}
 			c.recordAPICall(endpoint, true, false)
 			acc.RecordSuccess()
@@ -504,13 +504,13 @@ func (c *Client) recoverCSRFPost(acc *Account, bc *stealth.BrowserClient, url st
 		slog.Warn("doPOST: CSRF error 353, adopting server ct0", slog.String("user", acc.Username))
 		acc.SetCT0(serverCT0)
 		authTok2, ct02, ua2 := acc.Credentials()
-		_ = saveSession(c.cfg.SessionDir, acc.Username, authTok2, ct02)
+		c.saveSession(acc, authTok2, ct02)
 		body2, respHdrs2, status2, err2 := c.observedRequestWithBody(endpoint, bc, "POST", url, twitterHeaders(authTok2, ct02, ua2), bytes.NewReader(payload))
 		if err2 == nil && (status2 == 200 || status2 == 201) && classifyError(body2, respHdrs2) == errNone {
 			if newCT0 := extractCT0FromHeaders(respHdrs2); newCT0 != "" {
 				acc.SetCT0(newCT0)
 				authTok3, ct03, _ := acc.Credentials()
-				_ = saveSession(c.cfg.SessionDir, acc.Username, authTok3, ct03)
+				c.saveSession(acc, authTok3, ct03)
 			}
 			c.recordAPICall(endpoint, true, false)
 			acc.RecordSuccess()
@@ -631,7 +631,7 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 			if newCT0 := extractCT0FromHeaders(respHdrs); newCT0 != "" && newCT0 != ct0 {
 				acc.SetCT0(newCT0)
 				authTok2, ct02, _ := acc.Credentials()
-				_ = saveSession(c.cfg.SessionDir, acc.Username, authTok2, ct02)
+				c.saveSession(acc, authTok2, ct02)
 			}
 			c.recordAPICall(endpoint, true, false)
 			acc.RecordSuccess()

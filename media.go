@@ -489,7 +489,7 @@ func (c *Client) doMediaRequest(ctx context.Context, acc *Account, method, urlSt
 		if newCT0 := extractCT0FromHeaders(respHdrs); newCT0 != "" && newCT0 != ct0 {
 			acc.SetCT0(newCT0)
 			authTok2, ct02, _ := acc.Credentials()
-			_ = saveSession(c.cfg.SessionDir, acc.Username, authTok2, ct02)
+			c.saveSession(acc, authTok2, ct02)
 		}
 		c.recordAPICall(epUploadMedia, true, false)
 		acc.RecordSuccess()
@@ -518,13 +518,13 @@ func (c *Client) recoverCSRFMedia(acc *Account, bc *stealth.BrowserClient, metho
 		slog.Warn("UploadMedia: CSRF error 353, adopting server ct0", slog.String("user", acc.Username))
 		acc.SetCT0(serverCT0)
 		authTok2, ct02, ua2 := acc.Credentials()
-		_ = saveSession(c.cfg.SessionDir, acc.Username, authTok2, ct02)
+		c.saveSession(acc, authTok2, ct02)
 		body2, respHdrs2, status2, err2 := c.doPoolReq(bc, method, urlStr, payload, mediaHeaders(authTok2, ct02, ua2, contentType))
 		if err2 == nil && isUploadOK(status2) && classifyError(body2, respHdrs2) == errNone {
 			if newCT0 := extractCT0FromHeaders(respHdrs2); newCT0 != "" {
 				acc.SetCT0(newCT0)
 				authTok3, ct03, _ := acc.Credentials()
-				_ = saveSession(c.cfg.SessionDir, acc.Username, authTok3, ct03)
+				c.saveSession(acc, authTok3, ct03)
 			}
 			c.recordAPICall(epUploadMedia, true, false)
 			acc.RecordSuccess()
