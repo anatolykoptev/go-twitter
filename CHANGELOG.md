@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.6.14](https://github.com/anatolykoptev/go-twitter/compare/v0.6.13...v0.6.14) (2026-10-13)
+
+
+### Bug Fixes
+
+* wait for endpoint-limited accounts ([#58](https://github.com/anatolykoptev/go-twitter/issues/58)), code 88 rate limit is not a ban ([#60](https://github.com/anatolykoptev/go-twitter/issues/60)) ([#79](https://github.com/anatolykoptev/go-twitter/issues/79)) ([0d65de6](https://github.com/anatolykoptev/go-twitter/commit/0d65de64beb73998727b2cb6e16d773936cc0e8e))
+* **xtid:** single-flight negative cache + Vite-build init with authenticated warm page ([#80](https://github.com/anatolykoptev/go-twitter/issues/80)) ([6191154](https://github.com/anatolykoptev/go-twitter/commit/6191154c3f400ec489839a13efc5fe0eae42c6bb))
+
 ## [0.6.13](https://github.com/anatolykoptev/go-twitter/compare/v0.6.12...v0.6.13) (2026-10-13)
 
 
