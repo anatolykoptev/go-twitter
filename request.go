@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"regexp"
 	"strings"
 	"time"
@@ -31,6 +32,16 @@ func (c *Client) doPoolPOST(ctx context.Context, endpoint, url string, payload [
 // together) spends waiting for a pool account to become usable for its endpoint.
 // A var only so tests can shrink it.
 var poolWaitCap = 5 * time.Minute
+
+// poolWakeJitterMax bounds the random delay added to a pool wait before
+// retrying selection, so N waiters parked on one freed account do not all
+// re-select at the same instant. 250 ms spreads the herd while staying far
+// under the per-account pace (~1 s) and any realistic endpoint-limit wait.
+const poolWakeJitterMax = 250 * time.Millisecond
+
+// poolWakeJitter samples the actual per-wait delay in [0, poolWakeJitterMax).
+// A var (like poolWaitCap) only so tests can lock it.
+var poolWakeJitter = func() time.Duration { return rand.N(poolWakeJitterMax) }
 
 // nextAccountWithWait selects an account for an auth-only endpoint, waiting
 // (context-aware, never past deadline) when every account is unusable for now.
@@ -75,6 +86,14 @@ func (c *Client) nextAccountWithWait(ctx context.Context, endpoint string, filte
 		wait := time.Until(wake)
 		if wait <= 0 || wait > time.Until(deadline) {
 			return nil, err
+		}
+		// Jitter the wake: N waiters parked on one freed account must not
+		// re-select at the same instant. The jitter is added before the budget
+		// clamp, so the sleep never extends past deadline (poolWaitCap); the
+		// ctx select bounds it by the caller's context separately.
+		wait += poolWakeJitter()
+		if budget := time.Until(deadline); wait > budget {
+			wait = budget
 		}
 		slog.Debug("all active accounts limited, waiting",
 			slog.String("endpoint", endpoint), slog.Duration("wait", wait))
