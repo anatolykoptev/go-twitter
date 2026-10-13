@@ -319,6 +319,41 @@ func TestMetrics_PoolWaitDuration_CtxDone(t *testing.T) {
 	assert.Less(t, pts[0].Sum, 1.0, "the sample is the ~60ms actually waited, not the 10s limit")
 }
 
+// A waited call that still finds no usable account within the wait budget
+// records gave_up: the call slept once, the account was re-limited past the
+// budget while it slept, and selection gave up. The jitter hook is the
+// deterministic seam inside the wait loop — the re-limit lands between the
+// wait computation and the wake re-check, no goroutine needed.
+//
+// Mutation: in request.go nextAccountWithWait record waitResultAcquired
+// instead of waitResultGaveUp on that path => RED.
+func TestMetrics_PoolWaitDuration_GaveUp(t *testing.T) {
+	origCap, origJitter := poolWaitCap, poolWakeJitter
+	poolWaitCap = 300 * time.Millisecond
+	t.Cleanup(func() { poolWaitCap, poolWakeJitter = origCap, origJitter })
+
+	var f *metricsFixture
+	f = newMetricsFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(userTweetsBody(snowflakeAt(f.now.Add(-2 * time.Second)))))
+	}, "wait_gaveup_acc")
+	// Usable again in 150 ms — inside the 300 ms budget — so the call waits.
+	f.acc.MarkEndpointRateLimited("UserTweets", time.Now().Add(150*time.Millisecond))
+	// ...but while it sleeps the endpoint is re-limited beyond the budget.
+	poolWakeJitter = func() time.Duration {
+		f.acc.MarkEndpointRateLimited("UserTweets", time.Now().Add(10*time.Second))
+		return 0
+	}
+
+	_, err := f.c.GetUserTweets(context.Background(), "999", 20)
+	require.Error(t, err)
+
+	pts := histPoints(t, f.collect(t), metricPoolWait)
+	require.Len(t, pts, 1, "one wait, one sample")
+	assert.Equal(t, map[string]string{attrOperation: "UserTweets", attrResult: waitResultGaveUp}, attrMap(pts[0].Attributes))
+	assert.Equal(t, uint64(1), pts[0].Count)
+	assert.Greater(t, pts[0].Sum, 0.1, "the sample is the real ~150ms wait, not the re-limit")
+}
+
 func allAttrSets(t *testing.T, m metricdata.Metrics) []attribute.Set {
 	t.Helper()
 	var out []attribute.Set

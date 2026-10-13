@@ -741,11 +741,15 @@ func requiresAuth(endpoint string) bool {
 // headers. It mirrors the declared-ban (errBanned) arm — BanCooldown soft
 // deactivation, non-rate-limited MetricsHook outcome, IsBanned-satisfying
 // error — so the doPoolRequest, doPOST and doMediaRequest paths all treat the
-// escalation identically.
+// escalation identically. The count restarts at zero, so a reactivated account
+// needs a full fresh run of header-less 88s before it is benched again.
 func (c *Client) escalateHeaderless88(acc *Account, endpoint string, body []byte) *APIError {
 	c.recordAPICall(endpoint, false, false)
 	slog.Warn("account banned (repeated header-less code 88)", slog.String("user", acc.Username))
 	c.pool.SoftDeactivate(acc, c.cfg.BanCooldown)
+	acc.mu.Lock()
+	acc.consecHeaderless88 = 0
+	acc.mu.Unlock()
 	return &APIError{Status: 200, Class: errBanned, Codes: extractErrorCodes(body), Message: "account banned (repeated header-less code 88)"}
 }
 

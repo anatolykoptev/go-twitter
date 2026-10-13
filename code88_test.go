@@ -191,6 +191,100 @@ func TestClassifyCode88_HeaderMatrix(t *testing.T) {
 	}
 }
 
+// doPOST escalates too: the account-pinned POST path (CreateTweet) counts the
+// same per-account run of consecutive header-less 88s and benches the account
+// at the threshold, with an IsBanned error.
+//
+// Mutation: in request.go doPOST drop the noteRateLimited88 escalation check
+// => RED.
+func TestCode88_Headerless_EscalatesToBan_DoPOST(t *testing.T) {
+	fake := newPoolWaitFake(t)
+	// 200 + code 88, no x-rate-limit-* headers at all.
+	fake.body = `{"errors":[{"code":88,"message":"Rate limit exceeded"}]}`
+	// CreateTweet builds its URL from twitterBase — point it at the fake.
+	origBase := twitterBase
+	twitterBase = fake.srv.URL + "/i/api/graphql"
+	t.Cleanup(func() { twitterBase = origBase })
+
+	c, accs := newPoolWaitClient(t, 1)
+	acc := accs[0]
+
+	for i := 0; i < headerless88BanThreshold-1; i++ {
+		_, err := c.CreateTweet(context.Background(), acc, "hi")
+		require.Error(t, err)
+		assert.True(t, IsRateLimited(err), "call %d: want IsRateLimited, got %v", i+1, err)
+		assert.False(t, IsBanned(err), "call %d: a header-less 88 below the threshold is not a ban: %v", i+1, err)
+		assert.True(t, acc.IsActive(), "call %d: account must stay active below the threshold", i+1)
+	}
+
+	_, err := c.CreateTweet(context.Background(), acc, "hi")
+	require.Error(t, err)
+	assert.True(t, IsBanned(err), "want IsBanned, got %v", err)
+	assert.False(t, IsRateLimited(err))
+	assert.False(t, acc.IsActive(), "the threshold-th consecutive header-less 88 must soft-deactivate")
+	assert.EqualValues(t, headerless88BanThreshold, fake.hits.Load(), "one hit per CreateTweet")
+}
+
+// doMediaRequest escalates too: a media upload step (INIT/APPEND/FINALIZE each
+// go through it) counts the same per-account run and benches the account at
+// the threshold.
+//
+// Mutation: in media.go doMediaRequest drop the noteRateLimited88 escalation
+// check => RED.
+func TestCode88_Headerless_EscalatesToBan_DoMediaRequest(t *testing.T) {
+	fake := newPoolWaitFake(t)
+	// 200 + code 88, no x-rate-limit-* headers at all.
+	fake.body = `{"errors":[{"code":88,"message":"Rate limit exceeded"}]}`
+	c, accs := newPoolWaitClient(t, 1)
+	acc := accs[0]
+	url := fake.srv.URL + "/i/media/upload.json"
+
+	for i := 0; i < headerless88BanThreshold-1; i++ {
+		_, err := c.doMediaRequest(context.Background(), acc, "POST", url, []byte(`x`), "application/octet-stream")
+		require.Error(t, err)
+		assert.True(t, IsRateLimited(err), "call %d: want IsRateLimited, got %v", i+1, err)
+		assert.False(t, IsBanned(err), "call %d: a header-less 88 below the threshold is not a ban: %v", i+1, err)
+		assert.True(t, acc.IsActive(), "call %d: account must stay active below the threshold", i+1)
+	}
+
+	_, err := c.doMediaRequest(context.Background(), acc, "POST", url, []byte(`x`), "application/octet-stream")
+	require.Error(t, err)
+	assert.True(t, IsBanned(err), "want IsBanned, got %v", err)
+	assert.False(t, IsRateLimited(err))
+	assert.False(t, acc.IsActive(), "the threshold-th consecutive header-less 88 must soft-deactivate")
+	assert.EqualValues(t, headerless88BanThreshold, fake.hits.Load(), "one hit per doMediaRequest")
+}
+
+// Escalation benches the account AND restarts the count: after the cooldown a
+// reactivated account needs a full fresh run of header-less 88s before it is
+// benched again — a single header-less 88 post-reactivation is just a
+// per-endpoint rate limit.
+//
+// Mutation: in request.go escalateHeaderless88 drop the consecHeaderless88
+// reset => RED.
+func TestCode88_Headerless_EscalationResetsCount(t *testing.T) {
+	fake := newPoolWaitFake(t)
+	fake.body = `{"errors":[{"code":88,"message":"Rate limit exceeded"}]}`
+	c, accs := newPoolWaitClient(t, 1)
+	acc := accs[0]
+	url := func(ep string) string { return fake.srv.URL + "/i/api/graphql/x/" + ep }
+
+	for _, ep := range []string{"UserTweets", "Followers", "Bookmarks"} {
+		_, _, err := c.doGET(context.Background(), ep, url(ep))
+		require.Error(t, err)
+	}
+	require.False(t, acc.IsActive(), "the threshold-th header-less 88 must bench the account")
+
+	// Cooldown over: the pool auto-reactivates the account on the next pick.
+	acc.SetReactivateAt(time.Now().Add(-time.Second))
+
+	_, _, err := c.doGET(context.Background(), "HomeTimeline", url("HomeTimeline"))
+	require.Error(t, err)
+	assert.True(t, IsRateLimited(err), "want IsRateLimited, got %v", err)
+	assert.True(t, acc.IsActive(),
+		"one header-less 88 after reactivation must not re-ban: the count restarted at the escalation")
+}
+
 // UploadMedia's 2xx-body check: an exhausted-window 88 must not charge the
 // healthy account a failure; the endpoint is blocked until the reset instead.
 //

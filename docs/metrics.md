@@ -51,7 +51,7 @@ instrumented.
 | `rate_limited` | HTTP 429, or code 88 with `x-rate-limit-remaining` 0 or absent |
 | `auth` | code 32 / 179 / 219, or a bare 401 |
 | `csrf` | code 353 |
-| `banned` | code 88 with `x-rate-limit-remaining` > 0 |
+| `banned` | code 88 with `x-rate-limit-remaining` > 0 (a declared ban; see the escalation note below) |
 | `suspended` | code 64 |
 | `locked` | code 326 |
 | `blocked` | code 161 |
@@ -61,6 +61,17 @@ instrumented.
 | `transport` | the request failed before an HTTP response (timeout, reset, DNS on a direct account, ...) |
 | `proxy` | transport failure that looks like a proxy failure (`isProxyError`) on an attempt made through a per-account proxy; the same gate as `proxy.failures` |
 | `other` | anything else (e.g. 5xx) |
+
+**Header-less-88 escalation.** Three consecutive code-88 responses carrying no
+parseable `x-rate-limit-remaining` (with no successful response in between) are
+a ban signature: the account is soft-deactivated for `BanCooldown` and the call
+fails with an `IsBanned` error. Each of those responses is still recorded here
+as `rate_limited` — this instrument reports the per-response truth, and a
+header-less 88 is per-response a rate limit — so the escalation is **not**
+visible as a `banned` outcome. It is signalled instead by the
+`account banned (repeated header-less code 88)` log warning, a non-rate-limited
+`MetricsHook` call on the escalating response, and the pool's
+`alerts.item_deactivated` alert.
 
 Buckets (seconds): `0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30` - sized for a
 50 ms to 30 s HTTP call. The duration covers the HTTP round trip only, not the

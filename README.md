@@ -130,7 +130,7 @@ All methods below are on `*twitter.Client`. Every one of them needs an authentic
 | `ValidateAccount(ctx, acc)` | Check an account's credentials against the account settings endpoint. |
 | `SetAutoReloginGate(gate)` | Replace the relogin circuit breaker (see below). |
 
-The `social` package is a thin client for an external account-leasing service. `SearchWithSocial`, `SearchTweetsWithSocial`, `SearchUsersWithSocial`, `GetUserWithSocial`, `GetUserTweetsWithSocial` and `GetTweetConversationWithSocial` in the root package lease an account, run the call, retry on other accounts, and report the outcome.
+The `social` package is a thin client for an external account-leasing service. `SearchWithSocial`, `SearchTweetsWithSocial`, `SearchUsersWithSocial`, `GetUserWithSocial`, `GetUserTweetsWithSocial` and `GetTweetConversationWithSocial` in the root package lease an account, run the call, retry on other accounts, and report the outcome. The repeated-header-less-88 escalation does not fire on this path: each attempt builds a fresh `Account`, so the count never reaches the threshold — a leased account that keeps answering 88 is reported to the credential service as `auth_error`, not `banned`.
 
 ## Error Handling
 
@@ -141,7 +141,8 @@ Every request makes up to 3 attempts, rotating accounts on pool-based calls. Rec
 | CSRF mismatch | 353 | Adopt the ct0 from the error response's `set-cookie` and retry. If x.com offers none, or the retry fails, relogin (subject to the breaker) and retry once. A random ct0 is never generated. |
 | Auth expired | 32 | Relogin (subject to the breaker) and retry; on failure soft-deactivate the account for `AuthCooldown`. |
 | Rate limited | 429 | Mark the endpoint rate-limited for that account until `x-rate-limit-reset` (15 minutes if absent) and try another account. |
-| Rate limited (in a 200 body) | 88, `x-rate-limit-remaining` 0 or absent | Same as 429: mark only that endpoint rate-limited for that account until `x-rate-limit-reset` (15 minutes if absent; a reset in the past is raised to 1 second from now). The account stays active. |
+| Rate limited (in a 200 body) | 88, `x-rate-limit-remaining` 0 | Same as 429: mark only that endpoint rate-limited for that account until `x-rate-limit-reset` (15 minutes if absent; a reset in the past is raised to 1 second from now). The account stays active. |
+| Rate limited, header-less (in a 200 body) | 88, `x-rate-limit-remaining` absent or unparseable | Same per-endpoint marking, but the response also advances a per-account count: **3 consecutive header-less 88s with no successful response in between are a ban signature** — the account is soft-deactivated for `BanCooldown` and the call returns an `IsBanned` error. Any success restarts the count, and so does the bench itself. |
 | Banned | 88, `x-rate-limit-remaining` > 0 | Soft-deactivate for `BanCooldown`. |
 | Suspended | 64 | Permanent removal from the pool. |
 | Locked | 326 | With a `CaptchaSolver`, relogin to solve the challenge and retry; otherwise, or on failure, soft-deactivate for `BanCooldown`. |
@@ -150,12 +151,14 @@ Every request makes up to 3 attempts, rotating accounts on pool-based calls. Rec
 | Other non-200 | — | Counts against the account's health; past the threshold the account is soft-deactivated with a growing backoff (`NonResponsiveCooldown`, doubling, capped at 30 minutes). |
 | Transport failure | — | For an account with its own `Proxy`, a proxy-looking error (including a proxy CONNECT 407) is charged to the proxy: exponential backoff (`ProxyBackoffInitial` to `ProxyBackoffMax`) and a `proxy.down` alert, not an account failure. Any other transport error counts against the account. |
 
+Observability note: each header-less 88 is still recorded as `rate_limited` in `request.duration` (and in `MetricsHook` the first two of the run are rate-limited calls) — that is the per-response truth. The escalation itself is signalled by the `account banned (repeated header-less code 88)` log warning, a non-rate-limited `MetricsHook` outcome on the third call, and the pool's `alerts.item_deactivated` alert — not by a `banned` outcome on the instrument.
+
 Errors returned by the client wrap `*twitter.APIError` (`Status`, `Codes`, `Message`, `Err`). Test them with `errors.As` or these predicates, which unwrap for you:
 
 | Predicate | True for |
 |-----------|----------|
-| `IsRateLimited` | HTTP 429, or code 88 with `x-rate-limit-remaining` 0 or absent |
-| `IsBanned` | code 88 with `x-rate-limit-remaining` > 0 (a header-less 88 is no longer a ban) |
+| `IsRateLimited` | HTTP 429, or code 88 with `x-rate-limit-remaining` 0 or absent (a header-less 88 stays `IsRateLimited` below the 3-in-a-row escalation) |
+| `IsBanned` | code 88 with `x-rate-limit-remaining` > 0, or the third consecutive header-less 88 |
 | `IsSuspended` | code 64 |
 | `IsLocked` | code 326 |
 | `IsCSRF` | code 353 |
