@@ -43,9 +43,18 @@ func (r *cookieRecorder) snapshot() []string {
 	return append([]string(nil), r.cookies...)
 }
 
+// fileSave / fileSessionPath drive the default FileSessionStore directly.
+func fileSave(dir, user, authToken, ct0 string) error {
+	return (&FileSessionStore{Dir: dir}).Save(context.Background(), user, Session{AuthToken: authToken, CT0: ct0})
+}
+
+func fileSessionPath(dir, user string) (string, error) {
+	return (&FileSessionStore{Dir: dir}).path(user)
+}
+
 func readSessionFile(t *testing.T, dir, user string) []byte {
 	t.Helper()
-	p, err := sessionPath(dir, user)
+	p, err := fileSessionPath(dir, user)
 	require.NoError(t, err)
 	b, err := os.ReadFile(p)
 	require.NoError(t, err)
@@ -60,7 +69,7 @@ func TestWithSocial_LeasedCredentialsBeatStaleDiskSession(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	dir := filepath.Join(home, ".go-twitter", "sessions")
-	require.NoError(t, saveSession(dir, "rotated_acc", "tokenA", "ct0A"))
+	require.NoError(t, fileSave(dir, "rotated_acc", "tokenA", "ct0A"))
 	before := readSessionFile(t, dir, "rotated_acc")
 
 	rec := &cookieRecorder{}
@@ -105,7 +114,7 @@ func TestWithSocial_LeasedCredentialsBeatStaleDiskSession(t *testing.T) {
 // (B) must win — otherwise A (revoked) forces a password relogin on every restart.
 func TestParseAccounts_FreshDiskSessionBeatsStaticConfigToken(t *testing.T) {
 	dir := t.TempDir()
-	require.NoError(t, saveSession(dir, "cfg_acc", "tokenB", "ct0B"))
+	require.NoError(t, fileSave(dir, "cfg_acc", "tokenB", "ct0B"))
 
 	accs := ParseAccounts("cfg_acc:pw:tokenA:ct0A")
 	require.Len(t, accs, 1)
@@ -138,7 +147,7 @@ func TestParseAccounts_FreshDiskSessionBeatsStaticConfigToken(t *testing.T) {
 // proxy answers 502).
 func TestLoadOrLogin_PasswordOnlyAccountUsesDiskSession(t *testing.T) {
 	dir := t.TempDir()
-	require.NoError(t, saveSession(dir, "pw_acc", "diskTok", "diskCT0"))
+	require.NoError(t, fileSave(dir, "pw_acc", "diskTok", "diskCT0"))
 
 	var proxyHits atomic.Int32
 	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -167,7 +176,7 @@ func TestLoadOrLogin_PasswordOnlyAccountUsesDiskSession(t *testing.T) {
 func TestSaveSession_AtomicUnderConcurrentReaders(t *testing.T) {
 	dir := t.TempDir()
 	big := strings.Repeat("x", 256<<10)
-	require.NoError(t, saveSession(dir, "atomic_acc", big, "ct0"))
+	require.NoError(t, fileSave(dir, "atomic_acc", big, "ct0"))
 
 	const writers, readers, iters = 2, 4, 40
 	var (
@@ -186,7 +195,7 @@ func TestSaveSession_AtomicUnderConcurrentReaders(t *testing.T) {
 					return
 				default:
 				}
-				if _, _, err := loadSession(dir, "atomic_acc", time.Hour); err != nil {
+				if _, err := (&FileSessionStore{Dir: dir, TTL: time.Hour}).Load(context.Background(), "atomic_acc"); err != nil {
 					badMu.Lock()
 					if badErr == nil {
 						badErr = err
@@ -202,7 +211,7 @@ func TestSaveSession_AtomicUnderConcurrentReaders(t *testing.T) {
 		go func() {
 			defer ww.Done()
 			for i := 0; i < iters; i++ {
-				assert.NoError(t, saveSession(dir, "atomic_acc", big, "ct0"))
+				assert.NoError(t, fileSave(dir, "atomic_acc", big, "ct0"))
 			}
 		}()
 	}
@@ -215,7 +224,7 @@ func TestSaveSession_AtomicUnderConcurrentReaders(t *testing.T) {
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
 	assert.Len(t, entries, 1, "temp files must not be left behind")
-	p, err := sessionPath(dir, "atomic_acc")
+	p, err := fileSessionPath(dir, "atomic_acc")
 	require.NoError(t, err)
 	fi, err := os.Stat(p)
 	require.NoError(t, err)
@@ -226,16 +235,16 @@ func TestSaveSession_AtomicUnderConcurrentReaders(t *testing.T) {
 func TestSessionPath_RejectsTraversal(t *testing.T) {
 	dir := t.TempDir()
 	for _, u := range []string{"", "../evil", "a/b", `a\b`, "..", "x..y", "/abs", "nul\x00byte"} {
-		_, err := sessionPath(dir, u)
+		_, err := fileSessionPath(dir, u)
 		require.ErrorIs(t, err, errInvalidSessionUsername, "username %q", u)
-		assert.Error(t, saveSession(dir, u, "t", "c"), "save %q", u)
-		_, _, lerr := loadSession(dir, u, time.Hour)
-		assert.Error(t, lerr, "load %q", u)
+		assert.Error(t, fileSave(dir, u, "t", "c"), "save %q", u)
+		_, lerr := (&FileSessionStore{Dir: dir, TTL: time.Hour}).Load(context.Background(), u)
+		assert.ErrorIs(t, lerr, ErrSessionNotFound, "load %q is a miss, as before the store was pluggable", u)
 	}
 	_, err := os.Stat(filepath.Join(filepath.Dir(dir), "evil.json"))
 	assert.True(t, os.IsNotExist(err), "traversal wrote outside the session dir")
 
-	p, err := sessionPath(dir, "good_user.1")
+	p, err := fileSessionPath(dir, "good_user.1")
 	require.NoError(t, err)
 	assert.Equal(t, filepath.Join(dir, "good_user.1.json"), p)
 }
