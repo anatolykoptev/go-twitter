@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.17](https://github.com/anatolykoptev/go-twitter/compare/v0.6.16...v0.6.17) (2026-10-13)
+
+
+### Features
+
+* **session:** pluggable SessionStore with file-backed default ([#91](https://github.com/anatolykoptev/go-twitter/issues/91)) ([ab70683](https://github.com/anatolykoptev/go-twitter/commit/ab706839d799ae348073cc423beaa33332eb2577))
+
 ## [0.6.16](https://github.com/anatolykoptev/go-twitter/compare/v0.6.15...v0.6.16) (2026-10-13)
 
 
