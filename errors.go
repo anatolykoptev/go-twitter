@@ -19,8 +19,8 @@ type errorClass int
 
 const (
 	errNone          errorClass = iota
-	errBanned                   // 88 — account banned / rate-limit abuse (durable)
-	errRateLimited              // HTTP 429 — rate limit (transient)
+	errBanned                   // 88 with requests still remaining — account banned / rate-limit abuse (durable)
+	errRateLimited              // HTTP 429, or 88 with an exhausted window — rate limit (transient, per endpoint)
 	errSuspended                // 64 — account suspended
 	errLocked                   // 326 — account locked (captcha needed)
 	errCSRF                     // 353 — csrf token mismatch
@@ -35,8 +35,27 @@ const (
 	errClassCount
 )
 
-// classifyError inspects a response body for known Twitter error codes.
-func classifyError(body []byte, _ map[string]string) errorClass {
+// Rate-limit response headers (lowercase, as the transport delivers them).
+const (
+	xRateLimitReset     = "x-rate-limit-reset"
+	xRateLimitRemaining = "x-rate-limit-remaining"
+)
+
+// classifyCode88 separates the two meanings of code 88 ("Rate limit exceeded").
+// An exhausted window (x-rate-limit-remaining == 0) or a response without the
+// header is a plain per-endpoint rate limit; 88 while requests are still
+// remaining is not explained by the window and is treated as a ban (twscrape
+// queue_client.py does the same). An unparseable header counts as absent.
+func classifyCode88(hdrs map[string]string) errorClass {
+	if n, err := strconv.Atoi(hdrs[xRateLimitRemaining]); err == nil && n > 0 {
+		return errBanned
+	}
+	return errRateLimited
+}
+
+// classifyError inspects a response body (and its headers, for code 88) for
+// known Twitter error codes.
+func classifyError(body []byte, hdrs map[string]string) errorClass {
 	var errResp struct {
 		Errors []struct {
 			Code int `json:"code"`
@@ -49,7 +68,7 @@ func classifyError(body []byte, _ map[string]string) errorClass {
 	for _, e := range errResp.Errors {
 		switch e.Code {
 		case 88:
-			return errBanned
+			return classifyCode88(hdrs)
 		case 64:
 			return errSuspended
 		case 326:
@@ -122,7 +141,8 @@ func newAPIError(status int, body []byte, hdrs map[string]string) *APIError {
 	return e
 }
 
-// IsRateLimited reports a rate-limit condition (HTTP 429).
+// IsRateLimited reports a rate-limit condition (HTTP 429, or code 88 with an
+// exhausted window).
 func IsRateLimited(err error) bool {
 	var ae *APIError
 	if errors.As(err, &ae) {
@@ -131,7 +151,8 @@ func IsRateLimited(err error) bool {
 	return false
 }
 
-// IsBanned reports an account-banned condition (code 88).
+// IsBanned reports an account-banned condition (code 88 while the rate-limit
+// window still has requests remaining).
 func IsBanned(err error) bool {
 	var ae *APIError
 	if errors.As(err, &ae) {
@@ -212,10 +233,19 @@ func IsInternal(err error) bool {
 	return false
 }
 
+// minRateLimitBlock floors a parsed reset: a reset already in the past (clock
+// skew, or a reset that landed between the response and now) would otherwise
+// mark nothing and let the same account be retried at once.
+const minRateLimitBlock = time.Second
+
 // parseRateLimitReset parses the X-Rate-Limit-Reset unix timestamp header.
-// Falls back to 15 minutes from now if missing or invalid.
+// Falls back to 15 minutes from now if missing or invalid; a parsed time less
+// than minRateLimitBlock away is raised to now+minRateLimitBlock.
 func parseRateLimitReset(v string) time.Time {
 	if ts, err := strconv.ParseInt(v, 10, 64); err == nil {
+		if floor := time.Now().Add(minRateLimitBlock); time.Unix(ts, 0).Before(floor) {
+			return floor
+		}
 		return time.Unix(ts, 0)
 	}
 	return time.Now().Add(15 * time.Minute)

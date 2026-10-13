@@ -27,6 +27,81 @@ func (c *Client) doPoolPOST(ctx context.Context, endpoint, url string, payload [
 	return c.doPoolRequest(ctx, "POST", endpoint, url, payload)
 }
 
+// poolWaitCap bounds the total time ONE request (all its retry attempts
+// together) spends waiting for a pool account to become usable for its endpoint.
+// A var only so tests can shrink it.
+var poolWaitCap = 5 * time.Minute
+
+// nextAccountWithWait selects an account for an auth-only endpoint, waiting
+// (context-aware, never past deadline) when every account is unusable for now.
+// The caller computes deadline once per request, so retries share one budget.
+//
+// go-stealth's NextWithWait only waits for deactivated accounts: its AvailableIn
+// returns 0 as soon as any account is active, so a pool whose accounts are all
+// active but rate-limited on this endpoint fails at once. After NextWithWait
+// gives up, this waits until the earliest moment an account could serve the
+// endpoint (see nextUsableAt) and retries. With no active account the original
+// error is returned unchanged.
+func (c *Client) nextAccountWithWait(ctx context.Context, endpoint string, filter func(*Account) bool, deadline time.Time) (*Account, error) {
+	for {
+		acc, err := c.pool.NextWithWait(ctx, filter, time.Until(deadline))
+		if err == nil {
+			return acc, nil
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		wake, ok := c.nextUsableAt(endpoint)
+		if !ok {
+			return nil, err
+		}
+		wait := time.Until(wake)
+		if wait <= 0 || wait > time.Until(deadline) {
+			return nil, err
+		}
+		slog.Debug("all active accounts limited, waiting",
+			slog.String("endpoint", endpoint), slog.Duration("wait", wait))
+		t := time.NewTimer(wait)
+		select {
+		case <-t.C:
+		case <-ctx.Done():
+			t.Stop()
+			return nil, ctx.Err()
+		}
+	}
+}
+
+// nextUsableAt returns the earliest future moment at which some account may be
+// usable for endpoint: an active account's endpoint limit or proxy backoff
+// lifting, or a soft-deactivated account's cooldown ending. ok is false when no
+// account is active (nothing to wait for beyond what NextWithWait already did)
+// or no such moment lies in the future.
+func (c *Client) nextUsableAt(endpoint string) (at time.Time, ok bool) {
+	now := time.Now()
+	anyActive := false
+	var earliest time.Time
+	consider := func(t time.Time) {
+		if t.After(now) && (earliest.IsZero() || t.Before(earliest)) {
+			earliest = t
+		}
+	}
+	for _, acc := range c.pool.Items() {
+		if !acc.IsActive() {
+			consider(acc.ReactivateAt())
+			continue
+		}
+		anyActive = true
+		ready := acc.EndpointAvailableAt(endpoint)
+		acc.mu.Lock()
+		if acc.proxyBackoff.After(ready) {
+			ready = acc.proxyBackoff
+		}
+		acc.mu.Unlock()
+		consider(ready)
+	}
+	return earliest, anyActive && !earliest.IsZero()
+}
+
 // doPoolRequest executes a pool-rotated request (GET or POST) with retry, ct0 rotation,
 // relogin, and guest-token fallback.
 func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string, payload []byte) ([]byte, map[string]string, error) {
@@ -34,6 +109,10 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 	if err := stealth.DefaultJitter.Sleep(ctx); err != nil {
 		return nil, nil, err
 	}
+
+	// One wait budget for the whole request: nextAccountWithWait runs once per
+	// attempt, so a per-call cap would allow maxRetries x poolWaitCap.
+	waitDeadline := time.Now().Add(poolWaitCap)
 
 	var lastErr error
 	for attempt := range maxRetries {
@@ -54,11 +133,20 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 		}
 
 		if requiresAuth(endpoint) {
-			acc, accErr = c.pool.NextWithWait(ctx, filter, 5*time.Minute)
+			acc, accErr = c.nextAccountWithWait(ctx, endpoint, filter, waitDeadline)
 		} else {
 			acc, accErr = c.pool.Next(filter)
 		}
 		if accErr != nil {
+			if ctx.Err() != nil {
+				return nil, nil, accErr
+			}
+			// Keep the previous attempt's typed error reachable (IsBanned,
+			// IsRateLimited, ...): the pool error alone says nothing about why
+			// the pool ran dry.
+			if lastErr != nil {
+				accErr = fmt.Errorf("%w (previous attempt: %w)", accErr, lastErr)
+			}
 			lastErr = accErr
 			break
 		}
@@ -223,6 +311,15 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 			apiErr := newAPIError(200, body, respHdrs)
 			apiErr.Message = "Twitter internal error (131)"
 			lastErr = apiErr
+			continue
+
+		case errRateLimited:
+			// Code 88 inside a 200 body with an exhausted window: a plain
+			// per-endpoint rate limit. The account is healthy, so block only this
+			// endpoint until the reset instead of benching it for BanCooldown.
+			c.recordAPICall(endpoint, false, true)
+			acc.MarkEndpointRateLimited(endpoint, parseRateLimitReset(respHdrs[xRateLimitReset]))
+			lastErr = &APIError{Status: 200, Class: errRateLimited, Codes: extractErrorCodes(body), Message: "rate limited (code 88)"}
 			continue
 
 		case errBanned:
@@ -544,6 +641,14 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 				return body2, nil
 			}
 			continue
+		case errRateLimited:
+			// Code 88 with an exhausted window: the account is healthy, so do not
+			// charge it a failure; block this endpoint until the reset.
+			c.recordAPICall(endpoint, false, true)
+			acc.MarkEndpointRateLimited(endpoint, parseRateLimitReset(respHdrs[xRateLimitReset]))
+			apiErr := newAPIError(200, body, respHdrs)
+			apiErr.Message = fmt.Sprintf("%s rate limited (code 88)", endpoint)
+			return nil, apiErr
 		default:
 			c.recordAPICall(endpoint, false, false)
 			acc.RecordFailure()

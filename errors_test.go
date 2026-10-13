@@ -15,7 +15,7 @@ func TestClassifyError(t *testing.T) {
 	}{
 		{"no errors", `{"data":{"user":{}}}`, errNone},
 		{"empty errors", `{"errors":[]}`, errNone},
-		{"banned 88", `{"errors":[{"code":88}]}`, errBanned},
+		{"88 without headers is a rate limit", `{"errors":[{"code":88}]}`, errRateLimited},
 		{"suspended 64", `{"errors":[{"code":64}]}`, errSuspended},
 		{"locked 326", `{"errors":[{"code":326}]}`, errLocked},
 		{"csrf 353", `{"errors":[{"code":353}]}`, errCSRF},
@@ -90,7 +90,7 @@ func TestAPIError_Classification(t *testing.T) {
 		class   errorClass
 		trueFor string
 	}{
-		{"rate limit code 88", 200, `{"errors":[{"code":88}]}`, errBanned, "IsBanned"},
+		{"code 88 without headers", 200, `{"errors":[{"code":88}]}`, errRateLimited, "IsRateLimited"},
 		{"rate limit HTTP 429", 429, ``, errRateLimited, "IsRateLimited"},
 		{"forbidden HTTP 403", 403, ``, errForbidden, "IsForbidden"},
 		{"suspended 64", 200, `{"errors":[{"code":64}]}`, errSuspended, "IsSuspended"},
@@ -143,12 +143,12 @@ func TestParseRateLimitReset(t *testing.T) {
 }
 
 func TestIsBannedAndRateLimited(t *testing.T) {
-	banned := newAPIError(200, []byte(`{"errors":[{"code":88}]}`), nil)
+	banned := newAPIError(200, []byte(`{"errors":[{"code":88}]}`), map[string]string{xRateLimitRemaining: "5"})
 	if !IsBanned(banned) {
-		t.Fatal("IsBanned must be true for code 88")
+		t.Fatal("IsBanned must be true for code 88 with requests remaining")
 	}
 	if IsRateLimited(banned) {
-		t.Fatal("IsRateLimited must be false for code 88 after split")
+		t.Fatal("IsRateLimited must be false for code 88 with requests remaining")
 	}
 
 	rateLimited := newAPIError(429, nil, nil)

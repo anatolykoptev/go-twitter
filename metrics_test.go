@@ -329,7 +329,7 @@ func TestAttemptOutcome(t *testing.T) {
 		{"500", 500, `oops`, nil, false, outcomeOther},
 		{"code 32", 401, `{"errors":[{"code":32}]}`, nil, false, outcomeAuth},
 		{"code 353", 403, `{"errors":[{"code":353}]}`, nil, false, outcomeCSRF},
-		{"code 88 in a 200", 200, `{"errors":[{"code":88}]}`, nil, false, outcomeBanned},
+		{"code 88 in a 200 without headers is a rate limit", 200, `{"errors":[{"code":88}]}`, nil, false, outcomeRateLimited},
 		{"code 64", 200, `{"errors":[{"code":64}]}`, nil, false, outcomeSuspended},
 		{"code 326", 200, `{"errors":[{"code":326}]}`, nil, false, outcomeLocked},
 		{"code 161", 200, `{"errors":[{"code":161}]}`, nil, false, outcomeBlocked},
