@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.18](https://github.com/anatolykoptev/go-twitter/compare/v0.6.17...v0.6.18) (2026-10-13)
+
+
+### Bug Fixes
+
+* **pool:** escalate header-less 88s, pool wait metric, wake jitter ([#93](https://github.com/anatolykoptev/go-twitter/issues/93)) ([cc3e7c9](https://github.com/anatolykoptev/go-twitter/commit/cc3e7c9824e5207774f38ad9ea68d54321c35430))
+
 ## [0.6.17](https://github.com/anatolykoptev/go-twitter/compare/v0.6.16...v0.6.17) (2026-10-13)
 
 
