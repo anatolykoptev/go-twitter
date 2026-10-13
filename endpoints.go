@@ -6,8 +6,11 @@ import (
 	"os"
 )
 
+// twitterBase is the GraphQL root. A var (not const) only so tests can point the
+// client at an httptest server; production code never assigns it.
+var twitterBase = "https://x.com/i/api/graphql"
+
 const (
-	twitterBase   = "https://x.com/i/api/graphql"
 	twitterAPIURL = "https://api.twitter.com"
 
 	// accountSettingsURL is the authenticated REST endpoint used by

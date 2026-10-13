@@ -668,6 +668,7 @@ func extractTweetsFromTimeline(tl timelineObj, defaultAuthorID string) ([]*Tweet
 				slog.Debug("skip tweet parse error", slog.Any("error", err))
 				continue
 			}
+			t.promoted = isPromotedItem(entry.EntryID, entry.Content.ItemContent)
 			tweets = append(tweets, t)
 		}
 	}

@@ -39,16 +39,36 @@ type Account struct {
 func (a *Account) ID() string { return a.Username }
 
 // IsActive implements pool.Identity.
-func (a *Account) IsActive() bool { return a.active }
+//
+// Guarded by a.mu: the pool flips these fields (SetActive/SetReactivateAt) under
+// its own lock while readers such as the metrics gauge callback run unlocked
+// relative to the pool, so the Account must synchronise them itself.
+func (a *Account) IsActive() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.active
+}
 
 // SetActive implements pool.Identity.
-func (a *Account) SetActive(v bool) { a.active = v }
+func (a *Account) SetActive(v bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.active = v
+}
 
 // ReactivateAt implements pool.Identity.
-func (a *Account) ReactivateAt() time.Time { return a.reactivateAt }
+func (a *Account) ReactivateAt() time.Time {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.reactivateAt
+}
 
 // SetReactivateAt implements pool.Identity.
-func (a *Account) SetReactivateAt(t time.Time) { a.reactivateAt = t }
+func (a *Account) SetReactivateAt(t time.Time) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.reactivateAt = t
+}
 
 // CT0Age returns the time since the ct0 token was last refreshed.
 func (a *Account) CT0Age() time.Duration {

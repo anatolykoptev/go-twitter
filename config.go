@@ -5,6 +5,7 @@ import (
 
 	"github.com/anatolykoptev/go-stealth/ratelimit"
 	"github.com/anatolykoptev/go-twitter/captcha"
+	"go.opentelemetry.io/otel/metric"
 )
 
 const (
@@ -52,7 +53,15 @@ type ClientConfig struct {
 
 	// MetricsHook is called on each API request for external metrics collection.
 	// endpoint is the operation name, success and rateLimited indicate the outcome.
+	//
+	// Deprecated: use MeterProvider. MetricsHook carries no latency or error
+	// class; it keeps working unchanged for existing consumers.
 	MetricsHook func(endpoint string, success, rateLimited bool)
+
+	// MeterProvider supplies the OpenTelemetry meter provider for the client's
+	// metrics (see docs/metrics.md). nil = otel.GetMeterProvider(), which is a
+	// no-op until the application installs an SDK provider.
+	MeterProvider metric.MeterProvider
 
 	// SessionDir overrides the default session persistence directory.
 	// Default: ~/.go-twitter/sessions

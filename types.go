@@ -32,6 +32,10 @@ type Tweet struct {
 	Quotes        int
 	ReplyCount    int
 	TokenMentions []string // extracted $TICKER patterns, e.g. ["BTC", "ETH"]
+
+	// promoted marks a timeline ad. Unexported: it only lets the freshness metric
+	// ignore ads (their IDs are minted at serve time and would mask staleness).
+	promoted bool
 }
 
 // Cursor is used for paginated GraphQL requests.
