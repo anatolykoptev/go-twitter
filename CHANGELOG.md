@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.19](https://github.com/anatolykoptev/go-twitter/compare/v0.6.18...v0.6.19) (2026-10-15)
+
+
+### Bug Fixes
+
+* **request:** stop charging endpoint-wide faults to accounts; rotate reads ([#95](https://github.com/anatolykoptev/go-twitter/issues/95)) ([03952ac](https://github.com/anatolykoptev/go-twitter/commit/03952ac6139bd58a6ecca48dfc77025882dd96dc))
+
 ## [0.6.18](https://github.com/anatolykoptev/go-twitter/compare/v0.6.17...v0.6.18) (2026-10-13)
 
 
