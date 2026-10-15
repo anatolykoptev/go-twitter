@@ -169,8 +169,26 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 	// bounded backoff because X shedding load may recover.
 	prevEndpointFault := errNone
 
+	// poolFilter is the eligibility check every pick this call shares:
+	// faulted accounts excluded, account usable for this endpoint NOW. It is
+	// consuming — AllowRequest increments the per-endpoint counter — so it
+	// must only run on a real pick.
+	poolFilter := func(a *Account) bool {
+		return !endpointFaulted[a.ID()] && a.AllowRequest(endpoint) && time.Now().After(a.proxyBackoff)
+	}
+	// canServe is the read-only twin of poolFilter for the backoff gate below:
+	// IsEndpointRateLimited reads the same limiter without consuming a slot.
+	canServe := func(a *Account) bool {
+		return !endpointFaulted[a.ID()] && !a.IsEndpointRateLimited(endpoint) && time.Now().After(a.proxyBackoff)
+	}
+
 	for attempt := range maxRetries {
-		if attempt > 0 && prevEndpointFault != errEndpoint {
+		// The backoff paces the next pick; with no account able to serve this
+		// endpoint there is nothing to pace — an endpoint-fault pick fails
+		// fast on pool.Next below and a normal pick enters nextAccountWithWait's
+		// own bounded wait, so sleeping ~1 s first only delays a decided
+		// outcome (e.g. an errOverloaded on a single-account pool).
+		if attempt > 0 && prevEndpointFault != errEndpoint && c.pool.Healthy(canServe) > 0 {
 			delay := stealth.DefaultBackoff.Duration(attempt)
 			select {
 			case <-time.After(delay):
@@ -186,14 +204,10 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 		var acc *Account
 		var accErr error
 
-		filter := func(a *Account) bool {
-			return !endpointFaulted[a.ID()] && a.AllowRequest(endpoint) && time.Now().After(a.proxyBackoff)
-		}
-
 		if requiresAuth(endpoint) && !rotateNow {
-			acc, accErr = c.nextAccountWithWait(ctx, endpoint, filter, waitDeadline)
+			acc, accErr = c.nextAccountWithWait(ctx, endpoint, poolFilter, waitDeadline)
 		} else {
-			acc, accErr = c.pool.Next(filter)
+			acc, accErr = c.pool.Next(poolFilter)
 		}
 		if accErr != nil {
 			if ctx.Err() != nil {
