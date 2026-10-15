@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -69,22 +70,45 @@ type socialRig struct {
 	reader  *sdkmetric.ManualReader
 	mp      *sdkmetric.MeterProvider
 	acquire atomic.Int32
+
+	// reports records every usage status POSTed to the fake go-social
+	// (ReportUsage), in order — the observable surface for "a request outcome
+	// must not mark a healthy leased account failed in the shared pool".
+	reportsMu sync.Mutex
+	reports   []string
 }
 
 func newSocialRig(t *testing.T) *socialRig {
-	t.Helper()
-	t.Setenv("HOME", t.TempDir()) // sessions are persisted under $HOME
-
-	r := &socialRig{warm: &fakeWarmBackend{}}
-	bc := startFakeX(t, func(w http.ResponseWriter, req *http.Request) {
+	return newSocialRigX(t, func(w http.ResponseWriter, req *http.Request) {
 		if strings.Contains(req.URL.Path, "UserByScreenName") {
 			_, _ = w.Write([]byte(socialUserBody))
 			return
 		}
 		_, _ = w.Write([]byte(userTweetsBody(snowflakeAt(time.Now().Add(-5 * time.Second)))))
 	})
+}
+
+// newSocialRigX is newSocialRig with an injectable fake-x.com handler, for
+// journeys where X answers with a fault instead of data.
+func newSocialRigX(t *testing.T, xHandler http.HandlerFunc) *socialRig {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir()) // sessions are persisted under $HOME
+
+	r := &socialRig{warm: &fakeWarmBackend{}}
+	bc := startFakeX(t, xHandler)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.Method == http.MethodPost {
+			var rep struct {
+				Status string `json:"status"`
+			}
+			_ = json.NewDecoder(req.Body).Decode(&rep)
+			r.reportsMu.Lock()
+			r.reports = append(r.reports, rep.Status)
+			r.reportsMu.Unlock()
+			_, _ = w.Write([]byte(`{}`))
+			return
+		}
 		if req.Method != http.MethodGet {
 			return
 		}
