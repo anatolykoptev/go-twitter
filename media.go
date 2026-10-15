@@ -453,6 +453,11 @@ func (c *Client) doMediaRequest(ctx context.Context, acc *Account, method, urlSt
 				apiErr.Message = "post-relogin upload failed"
 				lastErr = apiErr
 				continue
+			case errOverloaded:
+				// LoadShed inside a 401/403 body: X-side, not the account's.
+				apiErr := newAPIError(status, body, respHdrs)
+				apiErr.Message = fmt.Sprintf("%s HTTP %d: %s", epUploadMedia, status, truncateBytes(body, 200))
+				return nil, apiErr
 			default:
 				acc.RecordFailure()
 				apiErr := newAPIError(status, body, respHdrs)
@@ -462,9 +467,13 @@ func (c *Client) doMediaRequest(ctx context.Context, acc *Account, method, urlSt
 
 		case !isUploadOK(status):
 			c.recordAPICall(epUploadMedia, false, false)
-			acc.RecordFailure()
 			apiErr := newAPIError(status, body, respHdrs)
 			apiErr.Message = fmt.Sprintf("%s HTTP %d: %s", epUploadMedia, status, truncateBytes(body, 200))
+			// Endpoint faults (#61) — stale route 404 or 5xx overload — are
+			// X-side: never charged to the account.
+			if apiErr.Class != errEndpoint && apiErr.Class != errOverloaded {
+				acc.RecordFailure()
+			}
 			return nil, apiErr
 		}
 
@@ -485,7 +494,10 @@ func (c *Client) doMediaRequest(ctx context.Context, acc *Account, method, urlSt
 		}
 		if cls != errNone {
 			c.recordAPICall(epUploadMedia, false, false)
-			acc.RecordFailure()
+			// X-side classes (131 internal, LoadShed) never charge the account.
+			if cls != errInternal && cls != errOverloaded {
+				acc.RecordFailure()
+			}
 			apiErr := newAPIError(200, body, respHdrs)
 			apiErr.Message = fmt.Sprintf("%s error class %d: %s", epUploadMedia, cls, truncateBytes(body, 200))
 			return nil, apiErr

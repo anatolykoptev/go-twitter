@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -13,6 +14,18 @@ import (
 // healthy-account response (no retry, no auth_error report): the credential
 // worked; the thing asked for simply isn't there.
 var ErrNotFound = errors.New("twitter: resource not found")
+
+// ErrEndpoint marks endpoint-wide faults (HTTP 404, or 400 carrying a
+// GraphQL-shaped errors body): the committed request shape is wrong for every
+// account (stale queryId, missing xtid, feature mismatch), so the serving
+// account must not be charged — reads rotate to the next account. Match with
+// errors.Is.
+var ErrEndpoint = errors.New("twitter: endpoint fault")
+
+// ErrOverloaded marks X-side overload (HTTP 5xx, or a LoadShed error entry —
+// code -1 / message containing "LoadShed"): retryable on another account with
+// backoff, never charged to the serving account. Match with errors.Is.
+var ErrOverloaded = errors.New("twitter: x overloaded")
 
 // errorClass categorizes Twitter API error responses for targeted handling.
 type errorClass int
@@ -29,6 +42,8 @@ const (
 	errNotAuthorized            // 179, 219 — not authorized
 	errInternal                 // 131 — Twitter internal error
 	errForbidden                // 403 — forbidden (no recognized error code)
+	errEndpoint                 // HTTP 404 or GraphQL-shaped 400 — endpoint-wide fault, not the account's
+	errOverloaded               // HTTP 5xx or a LoadShed error entry — X shedding load
 
 	// errClassCount is one past the last class; metrics_test iterates [0, errClassCount)
 	// to prove every class has a twitter.outcome mapping. Keep it LAST.
@@ -83,7 +98,8 @@ const headerless88BanThreshold = 3
 func classifyError(body []byte, hdrs map[string]string) errorClass {
 	var errResp struct {
 		Errors []struct {
-			Code int `json:"code"`
+			Code    int    `json:"code"`
+			Message string `json:"message"`
 		} `json:"errors"`
 	}
 	if json.Unmarshal(body, &errResp) != nil || len(errResp.Errors) == 0 {
@@ -91,6 +107,11 @@ func classifyError(body []byte, hdrs map[string]string) errorClass {
 	}
 
 	for _, e := range errResp.Errors {
+		// X sheds load as a code -1 / "LoadShed" error entry on any status.
+		// It is endpoint-side, never attributable to the serving account.
+		if e.Code == -1 || strings.Contains(e.Message, "LoadShed") {
+			return errOverloaded
+		}
 		switch e.Code {
 		case 88:
 			return classifyCode88(hdrs)
@@ -132,6 +153,19 @@ func (e *APIError) Error() string {
 // Unwrap returns the underlying cause, if any.
 func (e *APIError) Unwrap() error { return e.Err }
 
+// Is reports sentinel membership: ErrEndpoint matches class errEndpoint and
+// ErrOverloaded matches errOverloaded, so errors.Is(err, ErrEndpoint) reaches
+// through fmt.Errorf("...: %w") wrappers.
+func (e *APIError) Is(target error) bool {
+	switch target {
+	case ErrEndpoint:
+		return e.Class == errEndpoint
+	case ErrOverloaded:
+		return e.Class == errOverloaded
+	}
+	return false
+}
+
 func extractErrorCodes(body []byte) []int {
 	var errResp struct {
 		Errors []struct {
@@ -148,9 +182,26 @@ func extractErrorCodes(body []byte) []int {
 	return codes
 }
 
+// hasGraphQLErrors reports whether the body is a GraphQL-shaped error
+// envelope ({"errors":[...]}, non-empty): X answering that shape proves the
+// request reached the GraphQL layer, so the rejection is about the committed
+// request shape, not the account.
+func hasGraphQLErrors(body []byte) bool {
+	var probe struct {
+		Errors []json.RawMessage `json:"errors"`
+	}
+	return json.Unmarshal(body, &probe) == nil && len(probe.Errors) > 0
+}
+
 // newAPIError builds an APIError from a response. It preserves the existing
-// classifyError mapping for known JSON codes and folds HTTP 429 / 403 into the
-// rate-limit / forbidden classes when no recognized code is present.
+// classifyError mapping for known JSON codes and folds HTTP statuses into the
+// endpoint / overload / rate-limit / forbidden classes.
+//
+// The endpoint-fault folds (404, GraphQL-shaped 400, 5xx) WIN over body codes:
+// a 404 says the route itself is stale for every account (a stale queryId,
+// missing xtid or feature mismatch, see #61), a 5xx says X's edge is broken —
+// neither can be charged to the serving account regardless of what the body
+// claims. The 429/403 folds only fill in the errNone gap as before.
 func newAPIError(status int, body []byte, hdrs map[string]string) *APIError {
 	e := &APIError{
 		Status: status,
@@ -158,6 +209,10 @@ func newAPIError(status int, body []byte, hdrs map[string]string) *APIError {
 		Class:  classifyError(body, hdrs),
 	}
 	switch {
+	case status == 404, status == 400 && hasGraphQLErrors(body):
+		e.Class = errEndpoint
+	case status >= 500 && status < 600:
+		e.Class = errOverloaded
 	case e.Class == errNone && status == 429:
 		e.Class = errRateLimited
 	case e.Class == errNone && status == 403:
@@ -254,6 +309,30 @@ func IsInternal(err error) bool {
 	var ae *APIError
 	if errors.As(err, &ae) {
 		return ae.Class == errInternal
+	}
+	return false
+}
+
+// IsEndpointFault reports an endpoint-wide fault — the failure belongs to the
+// committed endpoint shape (404, GraphQL-shaped 400) or to X itself (5xx,
+// LoadShed), never to the serving account. Covers ErrEndpoint and
+// ErrOverloaded; callers must not charge the account or report it as an
+// auth_error.
+func IsEndpointFault(err error) bool {
+	return errors.Is(err, ErrEndpoint) || errors.Is(err, ErrOverloaded)
+}
+
+// partialSuccessClass reports the error classes a 200-with-usable-data
+// response may still succeed under (#61d): X-side classes only — 131
+// internal, LoadShed/overload, endpoint faults. Account-dead verdicts (326
+// locked, 64 suspended, 88 banned/rate-limited, 353 csrf, 32 auth-expired)
+// must take their class arm even when data rides along: treating them as
+// success would mark a dead account healthy and skip its captcha/suspension
+// handling.
+func partialSuccessClass(c errorClass) bool {
+	switch c {
+	case errInternal, errOverloaded, errEndpoint:
+		return true
 	}
 	return false
 }

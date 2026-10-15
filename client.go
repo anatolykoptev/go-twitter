@@ -65,6 +65,28 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		return nil, fmt.Errorf("stealth client: %w", err)
 	}
 
+	// Per-account transports for accounts pinned to their own proxy, built
+	// before the rest of the wiring so a failure fails the whole construction.
+	// This must fail closed: clientForAccount falls back to the shared client
+	// when acc.client is nil, and the shared client may be direct (the
+	// *WithSocial path sets no DefaultProxy) — a warn-and-continue here would
+	// send that account's auth_token/ct0 from this host's IP, ignoring the
+	// proxy the caller explicitly requested.
+	for _, acc := range cfg.Accounts {
+		if acc.Proxy == "" {
+			continue
+		}
+		accClient, err := stealth.NewClient(
+			stealth.WithProxy(acc.Proxy),
+			stealth.WithProfile(acc.Profile.TLSProfile),
+			stealth.WithHeaderOrder(twitterHeaderOrder),
+		)
+		if err != nil {
+			return nil, fmt.Errorf("per-account client for %s: %w", acc.Username, err)
+		}
+		acc.client = accClient
+	}
+
 	alertHook := cfg.PoolAlertHook
 	if alertHook == nil {
 		alertHook = func(topic string, payload any) {
@@ -146,19 +168,6 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	wireDefaultReloginGate(c)
 
 	for _, acc := range cfg.Accounts {
-		if acc.Proxy != "" {
-			accClient, err := stealth.NewClient(
-				stealth.WithProxy(acc.Proxy),
-				stealth.WithProfile(acc.Profile.TLSProfile),
-				stealth.WithHeaderOrder(twitterHeaderOrder),
-			)
-			if err != nil {
-				slog.Warn("per-account client failed", slog.String("user", acc.Username), slog.Any("error", err))
-			} else {
-				acc.client = accClient
-			}
-		}
-
 		if err := c.loadOrLogin(acc, c.clientForAccount(acc)); err != nil {
 			slog.Warn("account login failed", slog.String("user", acc.Username), slog.Any("error", err))
 			acc.SetActive(false)
