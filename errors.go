@@ -322,6 +322,21 @@ func IsEndpointFault(err error) bool {
 	return errors.Is(err, ErrEndpoint) || errors.Is(err, ErrOverloaded)
 }
 
+// partialSuccessClass reports the error classes a 200-with-usable-data
+// response may still succeed under (#61d): X-side classes only — 131
+// internal, LoadShed/overload, endpoint faults. Account-dead verdicts (326
+// locked, 64 suspended, 88 banned/rate-limited, 353 csrf, 32 auth-expired)
+// must take their class arm even when data rides along: treating them as
+// success would mark a dead account healthy and skip its captcha/suspension
+// handling.
+func partialSuccessClass(c errorClass) bool {
+	switch c {
+	case errInternal, errOverloaded, errEndpoint:
+		return true
+	}
+	return false
+}
+
 // minRateLimitBlock floors a parsed reset: a reset already in the past (clock
 // skew, or a reset that landed between the response and now) would otherwise
 // mark nothing and let the same account be retried at once.
