@@ -261,14 +261,13 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 			acc.mu.Unlock()
 		}
 
-		// Adaptive rate-limit sync: the primary response of each attempt (200,
-		// 429, 4xx) that carries x-rate-limit-limit refines this account's
-		// per-endpoint cap toward X's real, possibly-shifting per-account budget.
-		// Recovery sub-requests (ct0-rotation / relogin) are not re-synced — the
-		// cap is only ever refined, never collapsed (parseRateLimitLimit guards
-		// non-positive), so the next primary response re-syncs. No-op when the
-		// header is absent/malformed (the seeded default stands).
-		acc.SyncRateLimit(endpoint, respHdrs)
+		// X's rate-limit headers are the authority: every primary response (200,
+		// 429, 4xx) refines the per-endpoint cap, updates the account's window
+		// state, feeds the ratelimit metrics, and rotates the endpoint away from
+		// this account when the window is spent. Recovery sub-requests (ct0
+		// rotation / relogin) are not re-observed; the next primary response is.
+		// No-op for absent/malformed headers (the seeded default stands).
+		c.observeRateLimit(acc, endpoint, respHdrs, true)
 
 		// Handle HTTP status
 		switch {
@@ -711,9 +710,10 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 		acc.proxyConsecFails = 0
 		acc.mu.Unlock()
 
-		// Adaptive rate-limit sync (see doPoolRequest): refine this account's
-		// per-endpoint cap from x-rate-limit-limit on every response.
-		acc.SyncRateLimit(endpoint, respHdrs)
+		// Record the window X reports (see doPoolRequest). Writes are pinned to
+		// the caller's account, so there is nothing to rotate to: state and
+		// metrics only, no hold.
+		c.observeRateLimit(acc, endpoint, respHdrs, false)
 
 		switch {
 		case status == 429:
@@ -860,6 +860,21 @@ func requiresAuth(endpoint string) bool {
 		return true
 	}
 	return false
+}
+
+// observeRateLimit applies one response's x-rate-limit-* headers: the adaptive
+// per-endpoint cap, the account's window state (recordWindow), the
+// ratelimit metrics, and, when hold is set, an endpoint block until the window
+// resets if it is spent (holdIfExhausted). hold is false for writes pinned to a
+// caller-chosen account.
+func (c *Client) observeRateLimit(acc *Account, endpoint string, hdrs map[string]string, hold bool) {
+	acc.SyncRateLimit(endpoint, hdrs)
+	obs := parseRateLimitHeaders(hdrs)
+	acc.recordWindow(endpoint, obs)
+	c.metrics.recordRateLimit(endpoint, obs)
+	if hold && acc.holdIfExhausted(endpoint) {
+		c.metrics.recordHold(endpoint)
+	}
 }
 
 // escalateHeaderless88 benches an account whose run of header-less code-88

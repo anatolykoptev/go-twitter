@@ -135,7 +135,7 @@ func TestWithSocial_NotFoundNoRetry(t *testing.T) {
 	defer srv.Close()
 
 	sc := social.NewClient(srv.URL, "tok", "test")
-	_, err := withSocialAccount(context.Background(), sc, func(context.Context, *Client) (*Tweet, error) {
+	_, err := withSocialAccount(context.Background(), sc, "", func(context.Context, *Client) (*Tweet, error) {
 		return nil, fmt.Errorf("tweet 123 absent: %w", ErrNotFound)
 	})
 	require.Error(t, err)

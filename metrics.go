@@ -28,6 +28,9 @@ const (
 	metricPoolWait        = "twitter.client.pool.wait.duration"
 	metricRelogins        = "twitter.client.relogins"
 	metricProxyFailures   = "twitter.client.proxy.failures"
+	metricRateLimitRemain = "twitter.client.ratelimit.remaining"
+	metricRateLimitLimit  = "twitter.client.ratelimit.limit"
+	metricRateLimitHolds  = "twitter.client.ratelimit.holds"
 
 	// Attribute keys.
 	attrOperation    = "twitter.operation"
@@ -91,6 +94,9 @@ var (
 	freshnessBuckets = []float64{0.5, 1, 2, 3, 5, 8, 12, 20, 30, 45, 60, 120, 300, 900, 3600}
 	// poolWaitBuckets (seconds) resolve a 50 ms - 5 min pool wait (poolWaitCap).
 	poolWaitBuckets = []float64{0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300}
+	// rateLimitBuckets (requests) resolve X's per-endpoint windows, which run
+	// from tens to ~500 requests, with fine steps near exhaustion.
+	rateLimitBuckets = []float64{0, 1, 2, 5, 10, 25, 50, 100, 150, 200, 300, 500}
 )
 
 // clientMetrics holds the instruments. A nil *clientMetrics is valid and
@@ -101,6 +107,9 @@ type clientMetrics struct {
 	poolWait        metric.Float64Histogram
 	relogins        metric.Int64Counter
 	proxyFailures   metric.Int64Counter
+	rlRemaining     metric.Int64Histogram
+	rlLimit         metric.Int64Histogram
+	rlHolds         metric.Int64Counter
 	now             func() time.Time // injectable clock for freshness
 }
 
@@ -173,6 +182,26 @@ func newClientMetrics(mp metric.MeterProvider) *clientMetrics {
 		metric.WithDescription("Proxy-layer failures that put an account's proxy into backoff.")); err != nil {
 		fail(metricProxyFailures, err)
 		m.proxyFailures = noop.Int64Counter{}
+	}
+	if m.rlRemaining, err = meter.Int64Histogram(metricRateLimitRemain,
+		metric.WithUnit("{request}"),
+		metric.WithDescription("Requests X reports as remaining in the rate-limit window (x-rate-limit-remaining), by operation."),
+		metric.WithExplicitBucketBoundaries(rateLimitBuckets...)); err != nil {
+		fail(metricRateLimitRemain, err)
+		m.rlRemaining = noop.Int64Histogram{}
+	}
+	if m.rlLimit, err = meter.Int64Histogram(metricRateLimitLimit,
+		metric.WithUnit("{request}"),
+		metric.WithDescription("Per-window request ceiling X reports (x-rate-limit-limit), by operation."),
+		metric.WithExplicitBucketBoundaries(rateLimitBuckets...)); err != nil {
+		fail(metricRateLimitLimit, err)
+		m.rlLimit = noop.Int64Histogram{}
+	}
+	if m.rlHolds, err = meter.Int64Counter(metricRateLimitHolds,
+		metric.WithUnit("{hold}"),
+		metric.WithDescription("Times an endpoint was held on an account until its window reset because x-rate-limit-remaining showed the window spent, by operation.")); err != nil {
+		fail(metricRateLimitHolds, err)
+		m.rlHolds = noop.Int64Counter{}
 	}
 	return m
 }
@@ -308,6 +337,30 @@ func (m *clientMetrics) recordPoolWait(endpoint string, d time.Duration, result 
 		attribute.String(attrOperation, endpoint),
 		attribute.String(attrResult, result),
 	))
+}
+
+// recordRateLimit records what one response said about its endpoint's window:
+// remaining and limit, each only when the response carried a parseable header.
+func (m *clientMetrics) recordRateLimit(endpoint string, obs rateLimitObs) {
+	if m == nil {
+		return
+	}
+	attrs := metric.WithAttributes(attribute.String(attrOperation, endpoint))
+	if obs.remaining >= 0 {
+		m.rlRemaining.Record(context.Background(), int64(obs.remaining), attrs)
+	}
+	if obs.limit > 0 {
+		m.rlLimit.Record(context.Background(), int64(obs.limit), attrs)
+	}
+}
+
+// recordHold counts one proactive hold: an endpoint taken out of rotation on an
+// account because a response showed its window spent.
+func (m *clientMetrics) recordHold(endpoint string) {
+	if m == nil {
+		return
+	}
+	m.rlHolds.Add(context.Background(), 1, metric.WithAttributes(attribute.String(attrOperation, endpoint)))
 }
 
 func (m *clientMetrics) recordRelogin(outcome string) {

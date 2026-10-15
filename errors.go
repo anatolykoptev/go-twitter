@@ -343,10 +343,11 @@ func partialSuccessClass(c errorClass) bool {
 const minRateLimitBlock = time.Second
 
 // parseRateLimitReset parses the X-Rate-Limit-Reset unix timestamp header.
-// Falls back to 15 minutes from now if missing or invalid; a parsed time less
-// than minRateLimitBlock away is raised to now+minRateLimitBlock.
+// Falls back to 15 minutes from now if missing, invalid, or further than
+// maxRateLimitReset away (a malformed value); a parsed time less than
+// minRateLimitBlock away is raised to now+minRateLimitBlock.
 func parseRateLimitReset(v string) time.Time {
-	if ts, err := strconv.ParseInt(v, 10, 64); err == nil {
+	if ts, err := strconv.ParseInt(v, 10, 64); err == nil && time.Unix(ts, 0).Sub(time.Now()) <= maxRateLimitReset {
 		if floor := time.Now().Add(minRateLimitBlock); time.Unix(ts, 0).Before(floor) {
 			return floor
 		}

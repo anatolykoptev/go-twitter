@@ -95,7 +95,7 @@ var testHookSocialClient func(*Client)
 // Latest tab, retrying with different accounts on failure. go-social rotates
 // accounts on each call, so retries naturally use different credentials.
 func SearchWithSocial(ctx context.Context, sc *social.Client, query string, limit int) ([]*Tweet, error) {
-	return withSocialAccount(ctx, sc, func(ctx context.Context, tw *Client) ([]*Tweet, error) {
+	return withSocialAccount(ctx, sc, "SearchTimeline", func(ctx context.Context, tw *Client) ([]*Tweet, error) {
 		return tw.SearchTimeline(ctx, query, limit)
 	})
 }
@@ -106,21 +106,21 @@ func SearchTweetsWithSocial(ctx context.Context, sc *social.Client, query string
 	if product != SearchTop && product != SearchLatest {
 		return nil, fmt.Errorf("SearchTweets: invalid product %q (want Top or Latest)", product)
 	}
-	return withSocialAccount(ctx, sc, func(ctx context.Context, tw *Client) ([]*Tweet, error) {
+	return withSocialAccount(ctx, sc, "SearchTimeline", func(ctx context.Context, tw *Client) ([]*Tweet, error) {
 		return tw.SearchTweets(ctx, query, product, limit)
 	})
 }
 
 // SearchUsersWithSocial searches the People tab.
 func SearchUsersWithSocial(ctx context.Context, sc *social.Client, query string, limit int) ([]*TwitterUser, error) {
-	return withSocialAccount(ctx, sc, func(ctx context.Context, tw *Client) ([]*TwitterUser, error) {
+	return withSocialAccount(ctx, sc, "SearchTimeline", func(ctx context.Context, tw *Client) ([]*TwitterUser, error) {
 		return tw.SearchUsers(ctx, query, limit)
 	})
 }
 
 // GetUserWithSocial fetches a profile by handle.
 func GetUserWithSocial(ctx context.Context, sc *social.Client, handle string) (*TwitterUser, error) {
-	return withSocialAccount(ctx, sc, func(ctx context.Context, tw *Client) (*TwitterUser, error) {
+	return withSocialAccount(ctx, sc, "UserByScreenName", func(ctx context.Context, tw *Client) (*TwitterUser, error) {
 		return tw.GetUserByScreenName(ctx, handle)
 	})
 }
@@ -128,7 +128,7 @@ func GetUserWithSocial(ctx context.Context, sc *social.Client, handle string) (*
 // GetUserTweetsWithSocial resolves the handle and fetches its recent tweets —
 // two GraphQL calls inside one account attempt.
 func GetUserTweetsWithSocial(ctx context.Context, sc *social.Client, handle string, limit int) ([]*Tweet, error) {
-	return withSocialAccount(ctx, sc, func(ctx context.Context, tw *Client) ([]*Tweet, error) {
+	return withSocialAccount(ctx, sc, "UserTweets", func(ctx context.Context, tw *Client) ([]*Tweet, error) {
 		u, err := tw.GetUserByScreenName(ctx, handle)
 		if err != nil {
 			return nil, fmt.Errorf("resolve %s: %w", handle, err)
@@ -144,7 +144,7 @@ func GetTweetConversationWithSocial(ctx context.Context, sc *social.Client, twee
 		focal   *Tweet
 		replies []*Tweet
 	}
-	res, err := withSocialAccount(ctx, sc, func(ctx context.Context, tw *Client) (conv, error) {
+	res, err := withSocialAccount(ctx, sc, "TweetDetail", func(ctx context.Context, tw *Client) (conv, error) {
 		f, r, err := tw.GetTweetConversation(ctx, tweetID)
 		return conv{f, r}, err
 	})
@@ -154,12 +154,12 @@ func GetTweetConversationWithSocial(ctx context.Context, sc *social.Client, twee
 // withSocialAccount runs fn on a client built from a freshly acquired account,
 // retrying across accounts on failure — the acquire→call→ReportUsage loop
 // SearchWithSocial grew organically, generalized.
-func withSocialAccount[T any](ctx context.Context, sc *social.Client, fn func(context.Context, *Client) (T, error)) (T, error) {
+func withSocialAccount[T any](ctx context.Context, sc *social.Client, op string, fn func(context.Context, *Client) (T, error)) (T, error) {
 	var lastErr error
 	var zero T
 	endpointFaults := 0
 	for attempt := range maxSocialRetries {
-		res, err := tryWithAccount(ctx, sc, fn)
+		res, err := tryWithAccount(ctx, sc, op, fn)
 		if err == nil {
 			return res, nil
 		}
@@ -192,9 +192,9 @@ func withSocialAccount[T any](ctx context.Context, sc *social.Client, fn func(co
 // escalation threshold on this path: a leased account that keeps answering 88
 // surfaces as a call error and is reported to the credential service as
 // "auth_error", never "banned".
-func tryWithAccount[T any](ctx context.Context, sc *social.Client, fn func(context.Context, *Client) (T, error)) (T, error) {
+func tryWithAccount[T any](ctx context.Context, sc *social.Client, op string, fn func(context.Context, *Client) (T, error)) (T, error) {
 	var zero T
-	creds, err := sc.AcquireAccount(ctx, "twitter")
+	creds, err := sc.AcquireAccountFor(ctx, "twitter", op)
 	if err != nil {
 		return zero, fmt.Errorf("acquire account: %w", err)
 	}
@@ -214,6 +214,19 @@ func tryWithAccount[T any](ctx context.Context, sc *social.Client, fn func(conte
 		credsAuthoritative: true, // freshly leased: a stale session file must not override them
 	}
 
+	// report sends the usage verdict together with the last rate-limit window
+	// this lease observed (op's endpoint when seen, else the latest endpoint),
+	// so the credential service can steer later leases by endpoint budget. It
+	// carries the window on success AND failure; with no header seen it sends
+	// the legacy body.
+	report := func(status string) {
+		var rl *social.RateLimit
+		if ep, st, ok := acc.latestRateLimit(op); ok {
+			rl = &social.RateLimit{Endpoint: ep, Limit: st.limit, Remaining: st.remaining, Reset: st.resetAt.Unix()}
+		}
+		_ = sc.ReportUsageWithRateLimit(ctx, "twitter", creds.ID, status, rl)
+	}
+
 	tw, err := NewClient(ClientConfig{
 		Accounts:  []*Account{acc},
 		RateLimit: ratelimit.Config{RequestsPerWindow: 50, WindowDuration: 15 * time.Minute},
@@ -223,7 +236,7 @@ func tryWithAccount[T any](ctx context.Context, sc *social.Client, fn func(conte
 		skipPoolGauge: true,
 	})
 	if err != nil {
-		_ = sc.ReportUsage(ctx, "twitter", creds.ID, "auth_error")
+		report("auth_error")
 		return zero, fmt.Errorf("create client for %s: %w", acc.Username, err)
 	}
 
@@ -238,7 +251,7 @@ func tryWithAccount[T any](ctx context.Context, sc *social.Client, fn func(conte
 			// The account completed the request fine — the resource is just
 			// absent. Healthy account, deterministic miss: report success and
 			// propagate untouched so withSocialAccount doesn't retry.
-			_ = sc.ReportUsage(ctx, "twitter", creds.ID, "success")
+			report("success")
 			return zero, err
 		}
 		if errors.Is(err, ErrEndpoint) {
@@ -247,7 +260,7 @@ func tryWithAccount[T any](ctx context.Context, sc *social.Client, fn func(conte
 			// credential is innocent. Report success (never auth_error, which
 			// would poison a healthy account in the shared pool) and let
 			// withSocialAccount rotate to the next lease inside its budget.
-			_ = sc.ReportUsage(ctx, "twitter", creds.ID, "success")
+			report("success")
 			return zero, fmt.Errorf("%s: %w", acc.Username, err)
 		}
 		if errors.Is(err, ErrOverloaded) {
@@ -260,10 +273,10 @@ func tryWithAccount[T any](ctx context.Context, sc *social.Client, fn func(conte
 			// withSocialAccount rotate to the next lease.
 			return zero, fmt.Errorf("%s: %w", acc.Username, err)
 		}
-		_ = sc.ReportUsage(ctx, "twitter", creds.ID, "auth_error")
+		report("auth_error")
 		return zero, fmt.Errorf("%s: %w", acc.Username, err)
 	}
 
-	_ = sc.ReportUsage(ctx, "twitter", creds.ID, "success")
+	report("success")
 	return res, nil
 }
