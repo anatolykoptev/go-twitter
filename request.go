@@ -266,6 +266,13 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 				c.pool.SoftDeactivate(acc, c.cfg.AuthCooldown)
 				lastErr = &APIError{Status: status2, Codes: extractErrorCodes(body2), Class: errAuthExpired, Err: err2, Message: "post-relogin request failed"}
 				continue
+			case errOverloaded:
+				// LoadShed riding a 401/403 body is still X-side overload:
+				// rotate to the next account, never charge this one.
+				apiErr := newAPIError(status, body, respHdrs)
+				apiErr.Message = fmt.Sprintf("%s HTTP %d: %s", endpoint, status, truncateBytes(body, 200))
+				lastErr = apiErr
+				continue
 			default:
 				acc.RecordFailure()
 				apiErr := newAPIError(status, body, respHdrs)
@@ -276,6 +283,21 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 
 		case status != 200:
 			c.recordAPICall(endpoint, false, false)
+			apiErr := newAPIError(status, body, respHdrs)
+			apiErr.Message = fmt.Sprintf("%s HTTP %d: %s", endpoint, status, truncateBytes(body, 200))
+			if apiErr.Class == errEndpoint || apiErr.Class == errOverloaded {
+				// Endpoint-wide fault (#61): a 404/GraphQL-shaped-400 means the
+				// committed request shape is stale for EVERY account (stale
+				// queryId, missing xtid, feature mismatch); a 5xx/LoadShed means
+				// X itself is shedding load. The serving account is innocent —
+				// rotate to the next account inside the attempt budget, never
+				// charge it.
+				slog.Warn("endpoint fault, rotating account",
+					slog.String("endpoint", endpoint), slog.Int("status", status),
+					slog.String("user", acc.Username))
+				lastErr = apiErr
+				continue
+			}
 			slog.Warn("doGET non-200", slog.String("endpoint", endpoint), slog.Int("status", status), slog.String("body", truncateBytes(body, 500)))
 			if shouldDeactivate := acc.RecordFailure(); shouldDeactivate {
 				total, failed, consec := acc.Stats()
@@ -291,13 +313,29 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 				// upstream recovers. Permanent removal is reserved for errSuspended.
 				c.pool.SoftDeactivateBackoff(acc, c.nonResponsiveBackoff, trip)
 			}
-			apiErr := newAPIError(status, body, respHdrs)
-			apiErr.Message = fmt.Sprintf("%s HTTP %d: %s", endpoint, status, truncateBytes(body, 200))
 			return nil, nil, apiErr
 		}
 
 		// HTTP 200 — check for error codes in response body
 		errClass := classifyError(body, respHdrs)
+
+		// A 200 carrying errors AND usable data is a partial success (#61d):
+		// X answered the query and degraded some fields. This generalizes the
+		// historical code-131-only acceptance to every error code; a 200 with
+		// errors and NO usable data still fails through the class switch below.
+		if errClass != errNone && hasResponseData(body) {
+			if newCT0 := extractCT0FromHeaders(respHdrs); newCT0 != "" && newCT0 != ct0 {
+				acc.SetCT0(newCT0)
+				authTok2, ct02, _ := acc.Credentials()
+				c.saveSession(acc, authTok2, ct02)
+			}
+			c.recordAPICall(endpoint, true, false)
+			acc.RecordSuccess()
+			slog.Debug("errors with usable data, treating as success",
+				slog.String("endpoint", endpoint), slog.Int("class", int(errClass)))
+			return body, respHdrs, nil
+		}
+
 		switch errClass {
 		case errNone:
 			if newCT0 := extractCT0FromHeaders(respHdrs); newCT0 != "" && newCT0 != ct0 {
@@ -335,20 +373,19 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 			continue
 
 		case errInternal:
-			if hasResponseData(body) {
-				if newCT0 := extractCT0FromHeaders(respHdrs); newCT0 != "" && newCT0 != ct0 {
-					acc.SetCT0(newCT0)
-					authTok2, ct02, _ := acc.Credentials()
-					c.saveSession(acc, authTok2, ct02)
-				}
-				c.recordAPICall(endpoint, true, false)
-				acc.RecordSuccess()
-				slog.Debug("error 131 with usable data, treating as success", slog.String("endpoint", endpoint))
-				return body, respHdrs, nil
-			}
 			slog.Warn("error 131 without data, retrying", slog.String("user", acc.Username), slog.String("endpoint", endpoint))
 			apiErr := newAPIError(200, body, respHdrs)
 			apiErr.Message = "Twitter internal error (131)"
+			lastErr = apiErr
+			continue
+
+		case errOverloaded:
+			// LoadShed on a 200: X is shedding load — rotate to the next
+			// account without charging this one.
+			slog.Warn("X overloaded (LoadShed), rotating account",
+				slog.String("user", acc.Username), slog.String("endpoint", endpoint))
+			apiErr := newAPIError(200, body, respHdrs)
+			apiErr.Message = "X overloaded (LoadShed)"
 			lastErr = apiErr
 			continue
 
@@ -655,6 +692,11 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 				}
 				lastErr = &APIError{Status: status2, Codes: extractErrorCodes(body2), Class: errAuthExpired, Err: err2, Message: "post-relogin request failed"}
 				continue
+			case errOverloaded:
+				// LoadShed inside a 401/403 body: X-side, not the account's.
+				apiErr := newAPIError(status, body, respHdrs)
+				apiErr.Message = fmt.Sprintf("%s HTTP %d: %s", endpoint, status, truncateBytes(body, 200))
+				return nil, apiErr
 			default:
 				acc.RecordFailure()
 				apiErr := newAPIError(status, body, respHdrs)
@@ -664,14 +706,35 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 
 		case status != 200:
 			c.recordAPICall(endpoint, false, false)
-			acc.RecordFailure()
 			apiErr := newAPIError(status, body, respHdrs)
 			apiErr.Message = fmt.Sprintf("%s HTTP %d: %s", endpoint, status, truncateBytes(body, 200))
+			// Endpoint faults (#61) do not charge the account — but a write is
+			// never replayed on another account, so this returns immediately.
+			if apiErr.Class != errEndpoint && apiErr.Class != errOverloaded {
+				acc.RecordFailure()
+			}
 			return nil, apiErr
 		}
 
 		// HTTP 200 — check for error codes in response body
 		errClass := classifyError(body, respHdrs)
+
+		// A 200 carrying errors AND usable data is a partial success (#61d) —
+		// the same generalized rule as doPoolRequest. Errors with no usable
+		// data still fail through the class switch.
+		if errClass != errNone && hasResponseData(body) {
+			if newCT0 := extractCT0FromHeaders(respHdrs); newCT0 != "" && newCT0 != ct0 {
+				acc.SetCT0(newCT0)
+				authTok2, ct02, _ := acc.Credentials()
+				c.saveSession(acc, authTok2, ct02)
+			}
+			c.recordAPICall(endpoint, true, false)
+			acc.RecordSuccess()
+			slog.Debug("doPOST: errors with usable data, treating as success",
+				slog.String("endpoint", endpoint), slog.Int("class", int(errClass)))
+			return body, nil
+		}
+
 		switch errClass {
 		case errNone:
 			if newCT0 := extractCT0FromHeaders(respHdrs); newCT0 != "" && newCT0 != ct0 {
@@ -698,6 +761,14 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 			acc.MarkEndpointRateLimited(endpoint, parseRateLimitReset(respHdrs[xRateLimitReset]))
 			apiErr := newAPIError(200, body, respHdrs)
 			apiErr.Message = fmt.Sprintf("%s rate limited (code 88)", endpoint)
+			return nil, apiErr
+		case errInternal, errOverloaded:
+			// X-side fault (131 internal, LoadShed) with no usable data: not
+			// the account's — no failure charge, and a non-idempotent write is
+			// never replayed on another account.
+			c.recordAPICall(endpoint, false, false)
+			apiErr := newAPIError(200, body, respHdrs)
+			apiErr.Message = fmt.Sprintf("%s X-side error class %d: %s", endpoint, errClass, truncateBytes(body, 200))
 			return nil, apiErr
 		default:
 			c.recordAPICall(endpoint, false, false)

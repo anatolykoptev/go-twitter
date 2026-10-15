@@ -213,6 +213,16 @@ func tryWithAccount[T any](ctx context.Context, sc *social.Client, fn func(conte
 			_ = sc.ReportUsage(ctx, "twitter", creds.ID, "success")
 			return zero, err
 		}
+		if IsEndpointFault(err) {
+			// Endpoint-wide fault (#61): a 404/GraphQL-shaped-400 means the
+			// committed request shape is stale for EVERY account, a 5xx/LoadShed
+			// means X itself is shedding load — the leased credential is
+			// innocent. Report success (never auth_error, which would poison a
+			// healthy account in the shared pool) and let withSocialAccount
+			// rotate to the next lease inside its retry budget.
+			_ = sc.ReportUsage(ctx, "twitter", creds.ID, "success")
+			return zero, fmt.Errorf("%s: %w", acc.Username, err)
+		}
 		_ = sc.ReportUsage(ctx, "twitter", creds.ID, "auth_error")
 		return zero, fmt.Errorf("%s: %w", acc.Username, err)
 	}
