@@ -76,6 +76,10 @@ type socialRig struct {
 	// must not mark a healthy leased account failed in the shared pool".
 	reportsMu sync.Mutex
 	reports   []string
+
+	// leaseProxy, when set, is stamped onto every Credentials the fake
+	// go-social hands out — the seam for a malformed/dead-proxy lease.
+	leaseProxy string
 }
 
 func newSocialRig(t *testing.T) *socialRig {
@@ -117,7 +121,8 @@ func newSocialRigX(t *testing.T, xHandler http.HandlerFunc) *socialRig {
 			who = "b"
 		}
 		_ = json.NewEncoder(w).Encode(social.Credentials{
-			ID: "acc-" + who,
+			ID:    "acc-" + who,
+			Proxy: r.leaseProxy,
 			Credentials: map[string]string{
 				"username": "user_" + who, "auth_token": "tok" + who, "ct0": "ct0" + who,
 			},

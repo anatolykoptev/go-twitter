@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	stealth "github.com/anatolykoptev/go-stealth"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -345,4 +346,72 @@ func TestEndpointFault_ErrorsPlusData_KeepsAccountDeadClasses(t *testing.T) {
 			assert.False(t, accs[0].IsActive(), "the dead account must be benched, not reported healthy")
 		})
 	}
+}
+
+// F9 — journey: go-social hands out a lease whose proxy string is malformed.
+// A caller-requested proxy must never fail open to a direct connection: the
+// per-call NewClient errors, the read fails, and ZERO requests reach X — the
+// leased auth_token/ct0 cannot egress from this host's IP through the
+// proxy-less shared client (clientForAccount falls back to it when
+// acc.client is nil, and the *WithSocial path sets no DefaultProxy).
+//
+// Mutation: in client.go NewClient restore the warn-and-continue on a failed
+// per-account client build => RED (the read goes out through the shared
+// client and fake X counts the hit).
+func TestSocial_LeaseProxyMalformed_FailsClosedNoEgress(t *testing.T) {
+	var xHits atomic.Int32
+	r := newSocialRigX(t, func(w http.ResponseWriter, _ *http.Request) {
+		xHits.Add(1)
+		_, _ = w.Write([]byte(socialUserBody))
+	})
+	r.leaseProxy = "not a url"
+
+	_, err := GetUserWithSocial(context.Background(), r.sc, "tesla")
+	require.Error(t, err)
+	assert.EqualValues(t, 0, xHits.Load(),
+		"a lease whose proxy cannot be built must never reach X — its creds would egress direct")
+
+	r.reportsMu.Lock()
+	defer r.reportsMu.Unlock()
+	require.NotEmpty(t, r.reports)
+	for i, s := range r.reports {
+		assert.Equal(t, "auth_error", s,
+			"report %d: a lease that could not even build its client reports auth_error", i)
+	}
+}
+
+// F10 — an errOverloaded with no other eligible account must not sleep the
+// retry backoff: the next pick is a guaranteed "pool exhausted" (the single
+// account is endpointFaulted), so the ~1 s delay is pure waste.
+//
+// Mutation: in request.go doPoolRequest drop the Healthy gate so the backoff
+// is unconditional again => RED (the call sleeps the full backoff).
+func TestEndpointFault_OverloadedSkipsBackoffWhenPoolEmpty(t *testing.T) {
+	fake := newPoolWaitFake(t)
+	c, _ := newPoolWaitClient(t, 1)
+	// Deterministic backoff near the production pace: long enough that
+	// sleeping it is unmistakable, short enough to keep the suite fast.
+	stealth.DefaultBackoff = stealth.BackoffConfig{
+		InitialWait: 800 * time.Millisecond,
+		MaxWait:     800 * time.Millisecond,
+		Multiplier:  1,
+	}
+
+	// Warm the transport: the first request pays a ~1 s one-off setup that
+	// would otherwise eat the measured window (same as the pool-wait tests).
+	_, _, err := c.doGET(context.Background(), poolWaitEndpoint, fake.url())
+	require.NoError(t, err)
+	fake.hits.Store(0)
+
+	fake.status.Store(http.StatusServiceUnavailable)
+	fake.body = `upstream connect error`
+	start := time.Now()
+	_, _, err = c.doGET(context.Background(), poolWaitEndpoint, fake.url())
+	elapsed := time.Since(start)
+
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, ErrOverloaded), "want overloaded, got %v", err)
+	assert.EqualValues(t, 1, fake.hits.Load(), "one attempt, then the pool is provably empty")
+	assert.Less(t, elapsed, 500*time.Millisecond,
+		"with no eligible account the retry backoff must be skipped, not slept")
 }
