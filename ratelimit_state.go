@@ -25,6 +25,13 @@ const rateLimitHeadroom = 2
 // discard every genuine later one as "earlier".
 const maxRateLimitReset = time.Hour
 
+// resetJitterTolerance is how far two resets may differ and still name the same
+// window. Real windows are 15 minutes apart, so 5s cannot merge two of them,
+// while it absorbs the second-level wobble in X's reset between responses that
+// would otherwise let a stale response look like a newer window and raise
+// remaining.
+const resetJitterTolerance = 5 * time.Second
+
 // rateLimitObs is what ONE response said about its endpoint's window. Absent or
 // unparseable headers leave the matching field at its "unknown" value.
 type rateLimitObs struct {
@@ -74,10 +81,12 @@ func (a *Account) nowLocked() time.Time {
 // response must never raise remaining. A window is identified by its reset
 // timestamp (X reports the same reset for every response in a window), which
 // makes arrival order irrelevant and needs no send timestamps:
-//   - a later reset is a newer window: replace the state outright;
-//   - an equal reset is the same window, where remaining only ever falls: keep
-//     the minimum, so a late, stale response cannot raise it;
-//   - an earlier reset is an older window: ignore it.
+//   - a reset later by more than resetJitterTolerance is a newer window:
+//     replace the state outright;
+//   - a reset within the tolerance is the same window (X's reset can wobble by
+//     a second between responses), where remaining only ever falls: keep the
+//     minimum, so a late, stale response cannot raise it, and the later reset;
+//   - a reset earlier by more than the tolerance is an older window: ignore it.
 //
 // Ordering by send time instead would need a timestamp captured per request and
 // still mis-orders when two requests are sent in the same instant.
@@ -93,9 +102,12 @@ func (a *Account) recordWindow(endpoint string, obs rateLimitObs) {
 	now := a.nowLocked()
 	cur, ok := a.rlState[endpoint]
 	switch {
-	case !ok || obs.resetAt.After(cur.resetAt):
+	case !ok || obs.resetAt.After(cur.resetAt.Add(resetJitterTolerance)):
 		a.rlState[endpoint] = rateLimitState{limit: obs.limit, remaining: obs.remaining, resetAt: obs.resetAt, observedAt: now}
-	case obs.resetAt.Equal(cur.resetAt):
+	case !obs.resetAt.Before(cur.resetAt.Add(-resetJitterTolerance)):
+		if obs.resetAt.After(cur.resetAt) {
+			cur.resetAt = obs.resetAt
+		}
 		if obs.remaining < cur.remaining {
 			cur.remaining = obs.remaining
 		}

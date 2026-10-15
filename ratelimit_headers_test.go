@@ -429,3 +429,24 @@ func TestParseRateLimitReset_CeilingFallsBackToDefault(t *testing.T) {
 	near := time.Now().Add(5 * time.Minute)
 	assert.Equal(t, near.Unix(), parseRateLimitReset(strconv.FormatInt(near.Unix(), 10)).Unix())
 }
+
+// Reset jitter: a stale response whose reset is a second later is the same
+// window and must not raise remaining; a reset a whole window later is new.
+//
+// Mutation: ratelimit_state.go recordWindow, set resetJitterTolerance to 0 => RED.
+func TestRateLimitHeaders_ResetJitterIsSameWindow(t *testing.T) {
+	acc := newRateTestAccount("A", ratelimit.Config{RequestsPerWindow: 50, WindowDuration: 15 * time.Minute})
+	base := time.Now().Add(10 * time.Minute).Truncate(time.Second)
+	rec := func(remaining int, reset time.Time) {
+		acc.recordWindow(rlEndpoint, rateLimitObs{remaining: remaining, resetAt: reset})
+	}
+	rec(10, base)
+	rec(40, base.Add(time.Second)) // stale response, reset wobbled +1s
+	_, remaining, resetAt, _ := acc.rateLimitWindow(rlEndpoint)
+	assert.Equal(t, 10, remaining, "a stale response with a 1s-later reset must not raise remaining")
+	assert.Equal(t, base.Add(time.Second), resetAt, "the later reset is kept")
+
+	rec(45, base.Add(15*time.Minute)) // a genuine next window
+	_, remaining, _, _ = acc.rateLimitWindow(rlEndpoint)
+	assert.Equal(t, 45, remaining)
+}
