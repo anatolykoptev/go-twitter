@@ -421,6 +421,9 @@ func (c *Client) doMediaRequest(ctx context.Context, acc *Account, method, urlSt
 		acc.proxyConsecFails = 0
 		acc.mu.Unlock()
 
+		// Record X's window for the upload endpoint; a write, so no hold.
+		c.observeRateLimit(acc, epUploadMedia, respHdrs, false)
+
 		switch {
 		case status == 429:
 			c.recordAPICall(epUploadMedia, false, true)

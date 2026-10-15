@@ -24,6 +24,8 @@ metrics.
 | `twitter.client.pool.wait.duration` | histogram | `s` | `twitter.operation`, `twitter.result` |
 | `twitter.client.relogins` | counter | `{relogin}` | `twitter.outcome` |
 | `twitter.client.proxy.failures` | counter | `{failure}` | none |
+| `twitter.client.ratelimit.remaining` | histogram | `{request}` | `twitter.operation` |
+| `twitter.client.ratelimit.limit` | histogram | `{request}` | `twitter.operation` |
 
 No instrument ever carries an account handle, user ID, list ID, search query or
 URL as an attribute.
@@ -108,6 +110,28 @@ lag := time.Since(created)
 
 Buckets (seconds): `0.5, 1, 2, 3, 5, 8, 12, 20, 30, 45, 60, 120, 300, 900, 3600`
 - dense across 0.5 s to 60 s, with a coarse tail for quiet timelines.
+
+### `twitter.client.ratelimit.remaining` / `twitter.client.ratelimit.limit`
+
+What X says about the rate-limit window of an operation, taken from the
+`x-rate-limit-remaining` and `x-rate-limit-limit` response headers. One record
+per HTTP response that carries the header, on the pool GET/POST, account-pinned
+POST (writes) and media-upload paths, for every status (200, 429, 4xx). A
+response without the header records nothing. Guest-fallback and recovery
+sub-requests (ct0 rotation, relogin retry) are not recorded.
+
+- `twitter.operation`: same bounded endpoint label as `request.duration`. There
+  is no account attribute: the library never labels by account handle, and
+  per-account detail is not needed to learn the per-operation limit.
+- `limit` is the per-account, per-endpoint ceiling of one window, so its
+  distribution collapses to the real limit X enforces for that operation
+  (`max` over a window is the number to read). It is what to use to retire the
+  hand-measured `endpointDefaultLimit` table.
+- `remaining` shows how close polling runs to the ceiling: a mass in the `0`-`2`
+  buckets means accounts are being spent to exhaustion (and held back until
+  reset, see README), a mass near `limit` means headroom is unused.
+
+Buckets (requests): `0, 1, 2, 5, 10, 25, 50, 100, 150, 200, 300, 500`.
 
 ### `twitter.client.pool.accounts`
 

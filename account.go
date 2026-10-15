@@ -38,6 +38,14 @@ type Account struct {
 	consecHeaderless88 int // consecutive code-88s with no parseable x-rate-limit-remaining
 	rateLimiter        *ratelimit.Limiter
 
+	// Header-derived rate-limit state (see ratelimit_state.go), per endpoint.
+	// rlState is the last known X window; blockedUntil is every explicit block
+	// (429, code 88, an exhausted window). Both are consulted instead of the
+	// local request counter once an endpoint has header state.
+	rlState      map[string]rateLimitState
+	blockedUntil map[string]time.Time
+	clock        func() time.Time // nil = time.Now; tests inject a fake
+
 	pool.HealthTracker
 }
 
@@ -149,15 +157,34 @@ func (a *Account) noteRateLimited88(respHdrs map[string]string) int {
 }
 
 // AllowRequest checks if this account can make a request to the given endpoint.
+// While the endpoint's header window is live (see headerAuthority) the account
+// is allowed unless explicitly blocked: the headers are the authority and the
+// local counter is skipped. Otherwise (cold start, headers absent, or the
+// window expired) the local counter decides.
 func (a *Account) AllowRequest(endpoint string) bool {
-	a.mu.Lock()
-	if a.rateLimiter == nil {
-		a.mu.Unlock()
+	authority, blocked, now, rl := a.endpointGate(endpoint)
+	if authority {
+		return !now.Before(blocked)
+	}
+	if rl == nil {
 		return true
 	}
-	rl := a.rateLimiter
-	a.mu.Unlock()
 	return rl.Allow(endpoint)
+}
+
+// endpointGate snapshots, under one lock, everything the eligibility methods
+// need: whether the header window is authoritative for the endpoint, its
+// explicit block, the account clock, and the local limiter.
+//
+// The window is authoritative only until its resetAt. After that the state
+// proves nothing (X may have stopped sending headers for the operation), so the
+// local counter takes over again until a response renews the window.
+func (a *Account) endpointGate(endpoint string) (authority bool, blocked, now time.Time, rl *ratelimit.Limiter) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	now = a.nowLocked()
+	st, ok := a.rlState[endpoint]
+	return ok && now.Before(st.resetAt), a.blockedUntil[endpoint], now, a.rateLimiter
 }
 
 // UpdateEndpointLimit sets this account's per-window request cap for the given
@@ -189,36 +216,42 @@ func (a *Account) SyncRateLimit(endpoint string, respHdrs map[string]string) {
 // MarkEndpointRateLimited marks an endpoint as rate-limited for this account.
 func (a *Account) MarkEndpointRateLimited(endpoint string, until time.Time) {
 	a.mu.Lock()
-	if a.rateLimiter == nil {
-		a.mu.Unlock()
-		return
+	if a.blockedUntil == nil {
+		a.blockedUntil = make(map[string]time.Time)
 	}
+	a.blockedUntil[endpoint] = until
 	rl := a.rateLimiter
 	a.mu.Unlock()
+	if rl == nil {
+		return
+	}
 	rl.MarkRateLimited(endpoint, until)
 }
 
 // IsEndpointRateLimited returns true if the endpoint is currently blocked.
 func (a *Account) IsEndpointRateLimited(endpoint string) bool {
-	a.mu.Lock()
-	if a.rateLimiter == nil {
-		a.mu.Unlock()
+	authority, blocked, now, rl := a.endpointGate(endpoint)
+	if authority {
+		return now.Before(blocked)
+	}
+	if rl == nil {
 		return false
 	}
-	rl := a.rateLimiter
-	a.mu.Unlock()
 	return rl.IsRateLimited(endpoint)
 }
 
 // EndpointAvailableAt returns when this account will be available for the given endpoint.
 func (a *Account) EndpointAvailableAt(endpoint string) time.Time {
-	a.mu.Lock()
-	if a.rateLimiter == nil {
-		a.mu.Unlock()
+	authority, blocked, now, rl := a.endpointGate(endpoint)
+	if authority {
+		if now.Before(blocked) {
+			return blocked
+		}
 		return time.Time{}
 	}
-	rl := a.rateLimiter
-	a.mu.Unlock()
+	if rl == nil {
+		return time.Time{}
+	}
 	return rl.AvailableAt(endpoint)
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -76,6 +77,10 @@ type socialRig struct {
 	// must not mark a healthy leased account failed in the shared pool".
 	reportsMu sync.Mutex
 	reports   []string
+	// reportBodies / acquireQueries record the full decoded report bodies and
+	// the raw acquire query strings, for the rate-limit carry-over journey.
+	reportBodies   []map[string]any
+	acquireQueries []string
 
 	// leaseProxy, when set, is stamped onto every Credentials the fake
 	// go-social hands out — the seam for a malformed/dead-proxy lease.
@@ -106,9 +111,13 @@ func newSocialRigX(t *testing.T, xHandler http.HandlerFunc) *socialRig {
 			var rep struct {
 				Status string `json:"status"`
 			}
-			_ = json.NewDecoder(req.Body).Decode(&rep)
+			raw, _ := io.ReadAll(req.Body)
+			_ = json.Unmarshal(raw, &rep)
+			var full map[string]any
+			_ = json.Unmarshal(raw, &full)
 			r.reportsMu.Lock()
 			r.reports = append(r.reports, rep.Status)
+			r.reportBodies = append(r.reportBodies, full)
 			r.reportsMu.Unlock()
 			_, _ = w.Write([]byte(`{}`))
 			return
@@ -116,6 +125,9 @@ func newSocialRigX(t *testing.T, xHandler http.HandlerFunc) *socialRig {
 		if req.Method != http.MethodGet {
 			return
 		}
+		r.reportsMu.Lock()
+		r.acquireQueries = append(r.acquireQueries, req.URL.RawQuery)
+		r.reportsMu.Unlock()
 		who := "a"
 		if r.acquire.Add(1)%2 == 0 {
 			who = "b"
@@ -210,7 +222,7 @@ func TestSocial_TryWithAccountClosesClientOnEveryPath(t *testing.T) {
 		_, err := GetUserTweetsWithSocial(context.Background(), r.sc, "tesla", 5)
 		require.NoError(t, err)
 	}
-	_, err := tryWithAccount(context.Background(), r.sc, func(context.Context, *Client) (int, error) {
+	_, err := tryWithAccount(context.Background(), r.sc, "", func(context.Context, *Client) (int, error) {
 		return 0, errors.New("boom")
 	})
 	require.Error(t, err)
