@@ -212,10 +212,13 @@ func TestRateLimitHeaders_OlderResponseNeverRaisesRemaining(t *testing.T) {
 		{limit: 50, remaining: 40, reset: w1},                                            // late response, same window: ignored
 		{limit: 50, remaining: 99, reset: w1.Add(-5 * time.Minute)},                      // older window: ignored
 		{limit: 50, remaining: 45, reset: w1.Add(15 * time.Minute)},                      // newer window: replaces
-		{limit: 50, remaining: 44, reset: w1.Add(15 * time.Minute)},                      // same window, lower: taken
-		{limit: 50, remaining: 44, reset: w1.Add(15 * time.Minute), omitRemaining: true}, // no remaining: untouched
+		{limit: 50, remaining: 40, reset: w1.Add(15 * time.Minute)},                      // same window, lower than the estimate: taken
+		{limit: 50, remaining: 40, reset: w1.Add(15 * time.Minute), omitRemaining: true}, // no remaining: untouched
 	}
-	want := []int{10, 10, 10, 45, 44, 44}
+	// Each pick under header authority spends one slot of the estimate (see
+	// AllowRequest), so a response that merely echoes an old value shows the
+	// decremented estimate, never a raised one.
+	want := []int{10, 9, 8, 45, 40, 39}
 	f := newRLFakeX(t, func(_ string, nth int) rlWindow { return steps[nth-1] })
 	c, accs := newRLClient(t, 1, 50, clk)
 
@@ -480,4 +483,31 @@ func TestRateLimitHeaders_HoldIsCounted(t *testing.T) {
 	require.Len(t, sum.DataPoints, 1)
 	assert.EqualValues(t, 1, sum.DataPoints[0].Value)
 	assert.Equal(t, map[string]string{attrOperation: "UserTweets"}, attrMap(sum.DataPoints[0].Attributes))
+}
+
+// In-flight accounting: with header state remaining=10 and headroom 2, a burst of
+// 20 concurrent picks admits at most 8 before any response lands, instead of all
+// 20 on the strength of one stale response.
+//
+// Mutation: account.go AllowRequest, drop the `st.remaining--` decrement => RED.
+func TestRateLimitHeaders_ConcurrentPicksSpendTheEstimate(t *testing.T) {
+	acc := newRateTestAccount("A", ratelimit.Config{RequestsPerWindow: 3, WindowDuration: 15 * time.Minute})
+	acc.recordWindow(rlEndpoint, rateLimitObs{limit: 50, remaining: 10, resetAt: time.Now().Add(10 * time.Minute)})
+
+	const callers = 20
+	var allowed atomic.Int32
+	var wg sync.WaitGroup
+	for range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if acc.AllowRequest(rlEndpoint) {
+				allowed.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	assert.EqualValues(t, 10-rateLimitHeadroom, allowed.Load(), "only remaining-headroom picks may pass before a response lands")
+	assert.True(t, acc.IsEndpointRateLimited(rlEndpoint), "the spent estimate holds the endpoint until reset")
 }

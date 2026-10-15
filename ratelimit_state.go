@@ -155,13 +155,26 @@ func (a *Account) latestRateLimit(preferred string) (endpoint string, st rateLim
 // and the counter is only the cold-start / no-headers estimate.
 func (a *Account) holdIfExhausted(endpoint string) bool {
 	a.mu.Lock()
-	st, ok := a.rlState[endpoint]
-	now := a.nowLocked()
-	held := a.blockedUntil[endpoint]
+	until, held := a.holdLocked(endpoint, a.nowLocked())
+	rl := a.rateLimiter
 	a.mu.Unlock()
-	if !ok || st.remaining > rateLimitHeadroom || !st.resetAt.After(now) || !held.Before(st.resetAt) {
-		return false
+	if held && rl != nil {
+		rl.MarkRateLimited(endpoint, until)
 	}
-	a.MarkEndpointRateLimited(endpoint, st.resetAt)
-	return true
+	return held
+}
+
+// holdLocked records the hold in blockedUntil when the endpoint's state shows
+// the window spent; the caller mirrors it into the local limiter after
+// unlocking. a.mu must be held.
+func (a *Account) holdLocked(endpoint string, now time.Time) (until time.Time, held bool) {
+	st, ok := a.rlState[endpoint]
+	if !ok || st.remaining > rateLimitHeadroom || !st.resetAt.After(now) || !a.blockedUntil[endpoint].Before(st.resetAt) {
+		return time.Time{}, false
+	}
+	if a.blockedUntil == nil {
+		a.blockedUntil = make(map[string]time.Time)
+	}
+	a.blockedUntil[endpoint] = st.resetAt
+	return st.resetAt, true
 }

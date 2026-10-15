@@ -157,19 +157,45 @@ func (a *Account) noteRateLimited88(respHdrs map[string]string) int {
 }
 
 // AllowRequest checks if this account can make a request to the given endpoint.
-// While the endpoint's header window is live (see headerAuthority) the account
-// is allowed unless explicitly blocked: the headers are the authority and the
+// While the endpoint's header window is live (see endpointGate) the account is
+// allowed unless explicitly blocked: the headers are the authority and the
 // local counter is skipped. Otherwise (cold start, headers absent, or the
 // window expired) the local counter decides.
+//
+// Under header authority each allowed pick spends one slot of the window's
+// remaining estimate, so N concurrent callers cannot all pass on the strength of
+// one stale response: when the estimate reaches the headroom the endpoint is held
+// until the reset. The next response folds in by the recordWindow merge rule
+// (minimum within a window), so the estimate never rises inside a window.
+// A pick that never produces a response (transport error) keeps its slot spent
+// until the window resets: conservative, bounded by the window.
 func (a *Account) AllowRequest(endpoint string) bool {
-	authority, blocked, now, rl := a.endpointGate(endpoint)
-	if authority {
-		return !now.Before(blocked)
+	authority, blocked, now, lim := a.endpointGate(endpoint)
+	if !authority {
+		return lim == nil || lim.Allow(endpoint)
 	}
-	if rl == nil {
-		return true
+	if now.Before(blocked) {
+		return false
 	}
-	return rl.Allow(endpoint)
+	// Spend a slot and, if that exhausts the estimate, hold the endpoint, all
+	// under one lock: a check-then-act split would let a burst of callers pass
+	// before the first of them blocks the endpoint.
+	a.mu.Lock()
+	if now.Before(a.blockedUntil[endpoint]) { // re-check: a concurrent pick may have just held it
+		a.mu.Unlock()
+		return false
+	}
+	if st, ok := a.rlState[endpoint]; ok && st.remaining > 0 {
+		st.remaining--
+		a.rlState[endpoint] = st
+	}
+	until, held := a.holdLocked(endpoint, now)
+	rl := a.rateLimiter
+	a.mu.Unlock()
+	if held && rl != nil {
+		rl.MarkRateLimited(endpoint, until)
+	}
+	return true
 }
 
 // endpointGate snapshots, under one lock, everything the eligibility methods
