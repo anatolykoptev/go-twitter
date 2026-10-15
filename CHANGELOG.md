@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.20](https://github.com/anatolykoptev/go-twitter/compare/v0.6.19...v0.6.20) (2026-10-15)
+
+
+### Features
+
+* **ratelimit:** X rate-limit headers are the authority; carry them to go-social ([#98](https://github.com/anatolykoptev/go-twitter/issues/98)) ([916b5b2](https://github.com/anatolykoptev/go-twitter/commit/916b5b21a601b37078d330b06d9bfb9b6d7c0e26))
+
 ## [0.6.19](https://github.com/anatolykoptev/go-twitter/compare/v0.6.18...v0.6.19) (2026-10-15)
 
 
