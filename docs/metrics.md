@@ -57,10 +57,11 @@ instrumented.
 | `blocked` | code 161 |
 | `forbidden` | HTTP 403 without a recognized code |
 | `internal` | code 131 (recorded as `internal` even when the client then accepts usable data) |
-| `not_found` | HTTP 404 |
+| `endpoint` | HTTP 404, or HTTP 400 with a GraphQL-shaped `errors` body — an endpoint-wide fault (stale queryId, missing xtid, feature mismatch); never charged to the account |
+| `overloaded` | HTTP 5xx, or a `LoadShed` error entry (code -1 / message containing "LoadShed"); retried on another account, never charged to the serving one |
 | `transport` | the request failed before an HTTP response (timeout, reset, DNS on a direct account, ...) |
 | `proxy` | transport failure that looks like a proxy failure (`isProxyError`) on an attempt made through a per-account proxy; the same gate as `proxy.failures` |
-| `other` | anything else (e.g. 5xx) |
+| `other` | anything else (e.g. an unshaped 4xx) |
 
 **Header-less-88 escalation.** Three consecutive code-88 responses carrying no
 parseable `x-rate-limit-remaining` (with no successful response in between) are

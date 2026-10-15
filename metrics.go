@@ -50,7 +50,8 @@ const (
 	outcomeBlocked     = "blocked"
 	outcomeForbidden   = "forbidden"
 	outcomeInternal    = "internal"
-	outcomeNotFound    = "not_found"
+	outcomeEndpoint    = "endpoint"
+	outcomeOverloaded  = "overloaded"
 	outcomeTransport   = "transport"
 	outcomeProxy       = "proxy"
 	outcomeOther       = "other"
@@ -366,8 +367,6 @@ func attemptOutcome(status int, body []byte, hdrs map[string]string, err error, 
 	switch {
 	case status >= 200 && status < 300:
 		return outcomeOK
-	case status == 404:
-		return outcomeNotFound
 	case status == 401:
 		return outcomeAuth
 	}
@@ -399,6 +398,10 @@ func outcomeForClass(c errorClass) string {
 		return outcomeInternal
 	case errForbidden:
 		return outcomeForbidden
+	case errEndpoint:
+		return outcomeEndpoint
+	case errOverloaded:
+		return outcomeOverloaded
 	}
 	return outcomeOther
 }
