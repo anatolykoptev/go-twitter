@@ -30,6 +30,7 @@ const (
 	metricProxyFailures   = "twitter.client.proxy.failures"
 	metricRateLimitRemain = "twitter.client.ratelimit.remaining"
 	metricRateLimitLimit  = "twitter.client.ratelimit.limit"
+	metricRateLimitHolds  = "twitter.client.ratelimit.holds"
 
 	// Attribute keys.
 	attrOperation    = "twitter.operation"
@@ -108,6 +109,7 @@ type clientMetrics struct {
 	proxyFailures   metric.Int64Counter
 	rlRemaining     metric.Int64Histogram
 	rlLimit         metric.Int64Histogram
+	rlHolds         metric.Int64Counter
 	now             func() time.Time // injectable clock for freshness
 }
 
@@ -194,6 +196,12 @@ func newClientMetrics(mp metric.MeterProvider) *clientMetrics {
 		metric.WithExplicitBucketBoundaries(rateLimitBuckets...)); err != nil {
 		fail(metricRateLimitLimit, err)
 		m.rlLimit = noop.Int64Histogram{}
+	}
+	if m.rlHolds, err = meter.Int64Counter(metricRateLimitHolds,
+		metric.WithUnit("{hold}"),
+		metric.WithDescription("Times an endpoint was held on an account until its window reset because x-rate-limit-remaining showed the window spent, by operation.")); err != nil {
+		fail(metricRateLimitHolds, err)
+		m.rlHolds = noop.Int64Counter{}
 	}
 	return m
 }
@@ -344,6 +352,15 @@ func (m *clientMetrics) recordRateLimit(endpoint string, obs rateLimitObs) {
 	if obs.limit > 0 {
 		m.rlLimit.Record(context.Background(), int64(obs.limit), attrs)
 	}
+}
+
+// recordHold counts one proactive hold: an endpoint taken out of rotation on an
+// account because a response showed its window spent.
+func (m *clientMetrics) recordHold(endpoint string) {
+	if m == nil {
+		return
+	}
+	m.rlHolds.Add(context.Background(), 1, metric.WithAttributes(attribute.String(attrOperation, endpoint)))
 }
 
 func (m *clientMetrics) recordRelogin(outcome string) {

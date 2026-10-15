@@ -450,3 +450,34 @@ func TestRateLimitHeaders_ResetJitterIsSameWindow(t *testing.T) {
 	_, remaining, _, _ = acc.rateLimitWindow(rlEndpoint)
 	assert.Equal(t, 45, remaining)
 }
+
+// Holds are observable: a response that spends the window counts one hold for
+// the operation; a response with budget left counts none.
+//
+// Mutation: request.go observeRateLimit, remove the c.metrics.recordHold call => RED.
+func TestRateLimitHeaders_HoldIsCounted(t *testing.T) {
+	var remaining atomic.Int32
+	reset := strconv.FormatInt(time.Now().Add(time.Minute).Unix(), 10)
+	f := newMetricsFixture(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("x-rate-limit-remaining", strconv.Itoa(int(remaining.Load())))
+		w.Header().Set("x-rate-limit-reset", reset)
+		_, _ = w.Write([]byte(userTweetsBody(snowflakeAt(time.Now().Add(-5 * time.Second)))))
+	}, "rl_hold_acc")
+
+	remaining.Store(30)
+	_, err := f.c.GetUserTweets(context.Background(), "999", 20)
+	require.NoError(t, err)
+	_, present := f.collect(t)[metricRateLimitHolds]
+	assert.False(t, present, "a response with budget left must not count a hold")
+
+	remaining.Store(0)
+	_, err = f.c.GetUserTweets(context.Background(), "999", 20)
+	require.NoError(t, err)
+	m, ok := f.collect(t)[metricRateLimitHolds]
+	require.True(t, ok, "a spent window must count a hold")
+	sum, isSum := m.Data.(metricdata.Sum[int64])
+	require.True(t, isSum)
+	require.Len(t, sum.DataPoints, 1)
+	assert.EqualValues(t, 1, sum.DataPoints[0].Value)
+	assert.Equal(t, map[string]string{attrOperation: "UserTweets"}, attrMap(sum.DataPoints[0].Attributes))
+}

@@ -26,6 +26,7 @@ metrics.
 | `twitter.client.proxy.failures` | counter | `{failure}` | none |
 | `twitter.client.ratelimit.remaining` | histogram | `{request}` | `twitter.operation` |
 | `twitter.client.ratelimit.limit` | histogram | `{request}` | `twitter.operation` |
+| `twitter.client.ratelimit.holds` | counter | `{hold}` | `twitter.operation` |
 
 No instrument ever carries an account handle, user ID, list ID, search query or
 URL as an attribute.
@@ -132,6 +133,17 @@ sub-requests (ct0 rotation, relogin retry) are not recorded.
   reset, see README), a mass near `limit` means headroom is unused.
 
 Buckets (requests): `0, 1, 2, 5, 10, 25, 50, 100, 150, 200, 300, 500`.
+
+### `twitter.client.ratelimit.holds`
+
+Incremented each time a response shows an endpoint's window spent
+(`x-rate-limit-remaining` at or below the headroom, reset still ahead) and the
+endpoint is taken out of rotation on that account until the reset. It is the
+proactive counterpart of a 429: a rising `holds` with a flat
+`request.duration{outcome="rate_limited"}` means the headers are keeping accounts
+out of 429s. Pool paths only; writes and media uploads pinned to an account
+never hold. Counted at the response that triggered the hold, not for the
+pick-time estimate hold.
 
 ### `twitter.client.pool.accounts`
 

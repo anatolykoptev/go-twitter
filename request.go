@@ -872,8 +872,8 @@ func (c *Client) observeRateLimit(acc *Account, endpoint string, hdrs map[string
 	obs := parseRateLimitHeaders(hdrs)
 	acc.recordWindow(endpoint, obs)
 	c.metrics.recordRateLimit(endpoint, obs)
-	if hold {
-		acc.holdIfExhausted(endpoint)
+	if hold && acc.holdIfExhausted(endpoint) {
+		c.metrics.recordHold(endpoint)
 	}
 }
 

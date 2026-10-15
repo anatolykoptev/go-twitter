@@ -143,7 +143,7 @@ func (a *Account) latestRateLimit(preferred string) (endpoint string, st rateLim
 	return endpoint, st, ok
 }
 
-// holdIfExhausted blocks the endpoint on this account until its window resets
+// holdIfExhausted (reporting whether it held) blocks the endpoint on this account until its window resets
 // when the last known state shows remaining <= rateLimitHeadroom. The response
 // that reported it still succeeded; the NEXT pick for the endpoint rotates to
 // another account.
@@ -153,14 +153,15 @@ func (a *Account) latestRateLimit(preferred string) (endpoint string, st rateLim
 // ends at resetAt on its own. While a window is live the endpoint also bypasses
 // the local request counter (see AllowRequest): the headers are the authority
 // and the counter is only the cold-start / no-headers estimate.
-func (a *Account) holdIfExhausted(endpoint string) {
+func (a *Account) holdIfExhausted(endpoint string) bool {
 	a.mu.Lock()
 	st, ok := a.rlState[endpoint]
 	now := a.nowLocked()
 	held := a.blockedUntil[endpoint]
 	a.mu.Unlock()
 	if !ok || st.remaining > rateLimitHeadroom || !st.resetAt.After(now) || !held.Before(st.resetAt) {
-		return
+		return false
 	}
 	a.MarkEndpointRateLimited(endpoint, st.resetAt)
+	return true
 }
