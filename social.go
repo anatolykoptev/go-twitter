@@ -20,6 +20,16 @@ import (
 
 const maxSocialRetries = 6
 
+// socialEndpointFaultStop bounds the run of consecutive endpoint faults —
+// each on a DIFFERENT lease — a *WithSocial call tolerates before giving up.
+// An ErrEndpoint hit means the committed request shape is stale for EVERY
+// account (dead queryId, missing xtid, feature mismatch), so once two
+// independent credentials both fault, the fault is provably endpoint-wide and
+// further leases only burn go-social's rate budget (1 unit per AcquireAccount)
+// with no chance of success. Two is the cheapest possible confirmation that
+// the fault is not one account's quirk.
+const socialEndpointFaultStop = 2
+
 // socialMeter holds the MeterProvider the *WithSocial helpers record to.
 var socialMeter atomic.Pointer[meterProviderBox]
 
@@ -147,6 +157,7 @@ func GetTweetConversationWithSocial(ctx context.Context, sc *social.Client, twee
 func withSocialAccount[T any](ctx context.Context, sc *social.Client, fn func(context.Context, *Client) (T, error)) (T, error) {
 	var lastErr error
 	var zero T
+	endpointFaults := 0
 	for attempt := range maxSocialRetries {
 		res, err := tryWithAccount(ctx, sc, fn)
 		if err == nil {
@@ -154,6 +165,17 @@ func withSocialAccount[T any](ctx context.Context, sc *social.Client, fn func(co
 		}
 		if errors.Is(err, ErrNotFound) {
 			return zero, err
+		}
+		if errors.Is(err, ErrEndpoint) {
+			endpointFaults++
+			if endpointFaults >= socialEndpointFaultStop {
+				// Two different leases hit the same endpoint fault: the
+				// request shape is dead for every account in the pool —
+				// more leases only burn the go-social rate budget.
+				return zero, err
+			}
+		} else {
+			endpointFaults = 0
 		}
 		lastErr = err
 		slog.Warn("social request attempt failed, retrying",
@@ -181,14 +203,20 @@ func tryWithAccount[T any](ctx context.Context, sc *social.Client, fn func(conte
 		Username:  creds.Credentials["username"],
 		AuthToken: creds.Credentials["auth_token"],
 		CT0:       creds.Credentials["ct0"],
+		// The lease's proxy belongs to the ACCOUNT, not the client: setting
+		// acc.Proxy (instead of ClientConfig.DefaultProxy) makes NewClient
+		// build a per-account transport for it and wires the pool-path
+		// proxy-failure accounting — a dead proxy answering 5xx or refusing
+		// the tunnel marks itself down instead of silently passing as an
+		// account-layer fault.
+		Proxy: creds.Proxy,
 
 		credsAuthoritative: true, // freshly leased: a stale session file must not override them
 	}
 
 	tw, err := NewClient(ClientConfig{
-		Accounts:     []*Account{acc},
-		DefaultProxy: creds.Proxy,
-		RateLimit:    ratelimit.Config{RequestsPerWindow: 50, WindowDuration: 15 * time.Minute},
+		Accounts:  []*Account{acc},
+		RateLimit: ratelimit.Config{RequestsPerWindow: 50, WindowDuration: 15 * time.Minute},
 
 		MeterProvider: socialMeterProvider(),
 		sharedXtid:    sharedSocialXtid(),
@@ -213,14 +241,23 @@ func tryWithAccount[T any](ctx context.Context, sc *social.Client, fn func(conte
 			_ = sc.ReportUsage(ctx, "twitter", creds.ID, "success")
 			return zero, err
 		}
-		if IsEndpointFault(err) {
-			// Endpoint-wide fault (#61): a 404/GraphQL-shaped-400 means the
-			// committed request shape is stale for EVERY account, a 5xx/LoadShed
-			// means X itself is shedding load — the leased credential is
-			// innocent. Report success (never auth_error, which would poison a
-			// healthy account in the shared pool) and let withSocialAccount
-			// rotate to the next lease inside its retry budget.
+		if errors.Is(err, ErrEndpoint) {
+			// Endpoint fault (#61): a 404/GraphQL-shaped-400 means the
+			// committed request shape is stale for EVERY account — the leased
+			// credential is innocent. Report success (never auth_error, which
+			// would poison a healthy account in the shared pool) and let
+			// withSocialAccount rotate to the next lease inside its budget.
 			_ = sc.ReportUsage(ctx, "twitter", creds.ID, "success")
+			return zero, fmt.Errorf("%s: %w", acc.Username, err)
+		}
+		if errors.Is(err, ErrOverloaded) {
+			// A 5xx/LoadShed is X-side — but NOT proof the credential worked:
+			// a leased account whose residential proxy answers 502/503/504 for
+			// the tunnel surfaces exactly this class. go-social's report
+			// vocabulary (success / auth_error / rate_limited / banned) has no
+			// neutral status — "success" would reset ConsecutiveFails and keep
+			// a dead proxy leased forever — so make no report at all and let
+			// withSocialAccount rotate to the next lease.
 			return zero, fmt.Errorf("%s: %w", acc.Username, err)
 		}
 		_ = sc.ReportUsage(ctx, "twitter", creds.ID, "auth_error")
