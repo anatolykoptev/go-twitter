@@ -17,6 +17,14 @@ import (
 // on a 50-request window that would waste a fifth of the budget.
 const rateLimitHeadroom = 2
 
+// maxRateLimitReset is the furthest into the future an x-rate-limit-reset is
+// believed. X's windows are 15 minutes; 1h leaves 4x slack for clock skew and
+// longer windows. A reset beyond it is a malformed value (a far-future sentinel,
+// or milliseconds read as seconds) and is treated as unknown, because trusting it
+// would hold an account for years, or make a bogus window "authoritative" and
+// discard every genuine later one as "earlier".
+const maxRateLimitReset = time.Hour
+
 // rateLimitObs is what ONE response said about its endpoint's window. Absent or
 // unparseable headers leave the matching field at its "unknown" value.
 type rateLimitObs struct {
@@ -35,7 +43,9 @@ func parseRateLimitHeaders(hdrs map[string]string) rateLimitObs {
 		obs.remaining = n
 	}
 	if ts, err := strconv.ParseInt(hdrs[xRateLimitReset], 10, 64); err == nil && ts > 0 {
-		obs.resetAt = time.Unix(ts, 0)
+		if at := time.Unix(ts, 0); at.Sub(time.Now()) <= maxRateLimitReset {
+			obs.resetAt = at
+		}
 	}
 	return obs
 }

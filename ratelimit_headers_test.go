@@ -384,3 +384,48 @@ func TestRateLimitHeaders_SocialReportWithoutHeadersIsLegacyBody(t *testing.T) {
 	require.Len(t, r.reportBodies, 1)
 	assert.Equal(t, map[string]any{"status": "success"}, r.reportBodies[0])
 }
+
+// A malformed reset (far-future sentinel, milliseconds read as seconds, +100d)
+// is treated as unknown: it neither holds the account nor makes a bogus window
+// authoritative. The account stays usable and a later genuine window is taken.
+//
+// Mutation: ratelimit_state.go parseRateLimitHeaders, drop the
+// `at.Sub(time.Now()) <= maxRateLimitReset` condition => RED.
+func TestRateLimitHeaders_MalformedResetIsIgnored(t *testing.T) {
+	now := time.Now()
+	for name, reset := range map[string]string{
+		"far-future sentinel": "9999999999",
+		"milliseconds":        strconv.FormatInt(now.Add(time.Minute).UnixMilli(), 10),
+		"plus 100 days":       strconv.FormatInt(now.Add(100*24*time.Hour).Unix(), 10),
+	} {
+		t.Run(name, func(t *testing.T) {
+			acc := newRateTestAccount("A", ratelimit.Config{RequestsPerWindow: 3, WindowDuration: 15 * time.Minute})
+			acc.recordWindow(rlEndpoint, parseRateLimitHeaders(map[string]string{
+				xRateLimitRemaining: "0", xRateLimitReset: reset,
+			}))
+			acc.holdIfExhausted(rlEndpoint)
+			assert.False(t, acc.IsEndpointRateLimited(rlEndpoint), "a malformed reset must not hold the account")
+			_, _, _, ok := acc.rateLimitWindow(rlEndpoint)
+			assert.False(t, ok, "a malformed reset must not create authoritative state")
+
+			// A genuine window afterwards is still accepted.
+			genuine := now.Add(10 * time.Minute)
+			acc.recordWindow(rlEndpoint, parseRateLimitHeaders(map[string]string{
+				xRateLimitRemaining: "7", xRateLimitReset: strconv.FormatInt(genuine.Unix(), 10),
+			}))
+			_, remaining, _, ok := acc.rateLimitWindow(rlEndpoint)
+			assert.True(t, ok)
+			assert.Equal(t, 7, remaining)
+		})
+	}
+}
+
+// The 429 path applies the same ceiling and falls back to its default.
+//
+// Mutation: errors.go parseRateLimitReset, drop the maxRateLimitReset condition => RED.
+func TestParseRateLimitReset_CeilingFallsBackToDefault(t *testing.T) {
+	got := parseRateLimitReset("9999999999")
+	assert.WithinDuration(t, time.Now().Add(15*time.Minute), got, 2*time.Second)
+	near := time.Now().Add(5 * time.Minute)
+	assert.Equal(t, near.Unix(), parseRateLimitReset(strconv.FormatInt(near.Unix(), 10)).Unix())
+}
