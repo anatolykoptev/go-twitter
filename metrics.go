@@ -50,6 +50,7 @@ const (
 	outcomeBlocked     = "blocked"
 	outcomeForbidden   = "forbidden"
 	outcomeInternal    = "internal"
+	outcomeNotFound    = "not_found"
 	outcomeEndpoint    = "endpoint"
 	outcomeOverloaded  = "overloaded"
 	outcomeTransport   = "transport"
@@ -361,6 +362,13 @@ func attemptOutcome(status int, body []byte, hdrs map[string]string, err error, 
 		return outcomeTransport
 	}
 	ae := newAPIError(status, body, hdrs)
+	// A 404 keeps its historical not_found label: dashboards and alerts keyed
+	// on twitter.outcome=not_found track the raw 404 rate regardless of the
+	// errEndpoint classification the retry loop now gives it. GraphQL-shaped
+	// 400s — the other endpoint-fault source — take the new "endpoint" value.
+	if ae.Class == errEndpoint && status == 404 {
+		return outcomeNotFound
+	}
 	if ae.Class != errNone {
 		return outcomeForClass(ae.Class)
 	}

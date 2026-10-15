@@ -404,7 +404,7 @@ func TestAttemptOutcome(t *testing.T) {
 		{"429", 429, `{}`, nil, false, outcomeRateLimited},
 		{"403 bare", 403, `{}`, nil, false, outcomeForbidden},
 		{"401 bare", 401, `{}`, nil, false, outcomeAuth},
-		{"404", 404, `{}`, nil, false, outcomeEndpoint},
+		{"404", 404, `{}`, nil, false, outcomeNotFound},
 		{"graphql-shaped 400", 400, `{"errors":[{"code":336,"message":"Bad request"}]}`, nil, false, outcomeEndpoint},
 		{"unshaped 400", 400, `oops`, nil, false, outcomeOther},
 		{"500", 500, `oops`, nil, false, outcomeOverloaded},

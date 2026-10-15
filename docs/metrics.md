@@ -57,7 +57,8 @@ instrumented.
 | `blocked` | code 161 |
 | `forbidden` | HTTP 403 without a recognized code |
 | `internal` | code 131 (recorded as `internal` even when the client then accepts usable data) |
-| `endpoint` | HTTP 404, or HTTP 400 with a GraphQL-shaped `errors` body — an endpoint-wide fault (stale queryId, missing xtid, feature mismatch); never charged to the account |
+| `not_found` | HTTP 404 — the historical dead-route label (an endpoint fault under the hood: never charged to the account) |
+| `endpoint` | HTTP 400 with a GraphQL-shaped `errors` body — an endpoint-wide fault (stale features / request shape); never charged to the account |
 | `overloaded` | HTTP 5xx, or a `LoadShed` error entry (code -1 / message containing "LoadShed"); retried on another account, never charged to the serving one |
 | `transport` | the request failed before an HTTP response (timeout, reset, DNS on a direct account, ...) |
 | `proxy` | transport failure that looks like a proxy failure (`isProxyError`) on an attempt made through a per-account proxy; the same gate as `proxy.failures` |
