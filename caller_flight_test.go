@@ -387,3 +387,93 @@ func TestClientConfig_MaxInFlightPerAccountDefault(t *testing.T) {
 	cfg.defaults()
 	assert.Equal(t, -5, cfg.MaxInFlightPerAccount, "negative stays negative — cap disabled")
 }
+
+// slowFirstServer answers request #1 slowly with 200 (it occupies one account's
+// slot); later requests are answered by next(n, w). started closes when
+// request #1 has arrived.
+func slowFirstServer(t *testing.T, hold time.Duration, next func(n int32, w http.ResponseWriter)) (*httptest.Server, <-chan struct{}) {
+	t.Helper()
+	var hits atomic.Int32
+	started := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n := hits.Add(1)
+		if n == 1 {
+			close(started)
+			time.Sleep(hold)
+			_, _ = w.Write([]byte(`{"data":{"ok":true}}`))
+			return
+		}
+		next(n, w)
+	}))
+	t.Cleanup(srv.Close)
+	return srv, started
+}
+
+// F7 — an endpoint-fault retry (rotateNow) against cap-saturated accounts must
+// WAIT for a slot, not fail with "pool exhausted". Two accounts, cap 1: call B
+// holds account 0 slowly; call A lands on account 1, gets a 404 (endpoint fault,
+// account 1 excluded), and its retry finds only account 0, at cap.
+//
+// Mutation: request.go doPoolRequest, in the else-branch cap wait, replace
+// `accErr != nil && ctx.Err() == nil && c.anyCapWaitable(capWaitable)` with
+// `false` (the old fail-fast pool.Next) => RED.
+func TestFlightCap_EndpointFaultRetryWaitsForSlot(t *testing.T) {
+	srv, started := slowFirstServer(t, 300*time.Millisecond, func(n int32, w http.ResponseWriter) {
+		if n == 2 {
+			w.WriteHeader(http.StatusNotFound) // stale-route endpoint fault
+			_, _ = w.Write([]byte(`{}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":{"ok":true}}`))
+	})
+	c, accs := newPoolWaitClient(t, 2)
+	c.cfg.MaxInFlightPerAccount = 1
+	url := srv.URL + "/i/api/graphql/x/" + poolWaitEndpoint
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	bDone := make(chan error, 1)
+	go func() {
+		_, _, err := c.doGET(ctx, poolWaitEndpoint, url)
+		bDone <- err
+	}()
+	<-started
+	body, _, err := c.doGET(ctx, poolWaitEndpoint, url)
+	require.NoError(t, err, "the retry must wait for the capped account, not fail with pool exhausted")
+	assert.NotEmpty(t, body)
+	require.NoError(t, <-bDone)
+	for i, a := range accs {
+		assert.Zero(t, a.InFlight(), "account %d slot leaked", i)
+	}
+}
+
+// F8 — a guest-eligible (non-requiresAuth) endpoint with every account at cap
+// waits for a slot and is served by an account. DisableGuestFallback is set, so
+// falling through to the guest path would surface as an error.
+//
+// Mutation: same line as F7 (`... c.anyCapWaitable(capWaitable)` => `false`)
+// => RED ("no authenticated account and guest fallback disabled").
+func TestFlightCap_NonAuthEndpointWaitsInsteadOfGuest(t *testing.T) {
+	srv, started := slowFirstServer(t, 300*time.Millisecond, func(_ int32, w http.ResponseWriter) {
+		_, _ = w.Write([]byte(`{"data":{"ok":true}}`))
+	})
+	c, accs := newPoolWaitClient(t, 1)
+	c.cfg.MaxInFlightPerAccount = 1
+	const nonAuth = "PublicLookup"
+	require.False(t, requiresAuth(nonAuth))
+	url := srv.URL + "/i/api/graphql/x/" + nonAuth
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	bDone := make(chan error, 1)
+	go func() {
+		_, _, err := c.doGET(ctx, nonAuth, url)
+		bDone <- err
+	}()
+	<-started
+	body, _, err := c.doGET(ctx, nonAuth, url)
+	require.NoError(t, err, "a capped pool must be waited on, not downgraded to the guest path")
+	assert.NotEmpty(t, body)
+	require.NoError(t, <-bDone)
+	assert.Zero(t, accs[0].InFlight())
+}

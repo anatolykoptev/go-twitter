@@ -206,7 +206,7 @@ Observed on collection, alongside `pool.accounts` in the same callback (same
 one-client-per-provider rule). The sum of every pool account's in-flight
 request count — the requests currently holding a slot under
 `ClientConfig.MaxInFlightPerAccount` (default 2, negative disables the cap).
-Each account's count never exceeds the cap; a saturated pool waits on the
+The gauge counts slots, not sockets: a cancelled request releases its slot at once while its socket can outlive it until go-stealth's own timeout. Each account's count never exceeds the cap; a saturated pool waits on the
 `pool.wait` machinery instead of exceeding it, so a persistently pegged gauge
 means the cap or the account count is the bottleneck. Per-call `*WithSocial`
 clients register no gauge.

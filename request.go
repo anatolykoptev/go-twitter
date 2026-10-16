@@ -64,7 +64,12 @@ const flightCapPoll = 500 * time.Millisecond
 // this call (not faulted, not endpoint-limited, not proxy-backed-off): when
 // no timed wake applies they have no usable-at time, so the wait listens on
 // the slot-release broadcast instead, still bounded by deadline and ctx.
-func (c *Client) nextAccountWithWait(ctx context.Context, endpoint string, filter func(*Account) bool, capWaitable func(*Account) bool, deadline time.Time) (acc *Account, err error) {
+//
+// capOnly restricts the wait to the cap case: no wait for deactivated accounts
+// and no timed wake on rate limits or proxy backoff — only cap-blocked accounts
+// are waited on. The endpoint-fault retry and the guest-eligible endpoints use
+// it: they want "an account usable NOW, or a slot to free", never a long sleep.
+func (c *Client) nextAccountWithWait(ctx context.Context, endpoint string, filter func(*Account) bool, capWaitable func(*Account) bool, capOnly bool, deadline time.Time) (acc *Account, err error) {
 	// twitter.client.pool.wait.duration: one sample per call that actually
 	// waited (slept for a usable account), labelled by how the wait ended.
 	var waited time.Duration
@@ -83,16 +88,28 @@ func (c *Client) nextAccountWithWait(ctx context.Context, endpoint string, filte
 		c.metrics.recordPoolWait(endpoint, waited, result)
 	}()
 	for {
-		acc, err = c.pool.NextWithWait(ctx, filter, time.Until(deadline))
+		// Grab the release generation BEFORE the pick: a slot freed between a
+		// failed pick and the sleep then closes exactly this channel and wakes
+		// the wait instead of being missed.
+		flight := c.flightChan()
+		if capOnly {
+			acc, err = c.pool.Next(filter)
+		} else {
+			acc, err = c.pool.NextWithWait(ctx, filter, time.Until(deadline))
+		}
 		if err == nil {
 			return acc, nil
 		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, ctxErr
 		}
-		wake, ok := c.nextUsableAt(endpoint)
-		wait := time.Until(wake)
-		timed := ok && wait > 0 && wait <= time.Until(deadline)
+		var wait time.Duration
+		timed := false
+		if !capOnly {
+			wake, ok := c.nextUsableAt(endpoint)
+			wait = time.Until(wake)
+			timed = ok && wait > 0 && wait <= time.Until(deadline)
+		}
 		// With no timed wake to honour, an account blocked only by its
 		// in-flight cap can still be served the moment a slot frees.
 		capWait := c.anyCapWaitable(capWaitable)
@@ -100,6 +117,10 @@ func (c *Client) nextAccountWithWait(ctx context.Context, endpoint string, filte
 			if !capWait {
 				return nil, err
 			}
+			wait = flightCapPoll
+		} else if capWait && wait > flightCapPoll {
+			// A cap-blocked account may also be waiting: never sleep a long
+			// timed wake past the poll bound, so a missed release is re-checked.
 			wait = flightCapPoll
 		}
 		// Jitter the wake: N waiters parked on one freed account must not
@@ -120,9 +141,8 @@ func (c *Client) nextAccountWithWait(ctx context.Context, endpoint string, filte
 		// A freed in-flight slot also makes an account eligible — the
 		// broadcast wakes the wait early instead of sleeping the full span.
 		// Nil-channel receive blocks forever when no capped account exists.
-		var flight <-chan struct{}
-		if capWait {
-			flight = c.flightChan()
+		if !capWait {
+			flight = nil
 		}
 		select {
 		case <-t.C:
@@ -214,17 +234,23 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 
 	// poolFilter is the eligibility check every pick this call shares:
 	// faulted accounts excluded, account usable for this endpoint NOW. It is
-	// consuming — AllowRequest increments the per-endpoint counter and
-	// tryAcquireFlight takes the in-flight slot — so it must only run on a
-	// real pick. The flightFull pre-check runs first: an at-cap account must
-	// not burn a rate-limit slot on a request it cannot serve yet.
+	// consuming — tryAcquireFlight takes the in-flight slot and AllowRequest
+	// increments the per-endpoint counter — so it must only run on a real pick.
 	flightLimit := c.flightCap()
 	poolFilter := func(a *Account) bool {
-		return !endpointFaulted[a.ID()] &&
-			!a.flightFull(flightLimit) &&
-			a.AllowRequest(endpoint) &&
-			time.Now().After(a.proxyBackoff) &&
-			a.tryAcquireFlight(flightLimit)
+		if endpointFaulted[a.ID()] || !time.Now().After(a.proxyBackoff) || !a.tryAcquireFlight(flightLimit) {
+			return false
+		}
+		// The slot is taken BEFORE the consuming AllowRequest, so a refused
+		// slot never burns a rate-limit slot; a refused AllowRequest returns
+		// the slot it just took.
+		if !a.AllowRequest(endpoint) {
+			if flightLimit > 0 {
+				a.releaseFlight()
+			}
+			return false
+		}
+		return true
 	}
 	// canServe is the read-only twin of poolFilter for the backoff gate below:
 	// IsEndpointRateLimited reads the same limiter without consuming a slot.
@@ -287,9 +313,16 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 		var accErr error
 
 		if requiresAuth(endpoint) && !rotateNow {
-			acc, accErr = c.nextAccountWithWait(ctx, endpoint, poolFilter, capWaitable, waitDeadline)
+			acc, accErr = c.nextAccountWithWait(ctx, endpoint, poolFilter, capWaitable, false, waitDeadline)
 		} else {
 			acc, accErr = c.pool.Next(poolFilter)
+			// Cap saturation is transient: an endpoint-fault retry and a
+			// guest-eligible endpoint wait (cap-only, ctx- and budget-bounded)
+			// for a slot instead of failing with "pool exhausted" or silently
+			// downgrading to a guest token. Faulted accounts stay excluded.
+			if accErr != nil && ctx.Err() == nil && c.anyCapWaitable(capWaitable) {
+				acc, accErr = c.nextAccountWithWait(ctx, endpoint, poolFilter, capWaitable, true, waitDeadline)
+			}
 		}
 		if accErr != nil {
 			if ctx.Err() != nil {

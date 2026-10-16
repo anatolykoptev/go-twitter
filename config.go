@@ -131,6 +131,9 @@ type ClientConfig struct {
 	// twitter.client.pool.wait.duration). Account-pinned paths (doPOST, media
 	// upload) wait for the pinned account's slot the same way.
 	// Default: 2. A negative value disables the cap.
+	// The cap bounds in-flight SLOTS, not sockets: a cancelled request releases
+	// its slot at once, but its socket can outlive the slot until go-stealth's
+	// own request timeout.
 	MaxInFlightPerAccount int
 
 	// sharedXtid, when set, replaces the per-client xtid manager so key
