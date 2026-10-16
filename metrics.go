@@ -35,6 +35,7 @@ const (
 	metricQIDRefreshes        = "twitter.client.queryid.refreshes"
 	metricQIDChanged          = "twitter.client.queryid.changed"
 	metricQIDAge              = "twitter.client.queryid.age"
+	metricQIDWalk             = "twitter.client.queryid.refresh.duration"
 
 	// Attribute keys.
 	attrOperation    = "twitter.operation"
@@ -119,6 +120,7 @@ type clientMetrics struct {
 	qidRefreshes    metric.Int64Counter
 	qidChanged      metric.Int64Gauge
 	qidAge          metric.Float64Gauge
+	qidWalk         metric.Float64Histogram
 	now             func() time.Time // injectable clock for freshness
 }
 
@@ -235,6 +237,13 @@ func newClientMetrics(mp metric.MeterProvider) *clientMetrics {
 		metric.WithDescription("Age of the active queryId map: since the last successful refresh, or process start while the compiled ids are active.")); err != nil {
 		fail(metricQIDAge, err)
 		m.qidAge = noop.Float64Gauge{}
+	}
+	if m.qidWalk, err = meter.Float64Histogram(metricQIDWalk,
+		metric.WithUnit("s"),
+		metric.WithDescription("Wall time of one queryId refresh attempt (page + chunk walk), by trigger and result."),
+		metric.WithExplicitBucketBoundaries(qidWalkBuckets...)); err != nil {
+		fail(metricQIDWalk, err)
+		m.qidWalk = noop.Float64Histogram{}
 	}
 	return m
 }
@@ -406,6 +415,20 @@ func (m *clientMetrics) recordQIDRefresh(trigger, result string) {
 		return
 	}
 	m.qidRefreshes.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.String(attrTrigger, trigger),
+		attribute.String(attrResult, result),
+	))
+}
+
+// qidWalkBuckets (seconds) resolve a refresh from 1 s to the 3-minute timeout.
+var qidWalkBuckets = []float64{1, 2, 5, 10, 20, 30, 60, 90, 120, 180}
+
+// recordQIDRefreshDuration records how long one refresh attempt took.
+func (m *clientMetrics) recordQIDRefreshDuration(trigger, result string, d time.Duration) {
+	if m == nil {
+		return
+	}
+	m.qidWalk.Record(context.Background(), d.Seconds(), metric.WithAttributes(
 		attribute.String(attrTrigger, trigger),
 		attribute.String(attrResult, result),
 	))

@@ -511,7 +511,7 @@ func TestQIDRefresh_F5_FetchFailureKeepsLastGoodMap(t *testing.T) {
 
 	// Recovery re-arms the alert.
 	w.set(func(w *qidWorld) { w.failFetch = false })
-	clk.Advance(qidMinInterval + time.Minute)
+	clk.Advance(2 * time.Hour) // past the failure backoff (3 failures: 60 min)
 	require.NoError(t, c.search(ctx))
 	r.wg.Wait()
 	assert.NotSame(t, good, activeQID.Load(), "the next success replaces the map")

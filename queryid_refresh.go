@@ -54,6 +54,12 @@ const (
 	// failing bundle fetch backs off by the same interval.
 	qidMinInterval = 15 * time.Minute
 
+	// qidMaxBackoff caps the spacing between attempts after consecutive failed or
+	// rejected refreshes: the spacing starts at qidMinInterval, doubles per
+	// failure, and resets on success. A bundle that never yields (e.g. the live
+	// shape differs) is retried at most once a day, fault trigger included.
+	qidMaxBackoff = 24 * time.Hour
+
 	// qidMinKnownFraction: a bundle that yields fewer than this share of the
 	// operations this library knows is treated as partial (an unfinished chunk
 	// walk, a bot wall) and rejected whole. The proven-extractable set today is 9
@@ -95,6 +101,8 @@ const (
 	qidResultOK          = "ok"
 	qidResultFetchFailed = "fetch_failed" // page/bundle could not be read
 	qidResultRejected    = "rejected"     // read, but failed validation; nothing applied
+	qidResultPanic       = "panic"        // the walk panicked on a network-supplied body; recovered
+	qidResultSuppressed  = "suppressed"   // due, but the interval or failure backoff refused it
 )
 
 // errQIDRejected marks an extraction that failed validation.
@@ -152,13 +160,14 @@ type qidRefresher struct {
 	sf     singleflight.Group
 	wg     sync.WaitGroup // in-flight refreshes; tests wait on it
 
-	lastAttemptNS atomic.Int64
+	nextAllowedNS atomic.Int64 // no attempt before this instant (min interval, then failure backoff)
 	lastSuccessNS atomic.Int64
 	attempts      atomic.Int64 // refresh runs that passed the interval gate (tests count these; chunk hits can be memoized)
 
 	mu        sync.Mutex
 	faults    map[string][]time.Time
 	failing   bool
+	streak    int // consecutive failed attempts; drives the backoff
 	alertHook func(topic string, payload any)
 	page      *warmPage
 }
@@ -255,14 +264,22 @@ func (r *qidRefresher) onAuthedRequest(f bundle.Fetcher, m *clientMetrics) {
 	}
 	now := r.now()
 	m.recordQIDAge(r.age(now))
-	if trig, due := r.lazyDue(now); due {
-		r.fire(trig, f, m)
+	trig, due := r.lazyDue(now)
+	if !due {
+		return
 	}
+	if !r.intervalOK(now) {
+		m.recordQIDRefresh(trig, qidResultSuppressed)
+		return
+	}
+	r.fire(trig, f, m)
 }
 
 // onEndpointFault counts an endpoint fault (errEndpoint, #61) against op and
 // fires the fault trigger at K within the window. mk builds the fetcher lazily;
-// a request without an account cookie has none and cannot refresh.
+// a request without an account cookie has none and cannot refresh. A threshold
+// hit that the interval or backoff refuses keeps the op's fault history, so the
+// trigger fires as soon as it is allowed instead of needing K fresh faults.
 func (r *qidRefresher) onEndpointFault(op string, mk func() bundle.Fetcher, m *clientMetrics) {
 	if r == nil || r.cfg.disabled {
 		return
@@ -273,13 +290,20 @@ func (r *qidRefresher) onEndpointFault(op string, mk func() bundle.Fetcher, m *c
 	if !r.noteFault(op) {
 		return
 	}
-	if f := mk(); f != nil {
-		r.fire(qidTriggerFault, f, m)
+	if !r.intervalOK(r.now()) {
+		m.recordQIDRefresh(qidTriggerFault, qidResultSuppressed)
+		return
 	}
+	f := mk()
+	if f == nil {
+		return
+	}
+	r.clearFaults(op)
+	r.fire(qidTriggerFault, f, m)
 }
 
-// noteFault records a fault and reports whether op reached the threshold; the
-// op's history is cleared on a hit so the next trigger needs K fresh faults.
+// noteFault records a fault and reports whether op has reached the threshold
+// within the window.
 func (r *qidRefresher) noteFault(op string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -292,19 +316,19 @@ func (r *qidRefresher) noteFault(op string) bool {
 		}
 	}
 	recent = append(recent, now)
-	if len(recent) >= r.cfg.faultThreshold {
-		delete(r.faults, op)
-		return true
-	}
 	r.faults[op] = recent
-	return false
+	return len(recent) >= r.cfg.faultThreshold
 }
 
-// lazyDue reports whether the first/TTL trigger is due now.
+// clearFaults forgets op's fault history once a refresh was actually started.
+func (r *qidRefresher) clearFaults(op string) {
+	r.mu.Lock()
+	delete(r.faults, op)
+	r.mu.Unlock()
+}
+
+// lazyDue reports whether the first/TTL trigger is due (interval aside).
 func (r *qidRefresher) lazyDue(now time.Time) (string, bool) {
-	if !r.intervalOK(now) {
-		return "", false
-	}
 	ls := r.lastSuccessNS.Load()
 	switch {
 	case ls == 0:
@@ -315,11 +339,22 @@ func (r *qidRefresher) lazyDue(now time.Time) (string, bool) {
 	return "", false
 }
 
-// intervalOK is the minimum-interval gate: no attempt within minInterval of the
-// previous one. Every trigger passes it before and inside the singleflight.
+// intervalOK is the spacing gate: no attempt before nextAllowedNS, which is the
+// minimum interval after an attempt and grows by doubling (up to qidMaxBackoff)
+// over consecutive failures. Every trigger passes it before and inside the
+// singleflight.
 func (r *qidRefresher) intervalOK(now time.Time) bool {
-	la := r.lastAttemptNS.Load()
-	return la == 0 || now.Sub(time.Unix(0, la)) >= r.cfg.minInterval
+	return now.UnixNano() >= r.nextAllowedNS.Load()
+}
+
+// backoff is the spacing after the streak-th consecutive failure: minInterval,
+// doubling per failure, capped at qidMaxBackoff.
+func (r *qidRefresher) backoff(streak int) time.Duration {
+	wait := r.cfg.minInterval
+	for i := 1; i < streak && wait < qidMaxBackoff; i++ {
+		wait *= 2
+	}
+	return min(wait, qidMaxBackoff)
 }
 
 // age is the age of the active map in seconds: since the last successful
@@ -353,43 +388,103 @@ func (r *qidRefresher) fire(trig string, f bundle.Fetcher, m *clientMetrics) {
 func (r *qidRefresher) run(trig string, f bundle.Fetcher, m *clientMetrics) {
 	now := r.now()
 	if !r.intervalOK(now) {
+		m.recordQIDRefresh(trig, qidResultSuppressed)
 		return
 	}
-	r.lastAttemptNS.Store(now.UnixNano())
+	r.nextAllowedNS.Store(now.Add(r.cfg.minInterval).UnixNano())
 	r.attempts.Add(1)
 
+	began := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), r.cfg.timeout)
 	defer cancel()
-	snap, err := r.build(ctx, f)
+	snap, result, err := r.attempt(ctx, f)
+	took := time.Since(began)
+	m.recordQIDRefreshDuration(trig, result, took)
+	slog.Info("queryid refresh finished",
+		slog.String("trigger", trig), slog.String("result", result), slog.Duration("took", took))
 	if err != nil {
-		result := qidResultFetchFailed
-		if errors.Is(err, errQIDRejected) {
-			result = qidResultRejected
-		}
+		r.mu.Lock()
+		r.streak++
+		wait := r.backoff(r.streak)
+		r.mu.Unlock()
+		r.nextAllowedNS.Store(now.Add(wait).UnixNano())
 		m.recordQIDRefresh(trig, result)
 		r.noteFailure(trig, result, err)
 		return
 	}
+	prev := activeQID.Load()
+	carried := overlaySnapshot(prev, snap)
 	activeQID.Store(snap)
 	r.lastSuccessNS.Store(snap.at.UnixNano())
+	r.mu.Lock()
+	r.streak = 0
+	r.mu.Unlock()
 	m.recordQIDRefresh(trig, qidResultOK)
 	m.recordQIDChanged(snap.changed)
-	r.noteSuccess(trig, snap)
+	r.noteSuccess(trig, snap, carried)
+}
+
+// attempt builds a snapshot and classifies the outcome. A panic while parsing
+// network-supplied bodies is recovered into a failure: a refresh must never
+// take down the embedding service.
+func (r *qidRefresher) attempt(ctx context.Context, f bundle.Fetcher) (snap *qidSnapshot, result string, err error) {
+	defer func() {
+		if p := recover(); p != nil {
+			snap, result, err = nil, qidResultPanic, fmt.Errorf("queryid refresh: panic: %v", p)
+		}
+	}()
+	snap, err = r.build(ctx, f)
+	switch {
+	case err == nil:
+		return snap, qidResultOK, nil
+	case errors.Is(err, errQIDRejected):
+		return nil, qidResultRejected, err
+	}
+	return nil, qidResultFetchFailed, err
+}
+
+// overlaySnapshot lays next over prev: ids (and features) the earlier refreshes
+// healed but this walk did not see are carried forward, so one flaky chunk
+// cannot send a healed operation back to a retired compiled id. It returns how
+// many ids were carried and recomputes next.changed over the merged set.
+func overlaySnapshot(prev, next *qidSnapshot) int {
+	if prev == nil {
+		return 0
+	}
+	carried := 0
+	for op, id := range prev.ids {
+		if _, seen := next.ids[op]; !seen {
+			next.ids[op] = id
+			carried++
+		}
+	}
+	switch {
+	case next.features == nil:
+		next.features = prev.features
+	default:
+		for name, v := range prev.features {
+			if _, seen := next.features[name]; !seen {
+				next.features[name] = v
+			}
+		}
+	}
+	next.changed = countChangedIDs(next.ids)
+	return carried
 }
 
 // noteSuccess clears the failing state and logs the recovery or first success.
-func (r *qidRefresher) noteSuccess(trig string, snap *qidSnapshot) {
+func (r *qidRefresher) noteSuccess(trig string, snap *qidSnapshot, carried int) {
 	r.mu.Lock()
 	wasFailing := r.failing
 	r.failing = false
 	r.mu.Unlock()
 	level := slog.LevelDebug
-	if wasFailing || snap.changed > 0 {
+	if wasFailing || snap.changed > 0 || carried > 0 {
 		level = slog.LevelInfo
 	}
 	slog.Log(context.Background(), level, "queryid refresh applied",
 		slog.String("trigger", trig), slog.Int("ops", len(snap.ids)),
-		slog.Int("changed", snap.changed), slog.Bool("features_updated", snap.features != nil),
+		slog.Int("changed", snap.changed), slog.Int("carried_forward", carried), slog.Bool("features_updated", snap.features != nil),
 		slog.Bool("recovered", wasFailing))
 }
 
@@ -414,6 +509,10 @@ func (r *qidRefresher) noteFailure(trig, result string, err error) {
 	hook("queryid.refresh_failed", map[string]any{"error": err.Error(), "trigger": trig, "result": result})
 }
 
+// qidConsume feeds one fetched body to the extractor. A var only so a test can
+// make it panic.
+var qidConsume = func(ext *gqlextract.Extractor, u string, body []byte) { ext.Consume(u, body) }
+
 // build reads the bundle and returns a validated snapshot, or an error that
 // leaves the active snapshot untouched.
 func (r *qidRefresher) build(ctx context.Context, f bundle.Fetcher) (*qidSnapshot, error) {
@@ -433,7 +532,7 @@ func (r *qidRefresher) build(ctx context.Context, f bundle.Fetcher) (*qidSnapsho
 	walked := 0
 	visit := func(u string, body []byte) {
 		walked++
-		ext.Consume(u, body)
+		qidConsume(ext, u, body)
 		feat.Consume(u, body)
 	}
 	walk := &bundle.Map{}
