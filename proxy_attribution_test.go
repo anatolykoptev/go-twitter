@@ -330,6 +330,7 @@ func newTransportSeamClient(t *testing.T) (*Client, *Account, *[]proxyDownAlert)
 
 	bc, err := stealth.NewClient(stealth.WithoutSSRFGuard(), stealth.WithProxy("http://127.0.0.1:1"))
 	require.NoError(t, err, "stealth client with dead proxy")
+	acc.client = bc // this dead-proxy transport IS the account's own (clientForAccount refuses a proxy-pinned account without one)
 
 	var alerts []proxyDownAlert
 	hook := func(topic string, payload any) {

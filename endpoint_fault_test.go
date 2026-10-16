@@ -286,6 +286,7 @@ func TestEndpointFault_DeadProxy5xxBenchesItself(t *testing.T) {
 	c, accs := newPoolWaitClient(t, 2)
 	accs[0].AuthToken, accs[1].AuthToken = "tokA", "tokB" // pool.Next picks accs[0] first
 	accs[0].Proxy = "http://dead-residential:8080"        // field only: requests still reach the fake via the shared client
+	accs[0].client = c.client                             // stands in for the account-pinned transport (a proxy-pinned account must own one)
 	c.cfg.ProxyBackoffInitial = time.Millisecond
 	c.cfg.ProxyBackoffMax = 20 * time.Millisecond
 	var alerts []proxyDownAlert
