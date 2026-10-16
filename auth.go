@@ -42,7 +42,12 @@ func (c *Client) relogin(acc *Account) error {
 	rec, _ := c.reloginGate.(reloginOutcomeRecorder)
 	slog.Info("attempting relogin", slog.String("user", acc.Username))
 
-	bc := c.clientForAccount(acc)
+	bc, err := c.clientForAccount(acc)
+	if err != nil {
+		// Before the destructive credential clear: an account with no transport
+		// must neither lose its session nor attempt a direct login.
+		return err
+	}
 
 	acc.SetCredentials("", "")
 	// If the stale session could not be deleted, reloading it would adopt the

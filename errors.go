@@ -13,6 +13,13 @@ import (
 // deleted tweets, suspended/unavailable handles. Pool callers treat it as a
 // healthy-account response (no retry, no auth_error report): the credential
 // worked; the thing asked for simply isn't there.
+// ErrProxyClientUnavailable is returned when an account is pinned to its own
+// proxy (Account.Proxy != "") but its per-account transport could not be built.
+// The shared client may be direct, so falling back to it would send the
+// account's cookies from this host's IP, ignoring the proxy the caller asked
+// for: the request fails closed instead.
+var ErrProxyClientUnavailable = errors.New("twitter: account proxy client unavailable")
+
 var ErrNotFound = errors.New("twitter: resource not found")
 
 // ErrEndpoint marks endpoint-wide faults (HTTP 404, or 400 carrying a

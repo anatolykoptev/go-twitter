@@ -9,7 +9,10 @@ import (
 // by calling the authenticated account/settings.json REST endpoint.
 // Returns nil on HTTP 200, an error on 401/403, or a wrapped error on network failure.
 func (c *Client) ValidateAccount(ctx context.Context, acc *Account) error {
-	bc := c.clientForAccount(acc)
+	bc, err := c.clientForAccount(acc)
+	if err != nil {
+		return fmt.Errorf("validate account %s: %w", acc.Username, err)
+	}
 	authTok, ct0, ua := acc.Credentials()
 	headers := twitterHeaders(authTok, ct0, ua)
 

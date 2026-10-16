@@ -31,6 +31,13 @@ type Account struct {
 	reactivateAt time.Time
 	client       *stealth.BrowserClient
 
+	// proxyClientFailed marks an account whose pinned per-account proxy client
+	// could not be built in NewClient. Deliberately NOT the soft-deactivation
+	// `active` flag: pool.Next re-activates any account with a past reactivateAt
+	// (SetActive(true)), which would resurrect it. This flag is write-once and
+	// gates IsActive, so no reactivation path can make the account selectable.
+	proxyClientFailed bool
+
 	mu                 sync.Mutex
 	ct0RefreshedAt     time.Time
 	proxyBackoff       time.Time
@@ -60,7 +67,14 @@ func (a *Account) ID() string { return a.Username }
 func (a *Account) IsActive() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.active
+	return a.active && !a.proxyClientFailed
+}
+
+// markProxyClientFailed permanently disables the account for this Client.
+func (a *Account) markProxyClientFailed() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.proxyClientFailed = true
 }
 
 // SetActive implements pool.Identity.

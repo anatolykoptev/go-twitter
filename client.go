@@ -3,6 +3,7 @@ package twitter
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -54,6 +55,14 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		acc.HealthTracker = pool.DefaultHealthTracker()
 	}
 
+	alertHook := cfg.PoolAlertHook
+	if alertHook == nil {
+		alertHook = func(topic string, payload any) {
+			slog.Warn("pool alert", slog.String("topic", topic), slog.Any("payload", payload))
+		}
+	}
+	m := newClientMetrics(cfg.MeterProvider)
+
 	opts := []stealth.ClientOption{
 		stealth.WithHeaderOrder(twitterHeaderOrder),
 	}
@@ -65,15 +74,22 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		return nil, fmt.Errorf("stealth client: %w", err)
 	}
 
-	// Per-account transports for accounts pinned to their own proxy, built
-	// before the rest of the wiring so a failure fails the whole construction.
-	// This must fail closed: clientForAccount falls back to the shared client
-	// when acc.client is nil, and the shared client may be direct (the
-	// *WithSocial path sets no DefaultProxy) — a warn-and-continue here would
-	// send that account's auth_token/ct0 from this host's IP, ignoring the
-	// proxy the caller explicitly requested.
+	// Per-account transports for accounts pinned to their own proxy. A build
+	// failure disables only that account (a pooled consumer's shared client
+	// must survive one malformed proxy row) and NewClient fails only when no
+	// account is usable. Fail-closed is kept: the failed account is marked
+	// permanently unselectable (IsActive) and clientForAccount refuses to lend
+	// it the shared client, which may be direct (the *WithSocial path sets no
+	// DefaultProxy) and would send its auth_token/ct0 from this host's IP.
+	//
+	// go-stealth's BrowserClient exposes no Close/CloseIdleConnections, so the
+	// clients built before an error return below cannot be released explicitly;
+	// they hold no goroutines until first use and are reclaimed by the GC.
+	var buildErrs []error
+	usable := 0
 	for _, acc := range cfg.Accounts {
 		if acc.Proxy == "" {
+			usable++
 			continue
 		}
 		accClient, err := stealth.NewClient(
@@ -82,16 +98,24 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 			stealth.WithHeaderOrder(twitterHeaderOrder),
 		)
 		if err != nil {
-			return nil, fmt.Errorf("per-account client for %s: %w", acc.Username, err)
+			acc.markProxyClientFailed()
+			label, reason := proxyBuildFailure(acc.Proxy, err)
+			buildErrs = append(buildErrs, fmt.Errorf("per-account client for %s: %s", acc.Username, reason))
+			slog.Warn("per-account proxy client build failed, account disabled",
+				slog.String("user", acc.Username), slog.String("proxy", label), slog.String("error", reason))
+			m.recordProxyClientFailure()
+			alertHook("account.proxy_client_failed", map[string]any{
+				"user":  acc.Username,
+				"proxy": label,
+				"error": reason,
+			})
+			continue
 		}
 		acc.client = accClient
+		usable++
 	}
-
-	alertHook := cfg.PoolAlertHook
-	if alertHook == nil {
-		alertHook = func(topic string, payload any) {
-			slog.Warn("pool alert", slog.String("topic", topic), slog.Any("payload", payload))
-		}
+	if len(cfg.Accounts) > 0 && usable == 0 {
+		return nil, fmt.Errorf("no usable account: %w", errors.Join(buildErrs...))
 	}
 
 	// xtid is initialised lazily, on the first request that carries an account's
@@ -155,7 +179,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		nonResponsiveBackoff: nonResponsiveBackoff,
 		accountPacer:         accountPacer,
 		alertHook:            alertHook,
-		metrics:              newClientMetrics(cfg.MeterProvider),
+		metrics:              m,
 	}
 	if !cfg.skipPoolGauge {
 		c.registerPoolGauge(cfg.MeterProvider)
@@ -168,7 +192,14 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	wireDefaultReloginGate(c)
 
 	for _, acc := range cfg.Accounts {
-		if err := c.loadOrLogin(acc, c.clientForAccount(acc)); err != nil {
+		if acc.proxyClientFailed {
+			continue // disabled above; no transport to log in through
+		}
+		bc, err := c.clientForAccount(acc)
+		if err == nil {
+			err = c.loadOrLogin(acc, bc)
+		}
+		if err != nil {
 			slog.Warn("account login failed", slog.String("user", acc.Username), slog.Any("error", err))
 			acc.SetActive(false)
 		} else {
@@ -194,12 +225,28 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	return c, nil
 }
 
-// clientForAccount returns the per-account client if available, otherwise the shared client.
-func (c *Client) clientForAccount(acc *Account) *stealth.BrowserClient {
-	if acc.client != nil {
-		return acc.client
+// proxyBuildFailure returns a log-safe proxy label and failure reason. The
+// build error embeds the raw proxy URL (credentials included), and
+// stealth.MaskProxy returns an unparseable URL unchanged, so neither may be
+// logged or alerted as-is.
+func proxyBuildFailure(proxy string, err error) (label, reason string) {
+	if _, perr := url.Parse(proxy); perr != nil {
+		return "<unparseable proxy URL>", "unparseable proxy URL"
 	}
-	return c.client
+	return stealth.MaskProxy(proxy), strings.ReplaceAll(err.Error(), proxy, stealth.MaskProxy(proxy))
+}
+
+// clientForAccount returns the per-account client if available, otherwise the
+// shared client. An account pinned to its own proxy with no per-account client
+// never gets the shared one (it may be direct): ErrProxyClientUnavailable.
+func (c *Client) clientForAccount(acc *Account) (*stealth.BrowserClient, error) {
+	if acc.client != nil {
+		return acc.client, nil
+	}
+	if acc.Proxy != "" {
+		return nil, fmt.Errorf("%w: %s", ErrProxyClientUnavailable, acc.Username)
+	}
+	return c.client, nil
 }
 
 // doPoolReq is a helper for doPoolRequest: executes method+payload via doRequestWithBody.
