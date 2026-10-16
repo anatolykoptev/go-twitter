@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.24](https://github.com/anatolykoptev/go-twitter/compare/v0.6.23...v0.6.24) (2026-10-16)
+
+
+### Bug Fixes
+
+* **pool:** caller errors and cancels never burn accounts; cap in-flight per account ([#109](https://github.com/anatolykoptev/go-twitter/issues/109)) ([e70e7c2](https://github.com/anatolykoptev/go-twitter/commit/e70e7c2ffdf7cb986a6387f540b92eedfccd5b57)), closes [#71](https://github.com/anatolykoptev/go-twitter/issues/71) [#96](https://github.com/anatolykoptev/go-twitter/issues/96)
+
 ## [0.6.23](https://github.com/anatolykoptev/go-twitter/compare/v0.6.22...v0.6.23) (2026-10-16)
 
 
