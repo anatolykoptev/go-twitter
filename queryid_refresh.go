@@ -143,10 +143,22 @@ func defaultQIDConfig() qidConfig {
 
 // warmPage is the part of the authenticated warm page the refresh needs.
 type warmPage struct {
-	at       time.Time
-	scripts  []string
-	defaults map[string]bool
+	at        time.Time
+	scripts   []string // start bundles: x-web (Vite) scripts first, then webpack ones
+	layout    string   // qidLayout*
+	pageBytes int
+	defaults  map[string]bool
 }
+
+// Warm-page layouts (log field "layout"). The logged-out page is Vite
+// (x-web); the authenticated page can still be the legacy responsive-web
+// webpack build, which xtid already handles (xtid.locateIndices).
+const (
+	qidLayoutVite    = "vite"
+	qidLayoutWebpack = "webpack"
+	qidLayoutBoth    = "vite+webpack"
+	qidLayoutUnknown = "unknown"
+)
 
 // qidRefresher owns the active snapshot and the trigger bookkeeping. One
 // instance lives for the whole process (processQID), so a refresh learned on
@@ -160,9 +172,10 @@ type qidRefresher struct {
 	sf     singleflight.Group
 	wg     sync.WaitGroup // in-flight refreshes; tests wait on it
 
-	nextAllowedNS atomic.Int64 // no attempt before this instant (min interval, then failure backoff)
-	lastSuccessNS atomic.Int64
-	attempts      atomic.Int64 // refresh runs that passed the interval gate (tests count these; chunk hits can be memoized)
+	nextAllowedNS    atomic.Int64 // no attempt before this instant (min interval, then failure backoff)
+	lastSuccessNS    atomic.Int64
+	noDefaultsLogged atomic.Bool  // the "no featureSwitch defaults" line is logged once
+	attempts         atomic.Int64 // refresh runs that passed the interval gate (tests count these; chunk hits can be memoized)
 
 	mu        sync.Mutex
 	faults    map[string][]time.Time
@@ -247,11 +260,30 @@ func (r *qidRefresher) observePage(page []byte) {
 	r.mu.Unlock()
 }
 
+// parseWarmPage detects the page layout and collects the start bundles. When a
+// page shows both layouts both are walked (Vite first), bounded together by
+// qidMaxBundles: the extractor keeps the highest-ranked source per operation
+// (responsive-web > x-web), so walking both never loses an id, and costs nothing
+// on the single-layout pages seen in practice.
 func parseWarmPage(page []byte, at time.Time) *warmPage {
+	body := string(page)
+	vite := bundle.ViteScripts(body, xtid.AuthedWarmPageURL)
+	web := bundle.WebpackScripts(body, xtid.AuthedWarmPageURL)
+	layout := qidLayoutUnknown
+	switch {
+	case len(vite) > 0 && len(web) > 0:
+		layout = qidLayoutBoth
+	case len(vite) > 0:
+		layout = qidLayoutVite
+	case len(web) > 0:
+		layout = qidLayoutWebpack
+	}
 	return &warmPage{
-		at:       at,
-		scripts:  bundle.ViteScripts(string(page), xtid.AuthedWarmPageURL),
-		defaults: gqlextract.ParseFeatureDefaults(page),
+		at:        at,
+		scripts:   append(vite, web...),
+		layout:    layout,
+		pageBytes: len(page),
+		defaults:  gqlextract.ParseFeatureDefaults(page),
 	}
 }
 
@@ -397,11 +429,13 @@ func (r *qidRefresher) run(trig string, f bundle.Fetcher, m *clientMetrics) {
 	began := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), r.cfg.timeout)
 	defer cancel()
-	snap, result, err := r.attempt(ctx, f)
+	var seen pageSeen
+	snap, result, err := r.attempt(ctx, f, &seen)
 	took := time.Since(began)
 	m.recordQIDRefreshDuration(trig, result, took)
 	slog.Info("queryid refresh finished",
-		slog.String("trigger", trig), slog.String("result", result), slog.Duration("took", took))
+		slog.String("trigger", trig), slog.String("result", result), slog.Duration("took", took),
+		slog.String("layout", seen.layout), slog.Int("start_scripts", seen.scripts))
 	if err != nil {
 		r.mu.Lock()
 		r.streak++
@@ -427,13 +461,13 @@ func (r *qidRefresher) run(trig string, f bundle.Fetcher, m *clientMetrics) {
 // attempt builds a snapshot and classifies the outcome. A panic while parsing
 // network-supplied bodies is recovered into a failure: a refresh must never
 // take down the embedding service.
-func (r *qidRefresher) attempt(ctx context.Context, f bundle.Fetcher) (snap *qidSnapshot, result string, err error) {
+func (r *qidRefresher) attempt(ctx context.Context, f bundle.Fetcher, seen *pageSeen) (snap *qidSnapshot, result string, err error) {
 	defer func() {
 		if p := recover(); p != nil {
 			snap, result, err = nil, qidResultPanic, fmt.Errorf("queryid refresh: panic: %v", p)
 		}
 	}()
-	snap, err = r.build(ctx, f)
+	snap, err = r.build(ctx, f, seen)
 	switch {
 	case err == nil:
 		return snap, qidResultOK, nil
@@ -513,15 +547,25 @@ func (r *qidRefresher) noteFailure(trig, result string, err error) {
 // make it panic.
 var qidConsume = func(ext *gqlextract.Extractor, u string, body []byte) { ext.Consume(u, body) }
 
+// pageSeen is what a refresh learned about the warm page, for the finish log
+// (never page contents).
+type pageSeen struct {
+	layout  string
+	scripts int
+}
+
 // build reads the bundle and returns a validated snapshot, or an error that
-// leaves the active snapshot untouched.
-func (r *qidRefresher) build(ctx context.Context, f bundle.Fetcher) (*qidSnapshot, error) {
+// leaves the active snapshot untouched. seen is filled as soon as the page is
+// parsed so a failed refresh still reports the layout.
+func (r *qidRefresher) build(ctx context.Context, f bundle.Fetcher, seen *pageSeen) (*qidSnapshot, error) {
 	page, err := r.pageFor(ctx, f)
 	if err != nil {
 		return nil, err
 	}
+	seen.layout, seen.scripts = page.layout, len(page.scripts)
 	if len(page.scripts) == 0 {
-		return nil, errors.New("queryid refresh: no x-web scripts on the warm page")
+		return nil, fmt.Errorf("queryid refresh: no x-web or responsive-web scripts on the warm page (layout=%s, page_bytes=%d)",
+			page.layout, page.pageBytes)
 	}
 	if bundle.IsLoggedOutShell(page.scripts) {
 		return nil, bundle.ErrLoggedOutShell
@@ -549,6 +593,10 @@ func (r *qidRefresher) build(ctx context.Context, f bundle.Fetcher) (*qidSnapsho
 	}
 	snap := &qidSnapshot{ids: ids, at: r.now(), changed: countChangedIDs(ids)}
 
+	if len(page.defaults) == 0 && r.noDefaultsLogged.CompareAndSwap(false, true) {
+		slog.Info("queryid refresh: no featureSwitch defaults on the warm page; features stay compiled",
+			slog.String("layout", page.layout))
+	}
 	extracted, _ := gqlextract.IntersectFeatures(feat.Result(), page.defaults, slog.Default())
 	if merged, ferr := mergeFeatures(compiledGQLFeatures(), extracted); ferr != nil {
 		slog.Info("queryid refresh: features unchanged", slog.Any("reason", ferr))

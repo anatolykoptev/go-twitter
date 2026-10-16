@@ -19,7 +19,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-	"sort"
 
 	"github.com/anatolykoptev/go-twitter/internal/bundle"
 	"github.com/anatolykoptev/go-twitter/internal/gqlextract"
@@ -225,7 +224,7 @@ func extractAll(ctx context.Context, fetcher bundle.Fetcher, opts bundle.Options
 		return nil, nil, fmt.Errorf("build chunk map: %w", err)
 	}
 
-	start := startBundles(m)
+	start := m.StartURLs()
 	ext := gqlextract.NewExtractor(slog.Default())
 	feat := gqlextract.NewFeatureCollector()
 	visit := func(url string, body []byte) {
@@ -256,19 +255,6 @@ func fetchFeatureDefaults(ctx context.Context, fetcher bundle.Fetcher) (map[stri
 	defaults := gqlextract.ParseFeatureDefaults(body)
 	slog.Info("gql-sync: parsed feature defaults", slog.Int("defaults_found", len(defaults)))
 	return defaults, nil
-}
-
-// startBundles resolves every module name in the chunk map to its bundle URL,
-// sorted for a deterministic walk order.
-func startBundles(m *bundle.Map) []string {
-	urls := make([]string, 0, len(m.Names))
-	for _, name := range m.Names {
-		if u, ok := m.BundleURL(name); ok {
-			urls = append(urls, u)
-		}
-	}
-	sort.Strings(urls)
-	return urls
 }
 
 // writeGenerated renders the map and writes it only when the bytes differ from
