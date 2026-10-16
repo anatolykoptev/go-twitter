@@ -168,7 +168,8 @@ recorded through whichever client triggered or observed the refresh, so the
     `queryid.refresh_failed` pool alert; further failures do not until a success
     in between. Alert on `rate(refreshes{result!="ok"})` for a persistent break.
 - `changed`: how many operation IDs differed from the compiled set on the last
-  successful refresh. A non-zero value means the binary is behind X: rebuild with
+  successful refresh (operations pinned by a `TWITTER_QID_*` override are not
+  counted: the refreshed id is not applied to them). A non-zero value means the binary is behind X: rebuild with
   `cmd/gql-sync` output. Zero after a success means the compiled IDs are current.
 - `age`: seconds since the active map was last refreshed, or since process start
   while the compiled IDs are still active. Sampled on every authenticated

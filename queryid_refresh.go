@@ -154,6 +154,7 @@ type qidRefresher struct {
 
 	lastAttemptNS atomic.Int64
 	lastSuccessNS atomic.Int64
+	attempts      atomic.Int64 // refresh runs that passed the interval gate (tests count these; chunk hits can be memoized)
 
 	mu        sync.Mutex
 	faults    map[string][]time.Time
@@ -355,6 +356,7 @@ func (r *qidRefresher) run(trig string, f bundle.Fetcher, m *clientMetrics) {
 		return
 	}
 	r.lastAttemptNS.Store(now.UnixNano())
+	r.attempts.Add(1)
 
 	ctx, cancel := context.WithTimeout(context.Background(), r.cfg.timeout)
 	defer cancel()
@@ -511,7 +513,7 @@ func validateQIDs(known []string, extracted map[string]string, malformed func(op
 func countChangedIDs(ids map[string]string) int {
 	n := 0
 	for op, id := range ids {
-		if ep, ok := Endpoints[op]; ok && ep.ID != id {
+		if ep, ok := Endpoints[op]; ok && ep.ID != id && !isEnvPinned(op) {
 			n++
 		}
 	}

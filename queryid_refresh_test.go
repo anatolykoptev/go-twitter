@@ -229,13 +229,13 @@ func (w *qidWorld) entryJS() []byte {
 // newQIDClient builds a pool client over the fake world: the xtid warm path
 // and the queryId refresh both read through the world, like production reads
 // through the account's client.
-func newQIDClient(t *testing.T, w *qidWorld, accounts int) *Client {
+func newQIDClient(t *testing.T, w *qidWorld, accounts int) (*Client, []*Account) {
 	t.Helper()
 	w.start(t)
-	c, _ := newPoolWaitClient(t, accounts)
+	c, accs := newPoolWaitClient(t, accounts)
 	c.warmDoerOverride = w
 	c.xtidMgr.SetWarmPageHook(observeWarmPage)
-	return c
+	return c, accs
 }
 
 func (c *Client) search(ctx context.Context) error {
@@ -258,7 +258,7 @@ func ctxTimeout(t *testing.T) context.Context {
 func TestQIDRefresh_F1_RetiredIDRecoversAfterKFaults(t *testing.T) {
 	r, clk := useQIDRefresher(t)
 	w := newQIDWorld(t)
-	c := newQIDClient(t, w, 1)
+	c, _ := newQIDClient(t, w, 1)
 	ctx := ctxTimeout(t)
 	compiledID := Endpoints["SearchTimeline"].ID
 
@@ -287,6 +287,41 @@ func TestQIDRefresh_F1_RetiredIDRecoversAfterKFaults(t *testing.T) {
 	assert.Equal(t, compiledID, ids[len(ids)-2], "the K-th faulting call still used the compiled id: no in-call retry")
 }
 
+// F8 — the account-pinned write path counts endpoint faults as well: K faults
+// on a retired CreateTweet id refresh the ids, and the next write uses the new
+// one. A write is never replayed within the faulting call.
+//
+// Mutation: in request.go doPOST delete the `c.noteEndpointFault(...)` call in
+// the `status != 200` arm => RED.
+func TestQIDRefresh_F8_WritePathFaultsTriggerRefresh(t *testing.T) {
+	r, clk := useQIDRefresher(t)
+	w := newQIDWorld(t)
+	c, accs := newQIDClient(t, w, 1)
+	ctx := ctxTimeout(t)
+	post := func() error {
+		_, err := c.postMutation(ctx, accs[0], "CreateTweet", map[string]any{"tweet_text": "hello"})
+		return err
+	}
+
+	require.NoError(t, post())
+	r.wg.Wait()
+	require.EqualValues(t, 1, r.attempts.Load())
+
+	const newCreate = "NewCreateID_0003"
+	w.retire("CreateTweet", newCreate)
+	clk.Advance(qidMinInterval + time.Minute)
+	for i := 0; i < qidFaultThreshold; i++ {
+		require.ErrorIs(t, post(), ErrEndpoint, "write %d must fault on the retired id", i)
+		clk.Advance(5 * time.Second)
+	}
+	r.wg.Wait()
+	require.EqualValues(t, 2, r.attempts.Load(), "K write faults must trigger one refresh")
+
+	require.NoError(t, post(), "the next write uses the refreshed id")
+	ids := w.requestedIDs()
+	assert.Equal(t, newCreate, ids[len(ids)-1])
+}
+
 // F2 — journey on the *WithSocial path with a fake go-social and a fake X. A
 // refresh during lease 1 serves lease 2: the fake X sees exactly one bundle
 // fetch.
@@ -297,7 +332,7 @@ func TestQIDRefresh_F1_RetiredIDRecoversAfterKFaults(t *testing.T) {
 //
 // (per-Client state) => RED.
 func TestQIDRefresh_F2_SocialLeaseTwoServedByLeaseOneRefresh(t *testing.T) {
-	r, _ := useQIDRefresher(t)
+	r, clk := useQIDRefresher(t)
 	w := newQIDWorld(t)
 	w.retire("UserByScreenName", qidNewUser)
 	rig := newSocialRigX(t, w.serveGraphQL)
@@ -328,6 +363,11 @@ func TestQIDRefresh_F2_SocialLeaseTwoServedByLeaseOneRefresh(t *testing.T) {
 	require.ErrorIs(t, err, ErrEndpoint)
 	waitAll()
 
+	// Past the shared chunk cache and the observed-page lifetime, inside the TTL:
+	// a second refresh by lease 2 could no longer hide behind either and would
+	// have to hit X again.
+	clk.Advance(qidObservedPageMaxAge + time.Minute)
+
 	// Lease 2 is a brand-new Client on another account: it must use the refreshed id.
 	user, err := GetUserWithSocial(context.Background(), rig.sc, "tesla")
 	require.NoError(t, err)
@@ -336,6 +376,7 @@ func TestQIDRefresh_F2_SocialLeaseTwoServedByLeaseOneRefresh(t *testing.T) {
 
 	assert.Equal(t, 1, w.bundleFetches(), "one refresh serves both leases: the bundle is fetched once")
 	assert.Equal(t, 1, w.pageFetches(), "xtid's warm-page fetch is shared with the refresh and not repeated by lease 2")
+	assert.EqualValues(t, 1, r.attempts.Load(), "lease 2 must not start a refresh of its own")
 	ids := w.requestedIDs()
 	require.Len(t, ids, 2)
 	assert.Equal(t, qidNewUser, ids[1])
@@ -348,7 +389,7 @@ func TestQIDRefresh_F2_SocialLeaseTwoServedByLeaseOneRefresh(t *testing.T) {
 func TestQIDRefresh_F3a_TooFewOperationsChangesNothing(t *testing.T) {
 	r, _ := useQIDRefresher(t)
 	w := newQIDWorld(t)
-	c := newQIDClient(t, w, 1)
+	c, _ := newQIDClient(t, w, 1)
 
 	w.set(func(w *qidWorld) {
 		w.live["SearchTimeline"] = qidNewSearch
@@ -370,7 +411,7 @@ func TestQIDRefresh_F3a_TooFewOperationsChangesNothing(t *testing.T) {
 func TestQIDRefresh_F3b_MalformedIDRejectsWholeBundle(t *testing.T) {
 	r, _ := useQIDRefresher(t)
 	w := newQIDWorld(t)
-	c := newQIDClient(t, w, 1)
+	c, _ := newQIDClient(t, w, 1)
 
 	w.retire("SearchTimeline", qidNewSearch)
 	w.set(func(w *qidWorld) { w.extraJS = `{queryId:"BAD/ID",operationName:"UserTweets"},` })
@@ -420,7 +461,7 @@ func TestQIDRefresh_F4_EnvOverrideBeatsRefreshedID(t *testing.T) {
 
 	w.set(func(w *qidWorld) { w.live["SearchTimeline"] = pinned })
 	w.set(func(w *qidWorld) { w.advertised["SearchTimeline"] = qidNewSearch })
-	c := newQIDClient(t, w, 1)
+	c, _ := newQIDClient(t, w, 1)
 	ctx := ctxTimeout(t)
 
 	require.NoError(t, c.search(ctx))
@@ -449,7 +490,7 @@ func TestQIDRefresh_F5_FetchFailureKeepsLastGoodMap(t *testing.T) {
 	})
 	w := newQIDWorld(t)
 	w.retire("SearchTimeline", qidNewSearch)
-	c := newQIDClient(t, w, 1)
+	c, _ := newQIDClient(t, w, 1)
 	ctx := ctxTimeout(t)
 
 	_ = c.search(ctx) // first request: 404 on the compiled id; the first-trigger refresh learns the new one
@@ -489,12 +530,13 @@ func TestQIDRefresh_F5_FetchFailureKeepsLastGoodMap(t *testing.T) {
 func TestQIDRefresh_F6_FaultStormRefreshesOncePerInterval(t *testing.T) {
 	r, clk := useQIDRefresher(t)
 	w := newQIDWorld(t)
-	c := newQIDClient(t, w, 6)
+	c, _ := newQIDClient(t, w, 6)
 	ctx := ctxTimeout(t)
 
 	require.NoError(t, c.search(ctx))
 	r.wg.Wait()
-	base := w.bundleFetches() // the first-trigger refresh
+	base := r.attempts.Load() // the first-trigger refresh
+	require.EqualValues(t, 1, base)
 
 	// X breaks the id and the bundle does not advertise a fix: faults never stop.
 	w.set(func(w *qidWorld) { w.live["SearchTimeline"] = "XBrokeIt_0001" })
@@ -507,14 +549,16 @@ func TestQIDRefresh_F6_FaultStormRefreshesOncePerInterval(t *testing.T) {
 	}
 	wg.Wait()
 	r.wg.Wait()
-	assert.Equal(t, base+1, w.bundleFetches(), "50 concurrent faults trigger one refresh")
+	// Count refresh RUNS, not chunk fetches: the shared chunk cache can serve a
+	// repeated walk from memory, which would hide a storm.
+	assert.Equal(t, base+1, r.attempts.Load(), "50 concurrent faults trigger one refresh")
 
 	clk.Advance(10 * time.Second)
 	for i := 0; i < 50; i++ {
 		_ = c.search(ctx)
 	}
 	r.wg.Wait()
-	assert.Equal(t, base+1, w.bundleFetches(), "faults inside the interval must not refresh again")
+	assert.Equal(t, base+1, r.attempts.Load(), "faults inside the interval must not refresh again")
 }
 
 // F7 — the refresh metric records trigger and result, plus the changed-ids and
@@ -530,7 +574,7 @@ func TestQIDRefresh_F7_MetricRecordsTriggerAndResult(t *testing.T) {
 
 	w := newQIDWorld(t)
 	w.retire("SearchTimeline", qidNewSearch)
-	c := newQIDClient(t, w, 1)
+	c, _ := newQIDClient(t, w, 1)
 	c.metrics = newClientMetrics(mp)
 	ctx := ctxTimeout(t)
 
@@ -575,7 +619,7 @@ func TestQIDRefresh_F7_MetricRecordsTriggerAndResult(t *testing.T) {
 func TestQIDRefresh_TTLTriggerPicksUpARotation(t *testing.T) {
 	r, clk := useQIDRefresher(t)
 	w := newQIDWorld(t)
-	c := newQIDClient(t, w, 1)
+	c, _ := newQIDClient(t, w, 1)
 	ctx := ctxTimeout(t)
 
 	require.NoError(t, c.search(ctx))
@@ -597,7 +641,7 @@ func TestQIDRefresh_FeaturesAdditiveAndGuarded(t *testing.T) {
 		r, _ := useQIDRefresher(t)
 		w := newQIDWorld(t)
 		w.set(func(w *qidWorld) { w.newFlag = true })
-		c := newQIDClient(t, w, 1)
+		c, _ := newQIDClient(t, w, 1)
 		require.NoError(t, c.search(ctxTimeout(t)))
 		r.wg.Wait()
 
@@ -616,7 +660,7 @@ func TestQIDRefresh_FeaturesAdditiveAndGuarded(t *testing.T) {
 		w := newQIDWorld(t)
 		w.retire("SearchTimeline", qidNewSearch)
 		w.set(func(w *qidWorld) { w.newFlag, w.dropFlags = true, true })
-		c := newQIDClient(t, w, 1)
+		c, _ := newQIDClient(t, w, 1)
 		_ = c.search(ctxTimeout(t))
 		r.wg.Wait()
 
