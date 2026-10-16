@@ -326,7 +326,7 @@ func TestQIDRefresh_F8_WritePathFaultsTriggerRefresh(t *testing.T) {
 // refresh during lease 1 serves lease 2: the fake X sees exactly one bundle
 // fetch.
 //
-// Mutation: in client.go qidRefresh() replace `return processQID()` with
+// Mutation: in queryid_refresh.go qidRefresh() replace `return processQID()` with
 //
 //	if c.qid == nil { c.qid = newQIDRefresher(processQID().cfg) }; return c.qid
 //
