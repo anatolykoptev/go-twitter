@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"testing"
+
+	"github.com/anatolykoptev/go-twitter/internal/gqlextract"
 )
 
 const (
@@ -33,10 +35,10 @@ func readFixture(t *testing.T, name string) []byte {
 // map plus the bundle names that had no warm-page default.
 func realExtract(t *testing.T) (map[string]any, []string) {
 	t.Helper()
-	c := newFeatureCollector()
-	c.consume(realChunk, readFixture(t, realChunk))
-	defaults := parseFeatureDefaults(readFixture(t, realHome))
-	return intersectFeatures(c.result(), defaults, quietLogger())
+	c := gqlextract.NewFeatureCollector()
+	c.Consume(realChunk, readFixture(t, realChunk))
+	defaults := gqlextract.ParseFeatureDefaults(readFixture(t, realHome))
+	return gqlextract.IntersectFeatures(c.Result(), defaults, quietLogger())
 }
 
 // committedBaseline is the 37-flag hand-maintained set shipped in features_gen.go,
@@ -171,7 +173,7 @@ func TestExtractFeatures_RealFixture(t *testing.T) {
 // the "flag":{"value":bool} shape and never the array-valued switches (e.g. the
 // country whitelist) that share the defaultConfig object.
 func TestParseFeatureDefaults_IgnoresNonBool(t *testing.T) {
-	defaults := parseFeatureDefaults(readFixture(t, realHome))
+	defaults := gqlextract.ParseFeatureDefaults(readFixture(t, realHome))
 	if _, ok := defaults["account_country_setting_countries_whitelist"]; ok {
 		t.Error("array-valued switch wrongly parsed as a boolean default")
 	}

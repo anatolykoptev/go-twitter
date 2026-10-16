@@ -1,4 +1,4 @@
-package main
+package gqlextract
 
 import (
 	"io"
@@ -8,8 +8,8 @@ import (
 	"testing"
 )
 
-func quietExtractor() *extractor {
-	return newExtractor(slog.New(slog.NewTextHandler(io.Discard, nil)))
+func quietExtractor() *Extractor {
+	return NewExtractor(slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
 const (
@@ -25,9 +25,9 @@ func TestExtractor_BothForms(t *testing.T) {
 		`e.exports={n:{params:{id:"BBB222",metadata:{},name:"OpTwo",operationKind:"query"}}};`)
 
 	ext := quietExtractor()
-	ext.consume(rwAPI, body)
+	ext.Consume(rwAPI, body)
 
-	got := ext.result()
+	got := ext.Result()
 	want := map[string]string{"OpOne": "AAA111", "OpTwo": "BBB222"}
 	if !maps.Equal(got, want) {
 		t.Fatalf("result = %v, want %v", got, want)
@@ -44,18 +44,18 @@ func TestExtractor_SourcePriorityDedupe(t *testing.T) {
 
 	t.Run("other seen first, responsive-web overrides", func(t *testing.T) {
 		ext := quietExtractor()
-		ext.consume(otherAPI, otherBody)
-		ext.consume(rwAPI, rwBody)
-		if got := ext.result()[op]; got != "RW_WINS" {
+		ext.Consume(otherAPI, otherBody)
+		ext.Consume(rwAPI, rwBody)
+		if got := ext.Result()[op]; got != "RW_WINS" {
 			t.Fatalf("%s = %q, want RW_WINS", op, got)
 		}
 	})
 
 	t.Run("responsive-web seen first, other does not override", func(t *testing.T) {
 		ext := quietExtractor()
-		ext.consume(rwAPI, rwBody)
-		ext.consume(otherAPI, otherBody)
-		if got := ext.result()[op]; got != "RW_WINS" {
+		ext.Consume(rwAPI, rwBody)
+		ext.Consume(otherAPI, otherBody)
+		if got := ext.Result()[op]; got != "RW_WINS" {
 			t.Fatalf("%s = %q, want RW_WINS", op, got)
 		}
 	})
@@ -65,13 +65,13 @@ func TestExtractor_SourcePriorityDedupe(t *testing.T) {
 func TestExtractor_RankOrder(t *testing.T) {
 	const op = "RankedOp"
 	ext := quietExtractor()
-	ext.consume(otherAPI, []byte(`queryId:"OTHER",operationName:"RankedOp"`))
-	ext.consume(xwebAPI, []byte(`queryId:"XWEB",operationName:"RankedOp"`))
-	if got := ext.result()[op]; got != "XWEB" {
+	ext.Consume(otherAPI, []byte(`queryId:"OTHER",operationName:"RankedOp"`))
+	ext.Consume(xwebAPI, []byte(`queryId:"XWEB",operationName:"RankedOp"`))
+	if got := ext.Result()[op]; got != "XWEB" {
 		t.Fatalf("after other+xweb: %s = %q, want XWEB", op, got)
 	}
-	ext.consume(rwAPI, []byte(`queryId:"RW",operationName:"RankedOp"`))
-	if got := ext.result()[op]; got != "RW" {
+	ext.Consume(rwAPI, []byte(`queryId:"RW",operationName:"RankedOp"`))
+	if got := ext.Result()[op]; got != "RW" {
 		t.Fatalf("after +responsive-web: %s = %q, want RW", op, got)
 	}
 }
@@ -92,9 +92,9 @@ func TestExtractor_BoundedToObjectBoundaries(t *testing.T) {
 			`e.exports={n:{params:{name:"OpGamma",id:"GAMMA333",operationKind:"query"}}}`)
 
 	ext := quietExtractor()
-	ext.consume(rwAPI, body)
+	ext.Consume(rwAPI, body)
 
-	got := ext.result()
+	got := ext.Result()
 	want := map[string]string{
 		"OpAlpha": "ALPHA111",
 		"OpBeta":  "BETA222",
@@ -117,7 +117,7 @@ func TestExtractor_BoundedToObjectBoundaries(t *testing.T) {
 func TestExtractor_DropsPoisonedQueryID(t *testing.T) {
 	// Note: the extraction regex alphabet is [^"'], so an embedded quote can
 	// never reach add() — it terminates the capture. The poisoning vectors that
-	// DO survive the regex and must be caught by queryIDRe are path-breaking
+	// DO survive the regex and must be caught by QueryIDRe are path-breaking
 	// bytes the regex tolerates (`/`, whitespace, `.`) and over-length values.
 	cases := []struct {
 		name string
@@ -134,9 +134,9 @@ func TestExtractor_DropsPoisonedQueryID(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			body := []byte(`queryId:"` + tc.id + `",operationName:"PoisonOp"`)
 			ext := quietExtractor()
-			ext.consume(rwAPI, body)
+			ext.Consume(rwAPI, body)
 
-			got, ok := ext.result()["PoisonOp"]
+			got, ok := ext.Result()["PoisonOp"]
 			if tc.kept {
 				if !ok || got != tc.id {
 					t.Fatalf("clean id should be kept: got %q ok=%v", got, ok)
@@ -153,8 +153,8 @@ func TestExtractor_DropsPoisonedQueryID(t *testing.T) {
 func TestExtractor_DropsPoisonedParamsID(t *testing.T) {
 	body := []byte(`e.exports={n:{params:{id:"BAD/ID",name:"ParamOp",operationKind:"query"}}}`)
 	ext := quietExtractor()
-	ext.consume(rwAPI, body)
-	if id, ok := ext.result()["ParamOp"]; ok {
+	ext.Consume(rwAPI, body)
+	if id, ok := ext.Result()["ParamOp"]; ok {
 		t.Fatalf("poisoned params id should be dropped, got %q", id)
 	}
 }

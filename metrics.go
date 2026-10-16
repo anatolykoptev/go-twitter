@@ -32,12 +32,17 @@ const (
 	metricRateLimitRemain     = "twitter.client.ratelimit.remaining"
 	metricRateLimitLimit      = "twitter.client.ratelimit.limit"
 	metricRateLimitHolds      = "twitter.client.ratelimit.holds"
+	metricQIDRefreshes        = "twitter.client.queryid.refreshes"
+	metricQIDChanged          = "twitter.client.queryid.changed"
+	metricQIDAge              = "twitter.client.queryid.age"
+	metricQIDWalk             = "twitter.client.queryid.refresh.duration"
 
 	// Attribute keys.
 	attrOperation    = "twitter.operation"
 	attrOutcome      = "twitter.outcome"
 	attrAccountState = "twitter.account.state"
 	attrResult       = "twitter.result"
+	attrTrigger      = "twitter.trigger"
 )
 
 // Request/relogin outcome values (twitter.outcome). Bounded: request outcomes
@@ -112,6 +117,10 @@ type clientMetrics struct {
 	rlRemaining     metric.Int64Histogram
 	rlLimit         metric.Int64Histogram
 	rlHolds         metric.Int64Counter
+	qidRefreshes    metric.Int64Counter
+	qidChanged      metric.Int64Gauge
+	qidAge          metric.Float64Gauge
+	qidWalk         metric.Float64Histogram
 	now             func() time.Time // injectable clock for freshness
 }
 
@@ -210,6 +219,31 @@ func newClientMetrics(mp metric.MeterProvider) *clientMetrics {
 		metric.WithDescription("Times an endpoint was held on an account until its window reset because x-rate-limit-remaining showed the window spent, by operation.")); err != nil {
 		fail(metricRateLimitHolds, err)
 		m.rlHolds = noop.Int64Counter{}
+	}
+	if m.qidRefreshes, err = meter.Int64Counter(metricQIDRefreshes,
+		metric.WithUnit("{refresh}"),
+		metric.WithDescription("Runtime queryId/feature refresh attempts, by trigger and result.")); err != nil {
+		fail(metricQIDRefreshes, err)
+		m.qidRefreshes = noop.Int64Counter{}
+	}
+	if m.qidChanged, err = meter.Int64Gauge(metricQIDChanged,
+		metric.WithUnit("{id}"),
+		metric.WithDescription("Operation queryIds that differed from the compiled set on the last successful refresh.")); err != nil {
+		fail(metricQIDChanged, err)
+		m.qidChanged = noop.Int64Gauge{}
+	}
+	if m.qidAge, err = meter.Float64Gauge(metricQIDAge,
+		metric.WithUnit("s"),
+		metric.WithDescription("Age of the active queryId map: since the last successful refresh, or process start while the compiled ids are active.")); err != nil {
+		fail(metricQIDAge, err)
+		m.qidAge = noop.Float64Gauge{}
+	}
+	if m.qidWalk, err = meter.Float64Histogram(metricQIDWalk,
+		metric.WithUnit("s"),
+		metric.WithDescription("Wall time of one queryId refresh attempt (page + chunk walk), by trigger and result."),
+		metric.WithExplicitBucketBoundaries(qidWalkBuckets...)); err != nil {
+		fail(metricQIDWalk, err)
+		m.qidWalk = noop.Float64Histogram{}
 	}
 	return m
 }
@@ -373,6 +407,48 @@ func (m *clientMetrics) recordHold(endpoint string) {
 		return
 	}
 	m.rlHolds.Add(context.Background(), 1, metric.WithAttributes(attribute.String(attrOperation, endpoint)))
+}
+
+// recordQIDRefresh counts one refresh attempt (see docs/metrics.md).
+func (m *clientMetrics) recordQIDRefresh(trigger, result string) {
+	if m == nil {
+		return
+	}
+	m.qidRefreshes.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.String(attrTrigger, trigger),
+		attribute.String(attrResult, result),
+	))
+}
+
+// qidWalkBuckets (seconds) resolve a refresh from 1 s to the 3-minute timeout.
+var qidWalkBuckets = []float64{1, 2, 5, 10, 20, 30, 60, 90, 120, 180}
+
+// recordQIDRefreshDuration records how long one refresh attempt took.
+func (m *clientMetrics) recordQIDRefreshDuration(trigger, result string, d time.Duration) {
+	if m == nil {
+		return
+	}
+	m.qidWalk.Record(context.Background(), d.Seconds(), metric.WithAttributes(
+		attribute.String(attrTrigger, trigger),
+		attribute.String(attrResult, result),
+	))
+}
+
+// recordQIDChanged records how many ids the last successful refresh changed
+// against the compiled set.
+func (m *clientMetrics) recordQIDChanged(n int) {
+	if m == nil {
+		return
+	}
+	m.qidChanged.Record(context.Background(), int64(n))
+}
+
+// recordQIDAge samples the age of the active queryId map (seconds).
+func (m *clientMetrics) recordQIDAge(seconds float64) {
+	if m == nil {
+		return
+	}
+	m.qidAge.Record(context.Background(), seconds)
 }
 
 func (m *clientMetrics) recordRelogin(outcome string) {

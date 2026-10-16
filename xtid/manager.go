@@ -24,6 +24,9 @@ const (
 	// page is what twscrape (xclid.py) uses; it carries the verification meta, the
 	// loading-animation SVGs and the x-web script links.
 	authedWarmPageURL = "https://x.com/tesla"
+	// AuthedWarmPageURL is authedWarmPageURL for consumers that share the page
+	// fetch (see SetWarmPageHook).
+	AuthedWarmPageURL = authedWarmPageURL
 
 	// initTimeout bounds one shared init attempt (it outlives any single caller).
 	initTimeout = 90 * time.Second
@@ -57,6 +60,7 @@ type Manager struct {
 	fails        [kindCount]failState
 	failing      bool // alert dedupe: true between an ok->failed transition and the next success
 	onInitFailed func(error)
+	onWarmPage   func(pageURL string, page []byte)
 
 	now         func() time.Time
 	backoffBase time.Duration
@@ -118,6 +122,18 @@ func (m *Manager) SetInitFailedHook(fn func(error)) {
 	m.mu.Unlock()
 }
 
+// SetWarmPageHook registers fn to receive every successfully fetched
+// AUTHENTICATED warm page (pageURL == AuthedWarmPageURL) right after the fetch,
+// before the indices file is located — so a consumer that needs the same page
+// (the runtime queryId refresh) shares this fetch instead of repeating it. fn
+// runs synchronously outside the manager's locks and must not retain or mutate
+// page.
+func (m *Manager) SetWarmPageHook(fn func(pageURL string, page []byte)) {
+	m.mu.Lock()
+	m.onWarmPage = fn
+	m.mu.Unlock()
+}
+
 // Initialize runs one unauthenticated init attempt synchronously, bypassing the
 // negative cache but recording its outcome. GenerateID/GenerateIDWith call init
 // lazily; this is for callers and tests that want it eagerly.
@@ -158,6 +174,14 @@ func (m *Manager) initFrom(ctx context.Context, f bundle.Fetcher, pageURL string
 	page, err := bundle.FetchPage(ctx, f, pageURL)
 	if err != nil {
 		return fmt.Errorf("fetch warm page: %w", err)
+	}
+	if pageURL == authedWarmPageURL {
+		m.mu.RLock()
+		hook := m.onWarmPage
+		m.mu.RUnlock()
+		if hook != nil {
+			hook(pageURL, page)
+		}
 	}
 	homeHTML := string(page)
 

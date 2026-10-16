@@ -28,6 +28,10 @@ metrics.
 | `twitter.client.ratelimit.remaining` | histogram | `{request}` | `twitter.operation` |
 | `twitter.client.ratelimit.limit` | histogram | `{request}` | `twitter.operation` |
 | `twitter.client.ratelimit.holds` | counter | `{hold}` | `twitter.operation` |
+| `twitter.client.queryid.refreshes` | counter | `{refresh}` | `twitter.trigger`, `twitter.result` |
+| `twitter.client.queryid.changed` | gauge | `{id}` | none |
+| `twitter.client.queryid.age` | gauge | `s` | none |
+| `twitter.client.queryid.refresh.duration` | histogram | `s` | `twitter.trigger`, `twitter.result` |
 
 No instrument ever carries an account handle, user ID, list ID, search query or
 URL as an attribute.
@@ -145,6 +149,39 @@ proactive counterpart of a 429: a rising `holds` with a flat
 out of 429s. Pool paths only; writes and media uploads pinned to an account
 never hold. Counted at the response that triggered the hold, not for the
 pick-time estimate hold.
+
+### `twitter.client.queryid.refreshes` / `.changed` / `.age`
+
+The runtime queryId/feature refresh (README, "GraphQL ID maintenance"). The state
+is process-wide, so these describe the process, not one client; they are
+recorded through whichever client triggered or observed the refresh, so the
+`*WithSocial` helpers report them on the `SetSocialMeterProvider` provider.
+
+- `refreshes`: one count per refresh attempt that ran, plus `suppressed` counts of due
+  attempts the spacing refused.
+  - `twitter.trigger`: `first` (no successful refresh yet), `ttl` (the active map
+    outlived 6 h), `fault` (3 endpoint faults on one operation within 2 min).
+  - `twitter.result`: `ok`; `fetch_failed` (the page or no bundle could be read:
+    network, logged-out shell, no x-web scripts); `rejected` (read, but failed
+    validation, so nothing was applied); `panic` (the walk panicked on a bundle body and was
+    recovered); `suppressed` (an attempt was due but the 15 min / failure-backoff spacing refused it;
+    not a refresh, counted so a stuck backoff is visible).
+  - A `fetch_failed` or `rejected` result keeps the last good map. The first
+    failure after a success (or after process start) also fires one
+    `queryid.refresh_failed` pool alert; further failures do not until a success
+    in between. Alert on `rate(refreshes{result!="ok"})` for a persistent break.
+- `changed`: how many operation IDs differed from the compiled set on the last
+  successful refresh (operations pinned by a `TWITTER_QID_*` override are not
+  counted: the refreshed id is not applied to them). A non-zero value means the binary is behind X: rebuild with
+  `cmd/gql-sync` output. Zero after a success means the compiled IDs are current.
+- `refresh.duration`: wall time of one attempt (page + chunk walk), buckets 1 s to 180 s
+  (the walk timeout). Every attempt also logs `queryid refresh finished` at INFO with the same
+  duration. A later refresh overlays the earlier: ops it did not find keep their earlier id, and the
+  count carried forward is the `carried_forward` field of the `queryid refresh applied` log.
+- `age`: seconds since the active map was last refreshed, or since process start
+  while the compiled IDs are still active. Sampled on every authenticated
+  request, so it is only fresh while traffic flows. With traffic, an age beyond
+  the 6 h TTL plus the 15 min minimum interval means refreshes are failing.
 
 ### `twitter.client.pool.accounts`
 

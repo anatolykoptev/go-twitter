@@ -36,6 +36,7 @@ type Client struct {
 	metrics              *clientMetrics                  // OpenTelemetry instruments (nil-safe)
 	poolGaugeReg         metric.Registration             // pool.accounts callback; unregistered by Close (guarded by mu)
 	warmDoerOverride     warmDoer                        // test seam: replaces the account client for xtid warm-page fetches
+	qid                  *qidRefresher                   // nil = the process-wide queryId refresher; only tests set it
 
 	mu                sync.Mutex
 	guestToken        string
@@ -130,6 +131,12 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		mgr.SetInitFailedHook(func(err error) {
 			alertHook("xtid.init_failed", map[string]any{"error": err.Error()})
 		})
+		mgr.SetWarmPageHook(observeWarmPage)
+	}
+	if cfg.PoolAlertHook != nil {
+		// The queryId refresh is process-wide; only an explicitly supplied hook
+		// may own its failure alert (the *WithSocial path supplies none).
+		processQID().setAlertHook(cfg.PoolAlertHook)
 	}
 
 	nonResponsiveBackoff := pool.BackoffConfig{
@@ -335,11 +342,16 @@ func (c *Client) doRequestWithBody(bc *stealth.BrowserClient, method, urlStr str
 	if u, parseErr := url.Parse(urlStr); parseErr == nil {
 		urlPath = u.Path
 	}
-	if txID, txErr := c.xtidMgr.GenerateIDWith(context.Background(), method, urlPath, warmFetcher(c.warmClient(bc), headers)); txErr == nil {
+	qid := c.qidRefresh()
+	wf := qid.shared(warmFetcher(c.warmClient(bc), headers))
+	if txID, txErr := c.xtidMgr.GenerateIDWith(context.Background(), method, urlPath, wf); txErr == nil {
 		headers["x-client-transaction-id"] = txID
 	} else {
 		slog.Debug("xtid: failed to generate transaction id", slog.Any("error", txErr))
 	}
+	// First/TTL queryId refresh rides the same authenticated fetcher (and, after
+	// an xtid init, the page it just fetched); it runs in the background.
+	qid.onAuthedRequest(wf, c.metrics)
 
 	if xpffVal, xpffErr := c.xpffGen.Generate(); xpffErr == nil {
 		headers["x-xp-forwarded-for"] = xpffVal

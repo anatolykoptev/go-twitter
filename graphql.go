@@ -17,7 +17,7 @@ func (c *Client) GetUserByScreenName(ctx context.Context, handle string) (*Twitt
 	if err != nil {
 		return nil, err
 	}
-	url = addGraphQLParams(url, variables, Endpoints["UserByScreenName"].Features)
+	url = addGraphQLParams(url, variables, endpointFor("UserByScreenName").Features)
 
 	body, _, err := c.doGET(ctx, "UserByScreenName", url)
 	if err != nil {
@@ -78,14 +78,14 @@ func (c *Client) fetchUserList(ctx context.Context, operation, userID string, ma
 			// Live-confirmed: browser returns 200; go-stealth GET returns 404 on same DC proxy.
 			payload, merr := json.Marshal(map[string]any{
 				"variables": variables,
-				"features":  Endpoints[operation].Features,
+				"features":  endpointFor(operation).Features,
 			})
 			if merr != nil {
 				return users, fmt.Errorf("%s: marshal payload: %w", operation, merr)
 			}
 			body, _, err = c.doPoolPOST(ctx, operation, url, payload)
 		} else {
-			url = addGraphQLParams(url, variables, Endpoints[operation].Features)
+			url = addGraphQLParams(url, variables, endpointFor(operation).Features)
 			body, _, err = c.doGET(ctx, operation, url)
 		}
 		if err != nil {
@@ -144,7 +144,7 @@ func (c *Client) fetchTweetUserList(ctx context.Context, operation, tweetID stri
 		if err != nil {
 			return users, err
 		}
-		url = addGraphQLParams(url, variables, Endpoints[operation].Features)
+		url = addGraphQLParams(url, variables, endpointFor(operation).Features)
 
 		body, _, err := c.doGET(ctx, operation, url)
 		if err != nil {
@@ -199,7 +199,7 @@ func (c *Client) getTweetDetail(ctx context.Context, tweetID string) ([]*Tweet, 
 	if err != nil {
 		return nil, err
 	}
-	url = addGraphQLParams(url, variables, Endpoints["TweetDetail"].Features)
+	url = addGraphQLParams(url, variables, endpointFor("TweetDetail").Features)
 
 	body, _, err := c.doGET(ctx, "TweetDetail", url)
 	if err != nil {
@@ -229,7 +229,7 @@ func (c *Client) GetUserTweets(ctx context.Context, userID string, count int) ([
 	if err != nil {
 		return nil, err
 	}
-	url = addGraphQLParams(url, variables, Endpoints["UserTweets"].Features)
+	url = addGraphQLParams(url, variables, endpointFor("UserTweets").Features)
 
 	body, _, err := c.doGET(ctx, "UserTweets", url)
 	if err != nil {
@@ -294,7 +294,7 @@ func (c *Client) searchTimelineRaw(ctx context.Context, query string, product Se
 	}
 	payload, err := json.Marshal(map[string]any{
 		"variables":    variables,
-		"features":     Endpoints["SearchTimeline"].Features,
+		"features":     endpointFor("SearchTimeline").Features,
 		"fieldToggles": fieldToggles,
 	})
 	if err != nil {
@@ -318,7 +318,7 @@ func (c *Client) CreateTweet(ctx context.Context, acc *Account, text string) (st
 		"semantic_annotation_ids": []any{},
 	}
 
-	ep := Endpoints["CreateTweet"]
+	ep := endpointFor("CreateTweet")
 	payload, err := json.Marshal(map[string]any{
 		"variables": variables,
 		"features":  ep.Features,
@@ -342,7 +342,7 @@ func (c *Client) CreateTweet(ctx context.Context, acc *Account, text string) (st
 // account's state). It mirrors CreateTweet's payload shape; the engagement
 // methods below share it.
 func (c *Client) postMutation(ctx context.Context, acc *Account, op string, variables map[string]any) ([]byte, error) {
-	ep := Endpoints[op]
+	ep := endpointFor(op)
 	payload, err := json.Marshal(map[string]any{
 		"variables": variables,
 		"features":  ep.Features,
@@ -514,7 +514,7 @@ func (c *Client) GetListTweets(ctx context.Context, listID string, maxCount int)
 			if cursor != "" {
 				variables["cursor"] = cursor
 			}
-			return variables, Endpoints["ListLatestTweetsTimeline"].Features
+			return variables, endpointFor("ListLatestTweetsTimeline").Features
 		}, parseListTweets)
 }
 
@@ -531,7 +531,7 @@ func (c *Client) GetCommunityTweets(ctx context.Context, communityID string, max
 			if cursor != "" {
 				variables["cursor"] = cursor
 			}
-			return variables, Endpoints["CommunityTweetsTimeline"].Features
+			return variables, endpointFor("CommunityTweetsTimeline").Features
 		}, parseCommunityTweets)
 }
 
@@ -569,7 +569,7 @@ func (c *Client) fetchHomeTimeline(ctx context.Context, operation string, count 
 		variables["requestContext"] = "launch"
 	}
 
-	ep := Endpoints[operation]
+	ep := endpointFor(operation)
 	// queryId omitted: the op is resolved by the URL path, mirroring SearchTimeline.
 	payload, err := json.Marshal(map[string]any{
 		"variables": variables,
