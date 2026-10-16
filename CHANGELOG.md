@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.21](https://github.com/anatolykoptev/go-twitter/compare/v0.6.20...v0.6.21) (2026-10-16)
+
+
+### Bug Fixes
+
+* **client:** one bad per-account proxy disables only that account ([#101](https://github.com/anatolykoptev/go-twitter/issues/101)) ([f3c1862](https://github.com/anatolykoptev/go-twitter/commit/f3c18621ff672a53e015aa62d246ee772aa32486)), closes [#96](https://github.com/anatolykoptev/go-twitter/issues/96)
+
 ## [0.6.20](https://github.com/anatolykoptev/go-twitter/compare/v0.6.19...v0.6.20) (2026-10-15)
 
 
