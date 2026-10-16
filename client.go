@@ -43,6 +43,11 @@ type Client struct {
 	guestLimitedUntil time.Time
 	guestConsecFails  int
 	guestBlockedUntil time.Time
+	// flightRelease is the cap-wait broadcast channel: every slot release
+	// closes it and installs a fresh one, so a waiter parked on one
+	// generation wakes on the NEXT release. Re-fetch before each wait; a
+	// release before that re-fetch is caught by the next pick attempt.
+	flightRelease chan struct{}
 }
 
 // NewClient creates a fully-wired Twitter client.
@@ -262,36 +267,97 @@ func (c *Client) clientForAccount(acc *Account) (*stealth.BrowserClient, error) 
 	return c.client, nil
 }
 
+// flightCap returns the per-account in-flight cap (ClientConfig
+// .MaxInFlightPerAccount); <= 0 disables it. NewClient turns the zero value
+// into the default, so <= 0 here means either explicitly disabled or a
+// hand-built client (tests), which then runs uncapped.
+func (c *Client) flightCap() int {
+	if c == nil {
+		return 0
+	}
+	return c.cfg.MaxInFlightPerAccount
+}
+
+// flightChan returns the current release-broadcast generation. A cap waiter
+// grabs it BEFORE re-checking eligibility, so a release landing between the
+// check and the select still closes exactly the generation it waits on.
+func (c *Client) flightChan() <-chan struct{} {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.flightRelease == nil {
+		c.flightRelease = make(chan struct{})
+	}
+	return c.flightRelease
+}
+
+// flightReleased drops one in-flight slot on acc and wakes every cap waiter
+// parked on the broadcast channel. A no-op when the cap is disabled (no slot
+// was ever taken, so there is nothing to return).
+func (c *Client) flightReleased(acc *Account) {
+	if c.flightCap() <= 0 {
+		return
+	}
+	acc.releaseFlight()
+	c.mu.Lock()
+	if c.flightRelease != nil {
+		close(c.flightRelease)
+		c.flightRelease = make(chan struct{})
+	}
+	c.mu.Unlock()
+}
+
+// acquireFlight blocks until the pinned account drops below its in-flight
+// cap, or the caller's ctx ends. The pinned paths (doPOST, media) have no
+// account to rotate to, so waiting — not failing — is the only option; the
+// wait is ctx-bounded like the pool's own.
+func (c *Client) acquireFlight(ctx context.Context, acc *Account) error {
+	limit := c.flightCap()
+	if limit <= 0 {
+		return nil
+	}
+	for {
+		ch := c.flightChan()
+		if acc.tryAcquireFlight(limit) {
+			return nil
+		}
+		select {
+		case <-ch:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
 // doPoolReq is a helper for doPoolRequest: executes method+payload via doRequestWithBody.
-func (c *Client) doPoolReq(bc *stealth.BrowserClient, method, urlStr string, payload []byte, headers map[string]string) ([]byte, map[string]string, int, error) {
+func (c *Client) doPoolReq(ctx context.Context, bc *stealth.BrowserClient, method, urlStr string, payload []byte, headers map[string]string) ([]byte, map[string]string, int, error) {
 	var body io.Reader
 	if len(payload) > 0 {
 		body = bytes.NewReader(payload)
 	}
-	return c.doRequestWithBody(bc, method, urlStr, headers, body)
+	return c.doRequestWithBody(ctx, bc, method, urlStr, headers, body)
 }
 
 // observedPoolReq is doPoolReq plus one twitter.client.request.duration record
 // for the attempt. Every HTTP attempt in the pool/POST/guest request paths goes
 // through an observed* wrapper, including ct0-recovery and relogin retries.
-func (c *Client) observedPoolReq(endpoint string, bc *stealth.BrowserClient, method, urlStr string, payload []byte, headers map[string]string) ([]byte, map[string]string, int, error) {
+func (c *Client) observedPoolReq(ctx context.Context, endpoint string, bc *stealth.BrowserClient, method, urlStr string, payload []byte, headers map[string]string) ([]byte, map[string]string, int, error) {
 	start := time.Now()
-	body, hdrs, status, err := c.doPoolReq(bc, method, urlStr, payload, headers)
+	body, hdrs, status, err := c.doPoolReq(ctx, bc, method, urlStr, payload, headers)
 	c.metrics.recordRequest(endpoint, time.Since(start), attemptOutcome(status, body, hdrs, err, bc != c.client))
 	return body, hdrs, status, err
 }
 
 // observedRequestWithBody is doRequestWithBody plus a duration record.
-func (c *Client) observedRequestWithBody(endpoint string, bc *stealth.BrowserClient, method, urlStr string, headers map[string]string, body io.Reader) ([]byte, map[string]string, int, error) {
+func (c *Client) observedRequestWithBody(ctx context.Context, endpoint string, bc *stealth.BrowserClient, method, urlStr string, headers map[string]string, body io.Reader) ([]byte, map[string]string, int, error) {
 	start := time.Now()
-	respBody, hdrs, status, err := c.doRequestWithBody(bc, method, urlStr, headers, body)
+	respBody, hdrs, status, err := c.doRequestWithBody(ctx, bc, method, urlStr, headers, body)
 	c.metrics.recordRequest(endpoint, time.Since(start), attemptOutcome(status, respBody, hdrs, err, bc != c.client))
 	return respBody, hdrs, status, err
 }
 
 // observedRequest is doRequest plus a duration record.
-func (c *Client) observedRequest(endpoint string, bc *stealth.BrowserClient, method, urlStr string, headers map[string]string) ([]byte, map[string]string, int, error) {
-	return c.observedRequestWithBody(endpoint, bc, method, urlStr, headers, nil)
+func (c *Client) observedRequest(ctx context.Context, endpoint string, bc *stealth.BrowserClient, method, urlStr string, headers map[string]string) ([]byte, map[string]string, int, error) {
+	return c.observedRequestWithBody(ctx, endpoint, bc, method, urlStr, headers, nil)
 }
 
 // authTokenCookieRe matches a non-empty auth_token cookie pair.
@@ -332,12 +398,15 @@ func (c *Client) warmClient(bc *stealth.BrowserClient) warmDoer {
 }
 
 // doRequest executes a request with xtid header injection (no body).
-func (c *Client) doRequest(bc *stealth.BrowserClient, method, urlStr string, headers map[string]string) ([]byte, map[string]string, int, error) {
-	return c.doRequestWithBody(bc, method, urlStr, headers, nil)
+func (c *Client) doRequest(ctx context.Context, bc *stealth.BrowserClient, method, urlStr string, headers map[string]string) ([]byte, map[string]string, int, error) {
+	return c.doRequestWithBody(ctx, bc, method, urlStr, headers, nil)
 }
 
 // doRequestWithBody executes a request with xtid header injection and an optional body.
-func (c *Client) doRequestWithBody(bc *stealth.BrowserClient, method, urlStr string, headers map[string]string, body io.Reader) ([]byte, map[string]string, int, error) {
+// The caller's ctx reaches the transport (DoWithHeaderOrderCtx): a cancel or
+// deadline aborts the in-flight request instead of parking it until
+// go-stealth's internal request timeout fires.
+func (c *Client) doRequestWithBody(ctx context.Context, bc *stealth.BrowserClient, method, urlStr string, headers map[string]string, body io.Reader) ([]byte, map[string]string, int, error) {
 	urlPath := urlStr
 	if u, parseErr := url.Parse(urlStr); parseErr == nil {
 		urlPath = u.Path
@@ -359,7 +428,7 @@ func (c *Client) doRequestWithBody(bc *stealth.BrowserClient, method, urlStr str
 		slog.Debug("xpff: failed to generate header", slog.Any("error", xpffErr))
 	}
 
-	return bc.DoWithHeaderOrder(method, urlStr, headers, body, twitterHeaderOrder)
+	return bc.DoWithHeaderOrderCtx(ctx, method, urlStr, headers, body, twitterHeaderOrder)
 }
 
 // Pool returns the underlying account pool.

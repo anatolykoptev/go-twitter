@@ -392,6 +392,12 @@ func (c *Client) doMediaRequest(ctx context.Context, acc *Account, method, urlSt
 	if err := stealth.DefaultJitter.Sleep(ctx); err != nil {
 		return nil, err
 	}
+	// Pinned like doPOST: the account owns the slot for the whole call and the
+	// wait for a free one is bounded by the caller's ctx.
+	if err := c.acquireFlight(ctx, acc); err != nil {
+		return nil, err
+	}
+	defer c.flightReleased(acc)
 
 	var lastErr error
 	for attempt := range maxRetries {
@@ -412,8 +418,11 @@ func (c *Client) doMediaRequest(ctx context.Context, acc *Account, method, urlSt
 			return nil, err // pinned account: fail closed, never send direct
 		}
 		authTok, ct0, ua := acc.Credentials()
-		body, respHdrs, status, err := c.doPoolReq(bc, method, urlStr, payload, mediaHeaders(authTok, ct0, ua, contentType))
+		body, respHdrs, status, err := c.doPoolReq(ctx, bc, method, urlStr, payload, mediaHeaders(authTok, ct0, ua, contentType))
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr // caller cancel: not evidence about the account
+			}
 			c.attributeTransportError(acc, err)
 			lastErr = err
 			continue
@@ -438,22 +447,28 @@ func (c *Client) doMediaRequest(ctx context.Context, acc *Account, method, urlSt
 			c.recordAPICall(epUploadMedia, false, false)
 			switch classifyError(body, respHdrs) {
 			case errCSRF:
-				if body2, ok := c.recoverCSRFMedia(acc, bc, method, urlStr, payload, contentType, respHdrs, &lastErr); ok {
+				if body2, ok := c.recoverCSRFMedia(ctx, acc, bc, method, urlStr, payload, contentType, respHdrs, &lastErr); ok {
 					return body2, nil
 				}
 				continue
 			case errAuthExpired:
 				slog.Warn("UploadMedia: auth expired, attempting relogin", slog.String("user", acc.Username))
 				if reErr := c.relogin(acc); reErr != nil {
+					if ctxErr := ctx.Err(); ctxErr != nil {
+						return nil, ctxErr // caller gone: the relogin verdict is not an account charge
+					}
 					lastErr = fmt.Errorf("relogin failed: %w", reErr)
 					continue
 				}
 				authTok2, ct02, ua2 := acc.Credentials()
-				body2, respHdrs2, status2, err2 := c.doPoolReq(bc, method, urlStr, payload, mediaHeaders(authTok2, ct02, ua2, contentType))
+				body2, respHdrs2, status2, err2 := c.doPoolReq(ctx, bc, method, urlStr, payload, mediaHeaders(authTok2, ct02, ua2, contentType))
 				if err2 == nil && isUploadOK(status2) {
 					c.recordAPICall(epUploadMedia, true, false)
 					acc.RecordSuccess()
 					return body2, nil
+				}
+				if ctxErr := ctx.Err(); ctxErr != nil && err2 != nil {
+					return nil, ctxErr // post-relogin abort by caller cancel: no charge
 				}
 				apiErr := newAPIError(status2, body2, respHdrs2)
 				apiErr.Message = "post-relogin upload failed"
@@ -475,9 +490,10 @@ func (c *Client) doMediaRequest(ctx context.Context, acc *Account, method, urlSt
 			c.recordAPICall(epUploadMedia, false, false)
 			apiErr := newAPIError(status, body, respHdrs)
 			apiErr.Message = fmt.Sprintf("%s HTTP %d: %s", epUploadMedia, status, truncateBytes(body, 200))
-			// Endpoint faults (#61) — stale route 404 or 5xx overload — are
-			// X-side: never charged to the account.
-			if apiErr.Class != errEndpoint && apiErr.Class != errOverloaded {
+			// Endpoint faults (#61) and deterministic caller errors (#96) —
+			// stale route 404, 5xx overload, rejected input — are never
+			// charged to the account.
+			if apiErr.Class != errEndpoint && apiErr.Class != errOverloaded && apiErr.Class != errBadRequest {
 				acc.RecordFailure()
 			}
 			return nil, apiErr
@@ -535,13 +551,13 @@ func isUploadOK(status int) bool {
 // never generates a client-random ct0. Returns (body, true) on a recovered
 // success; (nil, false) when recovery failed — the caller sets lastErr and
 // `continue`s.
-func (c *Client) recoverCSRFMedia(acc *Account, bc *stealth.BrowserClient, method, urlStr string, payload []byte, contentType string, respHdrs map[string]string, lastErr *error) ([]byte, bool) {
+func (c *Client) recoverCSRFMedia(ctx context.Context, acc *Account, bc *stealth.BrowserClient, method, urlStr string, payload []byte, contentType string, respHdrs map[string]string, lastErr *error) ([]byte, bool) {
 	if serverCT0, ok := csrfRecoveryCT0(respHdrs); ok {
 		slog.Warn("UploadMedia: CSRF error 353, adopting server ct0", slog.String("user", acc.Username))
 		acc.SetCT0(serverCT0)
 		authTok2, ct02, ua2 := acc.Credentials()
 		c.saveSession(acc, authTok2, ct02)
-		body2, respHdrs2, status2, err2 := c.doPoolReq(bc, method, urlStr, payload, mediaHeaders(authTok2, ct02, ua2, contentType))
+		body2, respHdrs2, status2, err2 := c.doPoolReq(ctx, bc, method, urlStr, payload, mediaHeaders(authTok2, ct02, ua2, contentType))
 		if err2 == nil && isUploadOK(status2) && classifyError(body2, respHdrs2) == errNone {
 			if newCT0 := extractCT0FromHeaders(respHdrs2); newCT0 != "" {
 				acc.SetCT0(newCT0)
@@ -552,23 +568,35 @@ func (c *Client) recoverCSRFMedia(acc *Account, bc *stealth.BrowserClient, metho
 			acc.RecordSuccess()
 			return body2, true
 		}
+		if ctx.Err() != nil && err2 != nil {
+			return nil, false // retry aborted by the caller's own ctx: no charge
+		}
 		acc.RecordFailure()
 		slog.Warn("UploadMedia: CSRF retry with server ct0 failed, attempting relogin", slog.String("user", acc.Username))
 	} else {
 		slog.Warn("UploadMedia: CSRF error 353, no server ct0 to adopt, attempting relogin", slog.String("user", acc.Username))
 	}
 
+	if ctx.Err() != nil {
+		return nil, false // caller gone: no relogin, no charge on its way out
+	}
 	if reErr := c.relogin(acc); reErr != nil {
+		if ctx.Err() != nil {
+			return nil, false // relogin aborted by the caller's own ctx
+		}
 		slog.Warn("UploadMedia: relogin after CSRF failed", slog.String("user", acc.Username), slog.Any("error", reErr))
 		*lastErr = fmt.Errorf("relogin failed: %w", reErr)
 		return nil, false
 	}
 	authTok3, ct03, ua3 := acc.Credentials()
-	body3, respHdrs3, status3, err3 := c.doPoolReq(bc, method, urlStr, payload, mediaHeaders(authTok3, ct03, ua3, contentType))
+	body3, respHdrs3, status3, err3 := c.doPoolReq(ctx, bc, method, urlStr, payload, mediaHeaders(authTok3, ct03, ua3, contentType))
 	if err3 == nil && isUploadOK(status3) && classifyError(body3, respHdrs3) == errNone {
 		c.recordAPICall(epUploadMedia, true, false)
 		acc.RecordSuccess()
 		return body3, true
+	}
+	if ctx.Err() != nil && err3 != nil {
+		return nil, false // post-relogin abort by caller cancel: no charge
 	}
 	apiErr := newAPIError(status3, body3, respHdrs3)
 	apiErr.Message = "post-relogin upload failed"

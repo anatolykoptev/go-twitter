@@ -17,6 +17,13 @@ const (
 	// above the aggregate scrape demand, so the pace never caps throughput.
 	defaultAccountPaceMin    = 800 * time.Millisecond
 	defaultAccountPaceRandom = 1200 * time.Millisecond
+
+	// defaultMaxInFlightPerAccount is nitter's maxConcurrentReqs value: two
+	// concurrent requests per account. It bounds how many of one account's
+	// requests can be in flight at once (pool picks and account-pinned calls
+	// alike) — a burst waits for a slot instead of firing the whole fan-out
+	// through one credential.
+	defaultMaxInFlightPerAccount = 2
 )
 
 // ClientConfig holds all configuration for the Twitter client.
@@ -116,6 +123,16 @@ type ClientConfig struct {
 	// enabled with safe defaults).
 	AccountPaceDisabled bool
 
+	// MaxInFlightPerAccount caps the number of requests a single account may
+	// have in flight at once — the in-process counterpart of nitter's
+	// maxConcurrentReqs. A pool pick that would exceed the cap skips the
+	// account; when every eligible account is at the cap the call waits for a
+	// slot (bounded by the caller's ctx and the shared pool-wait budget, see
+	// twitter.client.pool.wait.duration). Account-pinned paths (doPOST, media
+	// upload) wait for the pinned account's slot the same way.
+	// Default: 2. A negative value disables the cap.
+	MaxInFlightPerAccount int
+
 	// sharedXtid, when set, replaces the per-client xtid manager so key
 	// material, the refresh schedule, the per-kind negative cache, the init
 	// singleflight and the init-failed alert survive across short-lived clients
@@ -151,6 +168,9 @@ func (cfg *ClientConfig) defaults() {
 	}
 	if cfg.AccountPaceRandom == 0 {
 		cfg.AccountPaceRandom = defaultAccountPaceRandom
+	}
+	if cfg.MaxInFlightPerAccount == 0 {
+		cfg.MaxInFlightPerAccount = defaultMaxInFlightPerAccount
 	}
 	if cfg.RateLimit.RequestsPerWindow == 0 {
 		cfg.RateLimit = ratelimit.DefaultConfig

@@ -43,6 +43,7 @@ type Account struct {
 	proxyBackoff       time.Time
 	proxyConsecFails   int
 	consecHeaderless88 int // consecutive code-88s with no parseable x-rate-limit-remaining
+	inFlight           int // requests currently holding this account's slot (ClientConfig.MaxInFlightPerAccount)
 	rateLimiter        *ratelimit.Limiter
 
 	// Header-derived rate-limit state (see ratelimit_state.go), per endpoint.
@@ -168,6 +169,55 @@ func (a *Account) noteRateLimited88(respHdrs map[string]string) int {
 	defer a.mu.Unlock()
 	a.consecHeaderless88++
 	return a.consecHeaderless88
+}
+
+// tryAcquireFlight takes one in-flight slot when the account is below limit.
+// A limit <= 0 is uncapped and always succeeds. The call must run inside the
+// pick that selects the account (the pool filter under pool.mu): selection and
+// slot-taking are then atomic, so concurrent callers cannot both pass a
+// capacity check before either takes a slot.
+func (a *Account) tryAcquireFlight(limit int) bool {
+	if limit <= 0 {
+		return true
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.inFlight >= limit {
+		return false
+	}
+	a.inFlight++
+	return true
+}
+
+// flightFull reports whether the account is at its in-flight cap — the
+// read-only twin of tryAcquireFlight used where the eligibility check must not
+// take a slot (the cap-wait decision). A limit <= 0 is never full.
+func (a *Account) flightFull(limit int) bool {
+	if limit <= 0 {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.inFlight >= limit
+}
+
+// releaseFlight returns one in-flight slot. Every request path releases it
+// when the attempt ends — success or error — via defer.
+func (a *Account) releaseFlight() {
+	a.mu.Lock()
+	if a.inFlight > 0 {
+		a.inFlight--
+	}
+	a.mu.Unlock()
+}
+
+// InFlight reports the account's current in-flight request count. The
+// twitter.client.pool.inflight gauge sums it across the pool; tests assert on
+// it.
+func (a *Account) InFlight() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.inFlight
 }
 
 // AllowRequest checks if this account can make a request to the given endpoint.

@@ -43,6 +43,12 @@ const poolWakeJitterMax = 250 * time.Millisecond
 // A var (like poolWaitCap) only so tests can lock it.
 var poolWakeJitter = func() time.Duration { return rand.N(poolWakeJitterMax) }
 
+// flightCapPoll bounds one cap-wait sleep when there is no timed wake to
+// honour: a release landing between the failed pick and the channel grab is
+// caught by the broadcast generation, and the poll re-checks regardless, so
+// the wait can never outlive this bound even if a wake were somehow lost.
+const flightCapPoll = 500 * time.Millisecond
+
 // nextAccountWithWait selects an account for an auth-only endpoint, waiting
 // (context-aware, never past deadline) when every account is unusable for now.
 // The caller computes deadline once per request, so retries share one budget.
@@ -53,7 +59,12 @@ var poolWakeJitter = func() time.Duration { return rand.N(poolWakeJitterMax) }
 // gives up, this waits until the earliest moment an account could serve the
 // endpoint (see nextUsableAt) and retries. With no active account the original
 // error is returned unchanged.
-func (c *Client) nextAccountWithWait(ctx context.Context, endpoint string, filter func(*Account) bool, deadline time.Time) (acc *Account, err error) {
+//
+// capWaitable marks accounts that are blocked ONLY by their in-flight cap for
+// this call (not faulted, not endpoint-limited, not proxy-backed-off): when
+// no timed wake applies they have no usable-at time, so the wait listens on
+// the slot-release broadcast instead, still bounded by deadline and ctx.
+func (c *Client) nextAccountWithWait(ctx context.Context, endpoint string, filter func(*Account) bool, capWaitable func(*Account) bool, deadline time.Time) (acc *Account, err error) {
 	// twitter.client.pool.wait.duration: one sample per call that actually
 	// waited (slept for a usable account), labelled by how the wait ended.
 	var waited time.Duration
@@ -80,12 +91,16 @@ func (c *Client) nextAccountWithWait(ctx context.Context, endpoint string, filte
 			return nil, ctxErr
 		}
 		wake, ok := c.nextUsableAt(endpoint)
-		if !ok {
-			return nil, err
-		}
 		wait := time.Until(wake)
-		if wait <= 0 || wait > time.Until(deadline) {
-			return nil, err
+		timed := ok && wait > 0 && wait <= time.Until(deadline)
+		// With no timed wake to honour, an account blocked only by its
+		// in-flight cap can still be served the moment a slot frees.
+		capWait := c.anyCapWaitable(capWaitable)
+		if !timed {
+			if !capWait {
+				return nil, err
+			}
+			wait = flightCapPoll
 		}
 		// Jitter the wake: N waiters parked on one freed account must not
 		// re-select at the same instant. The jitter is added before the budget
@@ -95,12 +110,25 @@ func (c *Client) nextAccountWithWait(ctx context.Context, endpoint string, filte
 		if budget := time.Until(deadline); wait > budget {
 			wait = budget
 		}
+		if wait <= 0 {
+			return nil, err
+		}
 		slog.Debug("all active accounts limited, waiting",
-			slog.String("endpoint", endpoint), slog.Duration("wait", wait))
+			slog.String("endpoint", endpoint), slog.Duration("wait", wait), slog.Bool("cap_wait", capWait && !timed))
 		start := time.Now()
 		t := time.NewTimer(wait)
+		// A freed in-flight slot also makes an account eligible — the
+		// broadcast wakes the wait early instead of sleeping the full span.
+		// Nil-channel receive blocks forever when no capped account exists.
+		var flight <-chan struct{}
+		if capWait {
+			flight = c.flightChan()
+		}
 		select {
 		case <-t.C:
+			waited += time.Since(start)
+		case <-flight:
+			t.Stop()
 			waited += time.Since(start)
 		case <-ctx.Done():
 			t.Stop()
@@ -108,6 +136,21 @@ func (c *Client) nextAccountWithWait(ctx context.Context, endpoint string, filte
 			return nil, ctx.Err()
 		}
 	}
+}
+
+// anyCapWaitable reports whether some ACTIVE account is blocked only by its
+// in-flight cap for this call — it could serve the moment a slot frees, so a
+// timed wake on rate limits/cooldowns is not the only way forward.
+func (c *Client) anyCapWaitable(capWaitable func(*Account) bool) bool {
+	if capWaitable == nil {
+		return false
+	}
+	for _, a := range c.pool.Items() {
+		if a.IsActive() && capWaitable(a) {
+			return true
+		}
+	}
+	return false
 }
 
 // nextUsableAt returns the earliest future moment at which some account may be
@@ -171,18 +214,57 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 
 	// poolFilter is the eligibility check every pick this call shares:
 	// faulted accounts excluded, account usable for this endpoint NOW. It is
-	// consuming — AllowRequest increments the per-endpoint counter — so it
-	// must only run on a real pick.
+	// consuming — AllowRequest increments the per-endpoint counter and
+	// tryAcquireFlight takes the in-flight slot — so it must only run on a
+	// real pick. The flightFull pre-check runs first: an at-cap account must
+	// not burn a rate-limit slot on a request it cannot serve yet.
+	flightLimit := c.flightCap()
 	poolFilter := func(a *Account) bool {
-		return !endpointFaulted[a.ID()] && a.AllowRequest(endpoint) && time.Now().After(a.proxyBackoff)
+		return !endpointFaulted[a.ID()] &&
+			!a.flightFull(flightLimit) &&
+			a.AllowRequest(endpoint) &&
+			time.Now().After(a.proxyBackoff) &&
+			a.tryAcquireFlight(flightLimit)
 	}
 	// canServe is the read-only twin of poolFilter for the backoff gate below:
 	// IsEndpointRateLimited reads the same limiter without consuming a slot.
 	canServe := func(a *Account) bool {
-		return !endpointFaulted[a.ID()] && !a.IsEndpointRateLimited(endpoint) && time.Now().After(a.proxyBackoff)
+		return !endpointFaulted[a.ID()] &&
+			!a.flightFull(flightLimit) &&
+			!a.IsEndpointRateLimited(endpoint) &&
+			time.Now().After(a.proxyBackoff)
+	}
+	// capWaitable is the read-only twin for the wait decision: an account
+	// blocked ONLY by its in-flight cap — it can serve the moment a slot
+	// frees, so a cap-full pool waits on the release broadcast instead of
+	// failing or waiting out a timed wake that cannot free a slot.
+	capWaitable := func(a *Account) bool {
+		return a.flightFull(flightLimit) &&
+			!endpointFaulted[a.ID()] &&
+			!a.IsEndpointRateLimited(endpoint) &&
+			time.Now().After(a.proxyBackoff)
 	}
 
+	// heldAcc owns the in-flight slot consumed by the current pick. It is
+	// released at the top of the next iteration (the previous attempt is done)
+	// and by the deferred call on every return path, so a slot can never leak
+	// past the attempt that took it.
+	var heldAcc *Account
+	release := func() {
+		if heldAcc != nil {
+			c.flightReleased(heldAcc)
+			heldAcc = nil
+		}
+	}
+	defer release()
+
 	for attempt := range maxRetries {
+		// The previous attempt ended before this iteration — return its slot
+		// before the pick, so a capped pool sees the freed capacity.
+		release()
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, nil, ctxErr
+		}
 		// The backoff paces the next pick; with no account able to serve this
 		// endpoint there is nothing to pace — an endpoint-fault pick fails
 		// fast on pool.Next below and a normal pick enters nextAccountWithWait's
@@ -205,7 +287,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 		var accErr error
 
 		if requiresAuth(endpoint) && !rotateNow {
-			acc, accErr = c.nextAccountWithWait(ctx, endpoint, poolFilter, waitDeadline)
+			acc, accErr = c.nextAccountWithWait(ctx, endpoint, poolFilter, capWaitable, waitDeadline)
 		} else {
 			acc, accErr = c.pool.Next(poolFilter)
 		}
@@ -222,6 +304,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 			lastErr = accErr
 			break
 		}
+		heldAcc = acc // the pick consumed this account's in-flight slot inside the filter
 
 		// Per-account human-pace spacing, applied AFTER the pool selects the
 		// account and keyed by that account. Keying by account (not domain) means
@@ -249,8 +332,16 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 		}
 
 		authTok, ct0, ua := acc.Credentials()
-		body, respHdrs, status, err := c.observedPoolReq(endpoint, bc, method, url, payload, twitterHeaders(authTok, ct0, ua))
+		body, respHdrs, status, err := c.observedPoolReq(ctx, endpoint, bc, method, url, payload, twitterHeaders(authTok, ct0, ua))
 		if err != nil {
+			// A caller-side cancel/deadline is not evidence about the account
+			// or its proxy: the caller revoked the work mid-flight, so nothing
+			// is charged. Only the caller ctx's own Err() counts — an internal
+			// transport timeout (go-stealth's per-request deadline) is a real
+			// network failure and falls through to the normal attribution.
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, nil, ctxErr
+			}
 			c.attributeTransportError(acc, err)
 			lastErr = err
 			continue
@@ -288,24 +379,30 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 			errClass := classifyError(body, respHdrs)
 			switch errClass {
 			case errCSRF:
-				if body2, respHdrs2, ok := c.recoverCSRF(acc, bc, method, url, payload, endpoint, respHdrs, &lastErr); ok {
+				if body2, respHdrs2, ok := c.recoverCSRF(ctx, acc, bc, method, url, payload, endpoint, respHdrs, &lastErr); ok {
 					return body2, respHdrs2, nil
 				}
 				continue
 			case errAuthExpired:
 				slog.Warn("auth expired (code 32), attempting relogin", slog.String("user", acc.Username))
 				if reErr := c.relogin(acc); reErr != nil {
+					if ctxErr := ctx.Err(); ctxErr != nil {
+						return nil, nil, ctxErr // caller gone: the relogin verdict is not an account charge
+					}
 					slog.Warn("relogin failed", slog.String("user", acc.Username), slog.Any("error", reErr))
 					c.pool.SoftDeactivate(acc, c.cfg.AuthCooldown)
 					lastErr = &APIError{Class: errAuthExpired, Err: reErr, Message: reErr.Error()}
 					continue
 				}
 				authTok2, ct02, ua2 := acc.Credentials()
-				body2, respHdrs2, status2, err2 := c.observedPoolReq(endpoint, bc, method, url, payload, twitterHeaders(authTok2, ct02, ua2))
+				body2, respHdrs2, status2, err2 := c.observedPoolReq(ctx, endpoint, bc, method, url, payload, twitterHeaders(authTok2, ct02, ua2))
 				if err2 == nil && status2 == 200 {
 					c.recordAPICall(endpoint, true, false)
 					acc.RecordSuccess()
 					return body2, respHdrs2, nil
+				}
+				if ctxErr := ctx.Err(); ctxErr != nil && err2 != nil {
+					return nil, nil, ctxErr // post-relogin transport abort by caller cancel: no charge
 				}
 				c.pool.SoftDeactivate(acc, c.cfg.AuthCooldown)
 				lastErr = &APIError{Status: status2, Codes: extractErrorCodes(body2), Class: errAuthExpired, Err: err2, Message: "post-relogin request failed"}
@@ -331,6 +428,13 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 			c.recordAPICall(endpoint, false, false)
 			apiErr := newAPIError(status, body, respHdrs)
 			apiErr.Message = fmt.Sprintf("%s HTTP %d: %s", endpoint, status, truncateBytes(body, 200))
+			if apiErr.Class == errBadRequest {
+				// Deterministic caller error (#96): X rejected the INPUT —
+				// another account would answer identically, so no retry, no
+				// rotation, no charge, and no endpoint-fault bookkeeping (the
+				// request shape was fine; the caller's payload was not).
+				return nil, nil, apiErr
+			}
 			if apiErr.Class == errEndpoint || apiErr.Class == errOverloaded {
 				// Endpoint-wide fault (#61): a 404/GraphQL-shaped-400 means the
 				// committed request shape is stale for EVERY account (stale
@@ -408,7 +512,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 			return body, respHdrs, nil
 
 		case errCSRF:
-			if body2, respHdrs2, ok := c.recoverCSRF(acc, bc, method, url, payload, endpoint, respHdrs, &lastErr); ok {
+			if body2, respHdrs2, ok := c.recoverCSRF(ctx, acc, bc, method, url, payload, endpoint, respHdrs, &lastErr); ok {
 				return body2, respHdrs2, nil
 			}
 			continue
@@ -416,17 +520,23 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 		case errAuthExpired:
 			slog.Warn("auth expired (code 32), attempting relogin", slog.String("user", acc.Username))
 			if reErr := c.relogin(acc); reErr != nil {
+				if ctxErr := ctx.Err(); ctxErr != nil {
+					return nil, nil, ctxErr // caller gone: the relogin verdict is not an account charge
+				}
 				slog.Warn("relogin failed, soft-deactivating", slog.String("user", acc.Username), slog.Any("error", reErr))
 				c.pool.SoftDeactivate(acc, c.cfg.AuthCooldown)
 				lastErr = &APIError{Class: errAuthExpired, Err: reErr, Message: reErr.Error()}
 				continue
 			}
 			authTok2, ct02, ua2 := acc.Credentials()
-			body2, respHdrs2, status2, err2 := c.observedPoolReq(endpoint, bc, method, url, payload, twitterHeaders(authTok2, ct02, ua2))
+			body2, respHdrs2, status2, err2 := c.observedPoolReq(ctx, endpoint, bc, method, url, payload, twitterHeaders(authTok2, ct02, ua2))
 			if err2 == nil && status2 == 200 {
 				c.recordAPICall(endpoint, true, false)
 				acc.RecordSuccess()
 				return body2, respHdrs2, nil
+			}
+			if ctxErr := ctx.Err(); ctxErr != nil && err2 != nil {
+				return nil, nil, ctxErr // post-relogin transport abort by caller cancel: no charge
 			}
 			c.pool.SoftDeactivate(acc, c.cfg.AuthCooldown)
 			lastErr = &APIError{Status: status2, Codes: extractErrorCodes(body2), Class: errAuthExpired, Err: err2, Message: "post-relogin request failed"}
@@ -488,15 +598,21 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 				slog.Info("attempting CAPTCHA unlock via relogin", slog.String("user", acc.Username))
 				if reErr := c.relogin(acc); reErr == nil {
 					authTok2, ct02, ua2 := acc.Credentials()
-					body2, respHdrs2, status2, err2 := c.observedPoolReq(endpoint, bc, method, url, payload, twitterHeaders(authTok2, ct02, ua2))
+					body2, respHdrs2, status2, err2 := c.observedPoolReq(ctx, endpoint, bc, method, url, payload, twitterHeaders(authTok2, ct02, ua2))
 					if err2 == nil && status2 == 200 {
 						c.recordAPICall(endpoint, true, false)
 						acc.RecordSuccess()
 						slog.Info("CAPTCHA unlock succeeded", slog.String("user", acc.Username))
 						return body2, respHdrs2, nil
 					}
+					if ctxErr := ctx.Err(); ctxErr != nil && err2 != nil {
+						return nil, nil, ctxErr // caller cancel aborted the retry: no charge
+					}
 					slog.Warn("post-CAPTCHA request failed", slog.String("user", acc.Username))
 				} else {
+					if ctxErr := ctx.Err(); ctxErr != nil {
+						return nil, nil, ctxErr // caller gone: the relogin verdict is not an account charge
+					}
 					slog.Warn("CAPTCHA unlock failed", slog.String("user", acc.Username), slog.Any("error", reErr))
 				}
 			}
@@ -515,6 +631,9 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 		}
 	}
 
+	// The last attempt is over: return its slot before the guest fallback, which
+	// uses no account.
+	release()
 	// --- Guest token fallback ---
 	if requiresAuth(endpoint) {
 		if lastErr != nil {
@@ -547,7 +666,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 		slog.Info("guest token acquired as fallback", slog.String("endpoint", endpoint))
 	}
 
-	body, respHdrs, status, err := c.observedRequest(endpoint, c.client, "GET", url, guestHeaders(gt))
+	body, respHdrs, status, err := c.observedRequest(ctx, endpoint, c.client, "GET", url, guestHeaders(gt))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -565,7 +684,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 			return nil, nil, fmt.Errorf("guest token reacquisition failed for %s: %w", endpoint, gtErr)
 		}
 		c.setGuestToken(newGT)
-		body, respHdrs, status, err = c.observedRequest(endpoint, c.client, "GET", url, guestHeaders(newGT))
+		body, respHdrs, status, err = c.observedRequest(ctx, endpoint, c.client, "GET", url, guestHeaders(newGT))
 		if err != nil {
 			return nil, nil, err
 		}
@@ -598,13 +717,13 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 //
 // Rotating to a random ct0 on a 353 is proven futile against an established
 // session (the live-reproduced killer), so it is never done here.
-func (c *Client) recoverCSRF(acc *Account, bc *stealth.BrowserClient, method, url string, payload []byte, endpoint string, respHdrs map[string]string, lastErr *error) ([]byte, map[string]string, bool) {
+func (c *Client) recoverCSRF(ctx context.Context, acc *Account, bc *stealth.BrowserClient, method, url string, payload []byte, endpoint string, respHdrs map[string]string, lastErr *error) ([]byte, map[string]string, bool) {
 	if serverCT0, ok := csrfRecoveryCT0(respHdrs); ok {
 		slog.Warn("CSRF error 353, adopting server ct0", slog.String("user", acc.Username))
 		acc.SetCT0(serverCT0)
 		authTok2, ct02, ua2 := acc.Credentials()
 		c.saveSession(acc, authTok2, ct02)
-		body2, respHdrs2, status2, err2 := c.observedPoolReq(endpoint, bc, method, url, payload, twitterHeaders(authTok2, ct02, ua2))
+		body2, respHdrs2, status2, err2 := c.observedPoolReq(ctx, endpoint, bc, method, url, payload, twitterHeaders(authTok2, ct02, ua2))
 		if err2 == nil && status2 == 200 && classifyError(body2, respHdrs2) == errNone {
 			if newCT0 := extractCT0FromHeaders(respHdrs2); newCT0 != "" {
 				acc.SetCT0(newCT0)
@@ -615,24 +734,38 @@ func (c *Client) recoverCSRF(acc *Account, bc *stealth.BrowserClient, method, ur
 			acc.RecordSuccess()
 			return body2, respHdrs2, true
 		}
+		if ctx.Err() != nil && err2 != nil {
+			// The retry died to the caller's cancel/deadline, not to a real
+			// failure: no RecordFailure, no charge, and no point relogging in.
+			return nil, nil, false
+		}
 		acc.RecordFailure()
 		slog.Warn("CSRF retry with server ct0 failed, attempting relogin", slog.String("user", acc.Username))
 	} else {
 		slog.Warn("CSRF error 353, no server ct0 to adopt, attempting relogin", slog.String("user", acc.Username))
 	}
 
+	if ctx.Err() != nil {
+		return nil, nil, false // caller gone: no relogin, no charge on its way out
+	}
 	if reErr := c.relogin(acc); reErr != nil {
+		if ctx.Err() != nil {
+			return nil, nil, false // relogin aborted by the caller's own ctx
+		}
 		slog.Warn("relogin after CSRF failed", slog.String("user", acc.Username), slog.Any("error", reErr))
 		c.pool.SoftDeactivate(acc, c.cfg.AuthCooldown)
 		*lastErr = &APIError{Class: errAuthExpired, Err: reErr, Message: reErr.Error()}
 		return nil, nil, false
 	}
 	authTok3, ct03, ua3 := acc.Credentials()
-	body3, respHdrs3, status3, err3 := c.observedPoolReq(endpoint, bc, method, url, payload, twitterHeaders(authTok3, ct03, ua3))
+	body3, respHdrs3, status3, err3 := c.observedPoolReq(ctx, endpoint, bc, method, url, payload, twitterHeaders(authTok3, ct03, ua3))
 	if err3 == nil && status3 == 200 {
 		c.recordAPICall(endpoint, true, false)
 		acc.RecordSuccess()
 		return body3, respHdrs3, true
+	}
+	if ctx.Err() != nil && err3 != nil {
+		return nil, nil, false // post-relogin abort by caller cancel: no charge
 	}
 	c.pool.SoftDeactivate(acc, c.cfg.AuthCooldown)
 	*lastErr = &APIError{Status: status3, Codes: extractErrorCodes(body3), Class: errAuthExpired, Err: err3, Message: "post-relogin CSRF request failed"}
@@ -644,13 +777,13 @@ func (c *Client) recoverCSRF(acc *Account, bc *stealth.BrowserClient, method, ur
 // to adopt (or the adopted ct0 still fails) does it relogin and retry. It never
 // generates a client-random ct0. Returns (body, true) on a recovered success;
 // (nil, false) when recovery failed — the caller sets lastErr and `continue`s.
-func (c *Client) recoverCSRFPost(acc *Account, bc *stealth.BrowserClient, url string, payload []byte, endpoint string, respHdrs map[string]string, lastErr *error) ([]byte, bool) {
+func (c *Client) recoverCSRFPost(ctx context.Context, acc *Account, bc *stealth.BrowserClient, url string, payload []byte, endpoint string, respHdrs map[string]string, lastErr *error) ([]byte, bool) {
 	if serverCT0, ok := csrfRecoveryCT0(respHdrs); ok {
 		slog.Warn("doPOST: CSRF error 353, adopting server ct0", slog.String("user", acc.Username))
 		acc.SetCT0(serverCT0)
 		authTok2, ct02, ua2 := acc.Credentials()
 		c.saveSession(acc, authTok2, ct02)
-		body2, respHdrs2, status2, err2 := c.observedRequestWithBody(endpoint, bc, "POST", url, twitterHeaders(authTok2, ct02, ua2), bytes.NewReader(payload))
+		body2, respHdrs2, status2, err2 := c.observedRequestWithBody(ctx, endpoint, bc, "POST", url, twitterHeaders(authTok2, ct02, ua2), bytes.NewReader(payload))
 		if err2 == nil && (status2 == 200 || status2 == 201) && classifyError(body2, respHdrs2) == errNone {
 			if newCT0 := extractCT0FromHeaders(respHdrs2); newCT0 != "" {
 				acc.SetCT0(newCT0)
@@ -661,23 +794,35 @@ func (c *Client) recoverCSRFPost(acc *Account, bc *stealth.BrowserClient, url st
 			acc.RecordSuccess()
 			return body2, true
 		}
+		if ctx.Err() != nil && err2 != nil {
+			return nil, false // retry aborted by the caller's own ctx: no charge
+		}
 		acc.RecordFailure()
 		slog.Warn("doPOST: CSRF retry with server ct0 failed, attempting relogin", slog.String("user", acc.Username))
 	} else {
 		slog.Warn("doPOST: CSRF error 353, no server ct0 to adopt, attempting relogin", slog.String("user", acc.Username))
 	}
 
+	if ctx.Err() != nil {
+		return nil, false // caller gone: no relogin, no charge on its way out
+	}
 	if reErr := c.relogin(acc); reErr != nil {
+		if ctx.Err() != nil {
+			return nil, false // relogin aborted by the caller's own ctx
+		}
 		slog.Warn("doPOST: relogin after CSRF failed", slog.String("user", acc.Username), slog.Any("error", reErr))
 		*lastErr = &APIError{Class: errAuthExpired, Err: reErr, Message: "relogin failed: " + reErr.Error()}
 		return nil, false
 	}
 	authTok3, ct03, ua3 := acc.Credentials()
-	body3, respHdrs3, status3, err3 := c.observedRequestWithBody(endpoint, bc, "POST", url, twitterHeaders(authTok3, ct03, ua3), bytes.NewReader(payload))
+	body3, respHdrs3, status3, err3 := c.observedRequestWithBody(ctx, endpoint, bc, "POST", url, twitterHeaders(authTok3, ct03, ua3), bytes.NewReader(payload))
 	if err3 == nil && (status3 == 200 || status3 == 201) && classifyError(body3, respHdrs3) == errNone {
 		c.recordAPICall(endpoint, true, false)
 		acc.RecordSuccess()
 		return body3, true
+	}
+	if ctx.Err() != nil && err3 != nil {
+		return nil, false // post-relogin abort by caller cancel: no charge
 	}
 	*lastErr = &APIError{Status: status3, Codes: extractErrorCodes(body3), Class: errAuthExpired, Err: err3, Message: "post-relogin CSRF request failed"}
 	return nil, false
@@ -690,6 +835,13 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 	if err := stealth.DefaultJitter.Sleep(ctx); err != nil {
 		return nil, err
 	}
+	// The pinned account owns the slot for the whole call: its retries do not
+	// rotate, so there is nothing to re-acquire per attempt. The wait for a
+	// free slot is bounded by the caller's ctx.
+	if err := c.acquireFlight(ctx, acc); err != nil {
+		return nil, err
+	}
+	defer c.flightReleased(acc)
 
 	var lastErr error
 	for attempt := range maxRetries {
@@ -710,8 +862,11 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 			return nil, err // pinned account: nothing to rotate to, fail closed
 		}
 		authTok, ct0, ua := acc.Credentials()
-		body, respHdrs, status, err := c.observedRequestWithBody(endpoint, bc, "POST", url, twitterHeaders(authTok, ct0, ua), bytes.NewReader(payload))
+		body, respHdrs, status, err := c.observedRequestWithBody(ctx, endpoint, bc, "POST", url, twitterHeaders(authTok, ct0, ua), bytes.NewReader(payload))
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr // caller cancel: not evidence about the account
+			}
 			c.attributeTransportError(acc, err)
 			lastErr = err
 			continue
@@ -739,22 +894,28 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 			errClass := classifyError(body, respHdrs)
 			switch errClass {
 			case errCSRF:
-				if body2, ok := c.recoverCSRFPost(acc, bc, url, payload, endpoint, respHdrs, &lastErr); ok {
+				if body2, ok := c.recoverCSRFPost(ctx, acc, bc, url, payload, endpoint, respHdrs, &lastErr); ok {
 					return body2, nil
 				}
 				continue
 			case errAuthExpired:
 				slog.Warn("doPOST: auth expired, attempting relogin", slog.String("user", acc.Username))
 				if reErr := c.relogin(acc); reErr != nil {
+					if ctxErr := ctx.Err(); ctxErr != nil {
+						return nil, ctxErr // caller gone: the relogin verdict is not an account charge
+					}
 					lastErr = &APIError{Class: errAuthExpired, Err: reErr, Message: "relogin failed: " + reErr.Error()}
 					continue
 				}
 				authTok2, ct02, ua2 := acc.Credentials()
-				body2, _, status2, err2 := c.observedRequestWithBody(endpoint, bc, "POST", url, twitterHeaders(authTok2, ct02, ua2), bytes.NewReader(payload))
+				body2, _, status2, err2 := c.observedRequestWithBody(ctx, endpoint, bc, "POST", url, twitterHeaders(authTok2, ct02, ua2), bytes.NewReader(payload))
 				if err2 == nil && (status2 == 200 || status2 == 201) {
 					c.recordAPICall(endpoint, true, false)
 					acc.RecordSuccess()
 					return body2, nil
+				}
+				if ctxErr := ctx.Err(); ctxErr != nil && err2 != nil {
+					return nil, ctxErr // post-relogin abort by caller cancel: no charge
 				}
 				lastErr = &APIError{Status: status2, Codes: extractErrorCodes(body2), Class: errAuthExpired, Err: err2, Message: "post-relogin request failed"}
 				continue
@@ -774,9 +935,10 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 			c.recordAPICall(endpoint, false, false)
 			apiErr := newAPIError(status, body, respHdrs)
 			apiErr.Message = fmt.Sprintf("%s HTTP %d: %s", endpoint, status, truncateBytes(body, 200))
-			// Endpoint faults (#61) do not charge the account — but a write is
-			// never replayed on another account, so this returns immediately.
-			if apiErr.Class != errEndpoint && apiErr.Class != errOverloaded {
+			// Endpoint faults (#61) and deterministic caller errors (#96) do
+			// not charge the account — but a write is never replayed on another
+			// account, so this returns immediately.
+			if apiErr.Class != errEndpoint && apiErr.Class != errOverloaded && apiErr.Class != errBadRequest {
 				acc.RecordFailure()
 			}
 			if apiErr.Class == errEndpoint {
@@ -816,7 +978,7 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 			acc.RecordSuccess()
 			return body, nil
 		case errCSRF:
-			if body2, ok := c.recoverCSRFPost(acc, bc, url, payload, endpoint, respHdrs, &lastErr); ok {
+			if body2, ok := c.recoverCSRFPost(ctx, acc, bc, url, payload, endpoint, respHdrs, &lastErr); ok {
 				return body2, nil
 			}
 			continue

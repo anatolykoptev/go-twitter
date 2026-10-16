@@ -16,7 +16,7 @@ func (c *Client) ValidateAccount(ctx context.Context, acc *Account) error {
 	authTok, ct0, ua := acc.Credentials()
 	headers := twitterHeaders(authTok, ct0, ua)
 
-	_, _, status, err := c.doRequest(bc, "GET", accountSettingsURL, headers)
+	_, _, status, err := c.doRequest(ctx, bc, "GET", accountSettingsURL, headers)
 	if err != nil {
 		return fmt.Errorf("validate account %s: request failed: %w", acc.Username, err)
 	}

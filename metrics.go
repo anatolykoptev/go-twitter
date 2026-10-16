@@ -25,6 +25,7 @@ const (
 	metricRequestDuration     = "twitter.client.request.duration"
 	metricFreshness           = "twitter.client.timeline.freshness"
 	metricPoolAccounts        = "twitter.client.pool.accounts"
+	metricPoolInflight        = "twitter.client.pool.inflight"
 	metricPoolWait            = "twitter.client.pool.wait.duration"
 	metricRelogins            = "twitter.client.relogins"
 	metricProxyFailures       = "twitter.client.proxy.failures"
@@ -62,6 +63,7 @@ const (
 	outcomeNotFound    = "not_found"
 	outcomeEndpoint    = "endpoint"
 	outcomeOverloaded  = "overloaded"
+	outcomeBadRequest  = "bad_request"
 	outcomeTransport   = "transport"
 	outcomeProxy       = "proxy"
 	outcomeOther       = "other"
@@ -263,13 +265,26 @@ func (c *Client) registerPoolGauge(mp metric.MeterProvider) {
 			slog.String("instrument", metricPoolAccounts), slog.Any("error", err))
 		return
 	}
+	ifg, err := meter.Int64ObservableGauge(metricPoolInflight,
+		metric.WithUnit("{request}"),
+		metric.WithDescription("Requests currently in flight across pool accounts (per-account cap: ClientConfig.MaxInFlightPerAccount)."))
+	if err != nil {
+		slog.Warn("twitter: metric instrument creation failed, falling back to no-op",
+			slog.String("instrument", metricPoolInflight), slog.Any("error", err))
+		return
+	}
 	reg, err := meter.RegisterCallback(func(_ context.Context, o metric.Observer) error {
 		counts := c.poolAccountStates(time.Now())
 		for _, st := range accountStates {
 			o.ObserveInt64(g, counts[st], metric.WithAttributes(attribute.String(attrAccountState, st)))
 		}
+		var inFlight int64
+		for _, acc := range c.pool.Items() {
+			inFlight += int64(acc.InFlight())
+		}
+		o.ObserveInt64(ifg, inFlight)
 		return nil
-	}, g)
+	}, g, ifg)
 	if err != nil {
 		slog.Warn("twitter: metric callback registration failed",
 			slog.String("instrument", metricPoolAccounts), slog.Any("error", err))
@@ -558,6 +573,8 @@ func outcomeForClass(c errorClass) string {
 		return outcomeEndpoint
 	case errOverloaded:
 		return outcomeOverloaded
+	case errBadRequest:
+		return outcomeBadRequest
 	}
 	return outcomeOther
 }
