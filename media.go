@@ -407,7 +407,10 @@ func (c *Client) doMediaRequest(ctx context.Context, acc *Account, method, urlSt
 		// NO proactive ct0 rotation (see doPoolRequest / shouldProactivelyRotate):
 		// client-rotating an established session's ct0 forces CSRF-353. ct0 stays
 		// current via the server's set-cookie adopted on each success below.
-		bc := c.clientForAccount(acc)
+		bc, err := c.clientForAccount(acc)
+		if err != nil {
+			return nil, err // pinned account: fail closed, never send direct
+		}
 		authTok, ct0, ua := acc.Credentials()
 		body, respHdrs, status, err := c.doPoolReq(bc, method, urlStr, payload, mediaHeaders(authTok, ct0, ua, contentType))
 		if err != nil {

@@ -15,6 +15,13 @@ import (
 // worked; the thing asked for simply isn't there.
 var ErrNotFound = errors.New("twitter: resource not found")
 
+// ErrProxyClientUnavailable is returned when an account is pinned to its own
+// proxy (Account.Proxy != "") but its per-account transport could not be built.
+// The shared client may be direct, so falling back to it would send the
+// account's cookies from this host's IP, ignoring the proxy the caller asked
+// for: the request fails closed instead.
+var ErrProxyClientUnavailable = errors.New("twitter: account proxy client unavailable")
+
 // ErrEndpoint marks endpoint-wide faults (HTTP 404, or 400 carrying a
 // GraphQL-shaped errors body): the committed request shape is wrong for every
 // account (stale queryId, missing xtid, feature mismatch), so the serving

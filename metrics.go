@@ -22,15 +22,16 @@ const (
 	meterName = "github.com/anatolykoptev/go-twitter"
 
 	// Instrument names.
-	metricRequestDuration = "twitter.client.request.duration"
-	metricFreshness       = "twitter.client.timeline.freshness"
-	metricPoolAccounts    = "twitter.client.pool.accounts"
-	metricPoolWait        = "twitter.client.pool.wait.duration"
-	metricRelogins        = "twitter.client.relogins"
-	metricProxyFailures   = "twitter.client.proxy.failures"
-	metricRateLimitRemain = "twitter.client.ratelimit.remaining"
-	metricRateLimitLimit  = "twitter.client.ratelimit.limit"
-	metricRateLimitHolds  = "twitter.client.ratelimit.holds"
+	metricRequestDuration     = "twitter.client.request.duration"
+	metricFreshness           = "twitter.client.timeline.freshness"
+	metricPoolAccounts        = "twitter.client.pool.accounts"
+	metricPoolWait            = "twitter.client.pool.wait.duration"
+	metricRelogins            = "twitter.client.relogins"
+	metricProxyFailures       = "twitter.client.proxy.failures"
+	metricProxyClientFailures = "twitter.client.proxy.client_failures"
+	metricRateLimitRemain     = "twitter.client.ratelimit.remaining"
+	metricRateLimitLimit      = "twitter.client.ratelimit.limit"
+	metricRateLimitHolds      = "twitter.client.ratelimit.holds"
 
 	// Attribute keys.
 	attrOperation    = "twitter.operation"
@@ -107,6 +108,7 @@ type clientMetrics struct {
 	poolWait        metric.Float64Histogram
 	relogins        metric.Int64Counter
 	proxyFailures   metric.Int64Counter
+	proxyClientFail metric.Int64Counter
 	rlRemaining     metric.Int64Histogram
 	rlLimit         metric.Int64Histogram
 	rlHolds         metric.Int64Counter
@@ -182,6 +184,12 @@ func newClientMetrics(mp metric.MeterProvider) *clientMetrics {
 		metric.WithDescription("Proxy-layer failures that put an account's proxy into backoff.")); err != nil {
 		fail(metricProxyFailures, err)
 		m.proxyFailures = noop.Int64Counter{}
+	}
+	if m.proxyClientFail, err = meter.Int64Counter(metricProxyClientFailures,
+		metric.WithUnit("{failure}"),
+		metric.WithDescription("Accounts disabled because their per-account proxy client could not be built.")); err != nil {
+		fail(metricProxyClientFailures, err)
+		m.proxyClientFail = noop.Int64Counter{}
 	}
 	if m.rlRemaining, err = meter.Int64Histogram(metricRateLimitRemain,
 		metric.WithUnit("{request}"),
@@ -273,7 +281,11 @@ func accountState(acc *Account, now time.Time) string {
 	// active flag with a fresh reactivateAt while the pool deactivates it.
 	acc.mu.Lock()
 	active, reactivateAt, backoff := acc.active, acc.reactivateAt, acc.proxyBackoff
+	proxyClientFailed := acc.proxyClientFailed
 	acc.mu.Unlock()
+	if proxyClientFailed {
+		return accountStateDeactivated // permanent: never reactivated
+	}
 	if !active {
 		if reactivateAt.IsZero() {
 			return accountStateDeactivated
@@ -368,6 +380,13 @@ func (m *clientMetrics) recordRelogin(outcome string) {
 		return
 	}
 	m.relogins.Add(context.Background(), 1, metric.WithAttributes(attribute.String(attrOutcome, outcome)))
+}
+
+func (m *clientMetrics) recordProxyClientFailure() {
+	if m == nil {
+		return
+	}
+	m.proxyClientFail.Add(context.Background(), 1)
 }
 
 func (m *clientMetrics) recordProxyFailure() {

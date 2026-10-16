@@ -24,6 +24,7 @@ metrics.
 | `twitter.client.pool.wait.duration` | histogram | `s` | `twitter.operation`, `twitter.result` |
 | `twitter.client.relogins` | counter | `{relogin}` | `twitter.outcome` |
 | `twitter.client.proxy.failures` | counter | `{failure}` | none |
+| `twitter.client.proxy.client_failures` | counter | `{failure}` | none |
 | `twitter.client.ratelimit.remaining` | histogram | `{request}` | `twitter.operation` |
 | `twitter.client.ratelimit.limit` | histogram | `{request}` | `twitter.operation` |
 | `twitter.client.ratelimit.holds` | counter | `{hold}` | `twitter.operation` |
@@ -194,6 +195,15 @@ with `SetAutoReloginGate` - refused the attempt).
 
 Incremented at the same site that emits the `proxy.down` pool alert: a
 proxy-layer failure that puts an account's proxy into backoff.
+
+### `twitter.client.proxy.client_failures`
+
+Incremented once per account in `NewClient` whose pinned per-account proxy
+client could not be built (e.g. a malformed proxy URL). That account is
+disabled for the lifetime of the Client (state `deactivated`, never
+reactivated, never sent through the shared client) and the
+`account.proxy_client_failed` pool alert fires. `NewClient` still succeeds as
+long as one account is usable.
 
 ## The `*WithSocial` helpers
 
