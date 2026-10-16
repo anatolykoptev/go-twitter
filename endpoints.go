@@ -2,6 +2,7 @@ package twitter
 
 import (
 	"fmt"
+	"maps"
 	"net/url"
 	"os"
 )
@@ -57,11 +58,10 @@ func (e Endpoint) URL() string {
 
 // EndpointURL returns the URL for a named operation, or an error if unknown.
 func EndpointURL(operation string) (string, error) {
-	ep, ok := Endpoints[operation]
-	if !ok {
+	if _, ok := Endpoints[operation]; !ok {
 		return "", fmt.Errorf("unknown operation: %s", operation)
 	}
-	return ep.URL(), nil
+	return endpointFor(operation).URL(), nil
 }
 
 // Endpoints maps operation names to their current GraphQL IDs and feature flags.
@@ -172,14 +172,18 @@ var knownManualQueryIDs = map[string]string{
 // ApplyEnvOverrides reads TWITTER_QID_* env vars and overrides queryIds in Endpoints.
 // Called automatically by init(); can also be called manually in tests.
 func ApplyEnvOverrides() {
+	pinned := make(map[string]struct{})
 	for name, envKey := range envOverrides {
 		if qid := os.Getenv(envKey); qid != "" {
 			if ep, ok := Endpoints[name]; ok {
 				ep.ID = qid
 				Endpoints[name] = ep
+				pinned[name] = struct{}{}
 			}
 		}
 	}
+	// A pinned op is never replaced by a runtime-refreshed id (see endpointFor).
+	envPinned.Store(&pinned)
 }
 
 // applyGeneratedOverrides applies the cmd/gql-sync-generated queryIDs (in
@@ -213,8 +217,18 @@ func init() {
 // cmd/gql-sync-generated baseline (features_gen.go) when present, falling back to
 // the committed literal when generation has not run (or produced nothing). The
 // returned map is always a fresh COPY so a caller mutating per-op features can
-// never corrupt the shared package-level source.
+// never corrupt the shared package-level source. A runtime-refreshed baseline
+// (queryid_refresh.go) takes precedence over the compiled one.
 func gqlFeatures() map[string]any {
+	if snap := activeQID.Load(); snap != nil && snap.features != nil {
+		return maps.Clone(snap.features)
+	}
+	return compiledGQLFeatures()
+}
+
+// compiledGQLFeatures is the compiled baseline: the generated set when present,
+// else the committed literal. Fresh copy on every call.
+func compiledGQLFeatures() map[string]any {
 	if len(generatedFeatures) > 0 {
 		out := make(map[string]any, len(generatedFeatures))
 		for k, v := range generatedFeatures {

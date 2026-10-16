@@ -347,6 +347,9 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 				}
 				endpointFaulted[acc.ID()] = true
 				prevEndpointFault = apiErr.Class
+				if apiErr.Class == errEndpoint {
+					c.noteEndpointFault(endpoint, bc, authTok, ct0, ua) // K of these refresh the queryIds (#68)
+				}
 				slog.Warn("endpoint fault, rotating account",
 					slog.String("endpoint", endpoint), slog.Int("status", status),
 					slog.String("user", acc.Username))
@@ -775,6 +778,9 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 			// never replayed on another account, so this returns immediately.
 			if apiErr.Class != errEndpoint && apiErr.Class != errOverloaded {
 				acc.RecordFailure()
+			}
+			if apiErr.Class == errEndpoint {
+				c.noteEndpointFault(endpoint, bc, authTok, ct0, ua) // K of these refresh the queryIds (#68)
 			}
 			return nil, apiErr
 		}

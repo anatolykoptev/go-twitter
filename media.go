@@ -319,7 +319,7 @@ func mediaTypeForFile(path string, data []byte) string {
 // account. With no media IDs it is equivalent to CreateTweet. Returns the
 // tweet ID on success.
 func (c *Client) CreateTweetWithMedia(ctx context.Context, acc *Account, text string, mediaIDs []string) (string, error) {
-	ep := Endpoints["CreateTweet"]
+	ep := endpointFor("CreateTweet")
 	payload, err := json.Marshal(map[string]any{
 		"variables": createTweetVariables(text, mediaIDs),
 		"features":  ep.Features,

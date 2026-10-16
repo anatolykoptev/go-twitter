@@ -83,6 +83,7 @@ func sharedSocialXtid() *xtid.Manager {
 	mgr.SetInitFailedHook(func(err error) {
 		slog.Warn("pool alert", slog.String("topic", "xtid.init_failed"), slog.Any("payload", map[string]any{"error": err.Error()}))
 	})
+	mgr.SetWarmPageHook(observeWarmPage)
 	socialXtidMgr = mgr
 	return mgr
 }
