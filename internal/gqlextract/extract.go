@@ -1,4 +1,8 @@
-package main
+// Package gqlextract extracts GraphQL queryIDs and feature flags from x.com's
+// own bundles. It is the single implementation shared by cmd/gql-sync (the
+// weekly codegen) and the runtime queryId refresh in the twitter package, so
+// the two can never disagree on what a bundle says.
+package gqlextract
 
 import (
 	"log/slog"
@@ -36,12 +40,12 @@ var (
 	paramsReIDFirst   = regexp.MustCompile(`params:\{id:["']([^"']+)["']` + braceSpan + `name:["']([^"']+)["']` + braceSpan + `operationKind`)
 	paramsReNameFirst = regexp.MustCompile(`params:\{name:["']([^"']+)["']` + braceSpan + `id:["']([^"']+)["']` + braceSpan + `operationKind`)
 
-	// queryIDRe bounds a captured queryId to the exact alphabet x.com uses for
+	// QueryIDRe bounds a captured queryId to the exact alphabet x.com uses for
 	// persisted-query IDs. A poisoned bundle could otherwise smuggle a value
 	// carrying `/`, a quote, or whitespace that later flows unescaped into the
 	// request path. A non-matching value is DROPPED (the op falls back to its
 	// committed ID), never overridden.
-	queryIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
+	QueryIDRe = regexp.MustCompile(`^[A-Za-z0-9_-]{1,64}$`)
 )
 
 // Source-priority ranks. When the same operationName resolves to different
@@ -88,24 +92,52 @@ type extractedOp struct {
 	src  string
 }
 
-// extractor accumulates operationName -> queryId across every walked bundle,
+// Extractor accumulates operationName -> queryId across every walked bundle,
 // deduping by source priority and logging every genuine collision so a
 // surprising override is never silent.
-type extractor struct {
+type Extractor struct {
 	ops map[string]extractedOp
-	log *slog.Logger
+	// invalid records every operation whose queryId failed QueryIDRe, so a
+	// caller that must not trust a tampered bundle can reject the extraction
+	// instead of silently using the remaining ops.
+	invalid map[string]struct{}
+	log     *slog.Logger
+	// queryIDShapeOnly restricts extraction to the `{queryId, operationName}`
+	// op-definition shape (see Option QueryIDShapeOnly).
+	queryIDShapeOnly bool
 }
 
-func newExtractor(logger *slog.Logger) *extractor {
+// Option tunes an Extractor.
+type Option func(*Extractor)
+
+// QueryIDShapeOnly makes the extractor ignore the persisted-query
+// `params:{id,name,operationKind}` shape and keep only the
+// `{queryId, operationName}` shape. The params shape is where Relay
+// persisted-query HASHES live — a different identifier than the GraphQL-path
+// queryId that, used as a path segment, answers HTTP 422
+// GRAPHQL_VALIDATION_FAILED (see the engagement-mutation note in endpoints.go).
+// A runtime consumer that swaps ids into live requests uses this so such a
+// hash can never be mistaken for a queryId; the offline codegen keeps both
+// shapes and a human reviews its diff.
+func QueryIDShapeOnly() Option {
+	return func(e *Extractor) { e.queryIDShapeOnly = true }
+}
+
+// NewExtractor returns an empty Extractor logging to logger (nil = slog.Default).
+func NewExtractor(logger *slog.Logger, opts ...Option) *Extractor {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &extractor{ops: make(map[string]extractedOp), log: logger}
+	e := &Extractor{ops: make(map[string]extractedOp), invalid: make(map[string]struct{}), log: logger}
+	for _, o := range opts {
+		o(e)
+	}
+	return e
 }
 
-// consume runs both op-definition regexes over a single bundle body and records
+// Consume runs both op-definition regexes over a single bundle body and records
 // every (operationName, queryId) pair found, tagged with the bundle's source.
-func (e *extractor) consume(bundleURL string, body []byte) {
+func (e *Extractor) Consume(bundleURL string, body []byte) {
 	tag := sourceTag(bundleURL)
 	rank := sourceRank(tag)
 	text := string(body)
@@ -119,6 +151,9 @@ func (e *extractor) consume(bundleURL string, body []byte) {
 	for _, m := range opReRev.FindAllStringSubmatch(text, -1) {
 		e.add(m[1], m[2], tag, rank) // m[1]=operationName, m[2]=queryId
 	}
+	if e.queryIDShapeOnly {
+		return
+	}
 	for _, m := range paramsReIDFirst.FindAllStringSubmatch(text, -1) {
 		e.add(m[2], m[1], tag, rank) // m[1]=id, m[2]=name
 	}
@@ -130,11 +165,12 @@ func (e *extractor) consume(bundleURL string, body []byte) {
 // add records name->id, resolving collisions by source priority. The first hit
 // for a name wins ties within the same rank; a higher-ranked source overrides a
 // lower-ranked one. Every genuine collision (same name, different id) is logged.
-func (e *extractor) add(name, id, src string, rank int) {
+func (e *Extractor) add(name, id, src string, rank int) {
 	if name == "" || id == "" {
 		return
 	}
-	if !queryIDRe.MatchString(id) {
+	if !QueryIDRe.MatchString(id) {
+		e.invalid[name] = struct{}{}
 		e.log.Warn("queryid dropped: failed format validation",
 			slog.String("op", name),
 			slog.String("id_preview", truncate(id, 32)),
@@ -173,11 +209,18 @@ func truncate(s string, n int) string {
 	return string(r[:n])
 }
 
-// result returns the resolved operationName -> queryId map.
-func (e *extractor) result() map[string]string {
+// Result returns the resolved operationName -> queryId map.
+func (e *Extractor) Result() map[string]string {
 	out := make(map[string]string, len(e.ops))
 	for name, op := range e.ops {
 		out[name] = op.id
 	}
 	return out
+}
+
+// Invalid reports whether any occurrence of operation name carried a queryId
+// that failed QueryIDRe (and was therefore dropped from Result).
+func (e *Extractor) Invalid(name string) bool {
+	_, bad := e.invalid[name]
+	return bad
 }

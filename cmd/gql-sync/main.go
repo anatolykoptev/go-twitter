@@ -22,6 +22,7 @@ import (
 	"sort"
 
 	"github.com/anatolykoptev/go-twitter/internal/bundle"
+	"github.com/anatolykoptev/go-twitter/internal/gqlextract"
 )
 
 const (
@@ -175,7 +176,7 @@ func mergeCommittedQueryIDs(cfg config, extracted map[string]string) map[string]
 // -fail-on-empty makes that fatal. Baseline flags that vanished from the bundle
 // are surfaced as a // REMOVED comment, never silently dropped.
 func syncFeatures(cfg config, names []string, defaults map[string]bool) error {
-	features, _ := intersectFeatures(names, defaults, slog.Default())
+	features, _ := gqlextract.IntersectFeatures(names, defaults, slog.Default())
 	if len(features) == 0 {
 		if cfg.failOnEmpty {
 			return fmt.Errorf("extracted 0 features: refusing to overwrite %s", featuresFileName)
@@ -225,18 +226,18 @@ func extractAll(ctx context.Context, fetcher bundle.Fetcher, opts bundle.Options
 	}
 
 	start := startBundles(m)
-	ext := newExtractor(slog.Default())
-	feat := newFeatureCollector()
+	ext := gqlextract.NewExtractor(slog.Default())
+	feat := gqlextract.NewFeatureCollector()
 	visit := func(url string, body []byte) {
-		ext.consume(url, body)
-		feat.consume(url, body)
+		ext.Consume(url, body)
+		feat.Consume(url, body)
 	}
 	if err := m.WalkImports(ctx, fetcher, start, visit, opts); err != nil {
 		return nil, nil, fmt.Errorf("walk bundles: %w", err)
 	}
 
-	ids := ext.result()
-	names := feat.result()
+	ids := ext.Result()
+	names := feat.Result()
 	slog.Info("gql-sync: extraction complete",
 		slog.Int("bundles_started", len(start)),
 		slog.Int("ops_found", len(ids)),
@@ -252,7 +253,7 @@ func fetchFeatureDefaults(ctx context.Context, fetcher bundle.Fetcher) (map[stri
 	if err != nil {
 		return nil, fmt.Errorf("fetch warm page for feature defaults: %w", err)
 	}
-	defaults := parseFeatureDefaults(body)
+	defaults := gqlextract.ParseFeatureDefaults(body)
 	slog.Info("gql-sync: parsed feature defaults", slog.Int("defaults_found", len(defaults)))
 	return defaults, nil
 }
