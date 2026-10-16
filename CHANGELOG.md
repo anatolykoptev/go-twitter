@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.23](https://github.com/anatolykoptev/go-twitter/compare/v0.6.22...v0.6.23) (2026-10-16)
+
+
+### Bug Fixes
+
+* **queryid:** refresh reads the legacy webpack layout of the authenticated page ([#107](https://github.com/anatolykoptev/go-twitter/issues/107)) ([3f57d27](https://github.com/anatolykoptev/go-twitter/commit/3f57d276bb6a67812edd50ff17481cfe0901b5ec)), closes [#68](https://github.com/anatolykoptev/go-twitter/issues/68)
+
 ## [0.6.22](https://github.com/anatolykoptev/go-twitter/compare/v0.6.21...v0.6.22) (2026-10-16)
 
 
