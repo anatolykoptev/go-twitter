@@ -99,7 +99,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		)
 		if err != nil {
 			acc.markProxyClientFailed()
-			label, reason := proxyBuildFailure(acc.Proxy, err)
+			label, reason := proxyBuildFailure(acc.Proxy)
 			buildErrs = append(buildErrs, fmt.Errorf("per-account client for %s: %s", acc.Username, reason))
 			slog.Warn("per-account proxy client build failed, account disabled",
 				slog.String("user", acc.Username), slog.String("proxy", label), slog.String("error", reason))
@@ -226,14 +226,20 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 }
 
 // proxyBuildFailure returns a log-safe proxy label and failure reason. The
-// build error embeds the raw proxy URL (credentials included), and
-// stealth.MaskProxy returns an unparseable URL unchanged, so neither may be
-// logged or alerted as-is.
-func proxyBuildFailure(proxy string, err error) (label, reason string) {
-	if _, perr := url.Parse(proxy); perr != nil {
-		return "<unparseable proxy URL>", "unparseable proxy URL"
+// proxy string is operator input that may be malformed in credential-bearing
+// ways ("user:pw@host:8080" parses as scheme "user" with u.User nil, so
+// stealth.MaskProxy returns it unchanged), and go-stealth's build error echoes
+// the URL, so neither the string nor err.Error() may ever be emitted. The label
+// is scheme://host[:port] from a successful parse with a non-empty host and
+// userinfo dropped; anything else is a fixed placeholder. The reason is fixed.
+func proxyBuildFailure(proxy string) (label, reason string) {
+	const placeholder = "<unparseable proxy URL>"
+	reason = "per-account proxy client build failed"
+	u, err := url.Parse(proxy)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return placeholder, reason
 	}
-	return stealth.MaskProxy(proxy), strings.ReplaceAll(err.Error(), proxy, stealth.MaskProxy(proxy))
+	return u.Scheme + "://" + u.Host, reason
 }
 
 // clientForAccount returns the per-account client if available, otherwise the

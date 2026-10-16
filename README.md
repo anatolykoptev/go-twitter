@@ -220,6 +220,7 @@ On top of that, each account is paced individually on pool requests: a random de
 |-------|---------|---------|
 | `Accounts` | — | Accounts for the pool. |
 | `DefaultProxy` | none | Proxy for the shared client and for accounts without their own `Proxy`. |
+| `Account.Proxy` | none | Per-account proxy. A malformed one disables only that account (`account.proxy_client_failed`); `NewClient` fails only when no account is usable, so a single-account client still fails. |
 | `SessionTTL` | 24h | How long the default file store reuses a saved session. Ignored by a custom `SessionStore`. |
 | `SessionDir` | `~/.go-twitter/sessions` | Where the default file store persists sessions. Ignored when `SessionStore` is set. |
 | `SessionStore` | file store | Where sessions are persisted; see [Session storage](#session-storage). |
@@ -233,7 +234,7 @@ On top of that, each account is paced individually on pool requests: a random de
 | `ProxyBackoffInitial` / `ProxyBackoffMax` | 30s / 30m | Backoff for failing proxies. |
 | `OpenAccountCount` | 0 | Anonymous guest sessions to create at startup. |
 | `DisableGuestFallback` | false | Refuse the guest-token fallback on endpoints that allow it. |
-| `PoolAlertHook` | log a warning | `func(topic string, payload any)` called on pool events. This repo emits `proxy.down` (user, masked proxy, consecutive failures, backoff) and `xtid.init_failed`; the go-stealth pool emits its own topics, such as account deactivation. |
+| `PoolAlertHook` | log a warning | `func(topic string, payload any)` called on pool events. This repo emits `proxy.down` (user, masked proxy, consecutive failures, backoff) and `xtid.init_failed`; the go-stealth pool emits its own topics, such as account deactivation. `account.proxy_client_failed` (a per-account proxy client failed to build; payload keys `user`, `proxy` (masked label), `error` (fixed text)). |
 
 ## Session storage
 
