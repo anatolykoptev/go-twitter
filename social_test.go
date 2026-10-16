@@ -51,7 +51,7 @@ func TestSearchWithSocial_ReportsErrorOnFailure(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
 	defer cancel()
 
 	sc := social.NewClient(srv.URL, "tok", "test")

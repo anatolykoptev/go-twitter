@@ -246,7 +246,11 @@ func TestRateLimitHeaders_429BlocksUntilHeaderReset(t *testing.T) {
 	})
 	c, accs := newRLClient(t, 1, 50, nil)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 800*time.Millisecond)
+	// The ctx only bounds the pool wait that follows the 429 (the single
+	// account is blocked for ~2m). It must outlast the first request itself:
+	// the caller ctx now reaches the transport, so a deadline shorter than the
+	// request would abort it before the 429 arm ever runs.
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 	defer cancel()
 	require.Error(t, c.rlCall(ctx, f))
 

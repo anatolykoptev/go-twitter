@@ -23,16 +23,24 @@ var ErrNotFound = errors.New("twitter: resource not found")
 var ErrProxyClientUnavailable = errors.New("twitter: account proxy client unavailable")
 
 // ErrEndpoint marks endpoint-wide faults (HTTP 404, or 400 carrying a
-// GraphQL-shaped errors body): the committed request shape is wrong for every
-// account (stale queryId, missing xtid, feature mismatch), so the serving
-// account must not be charged — reads rotate to the next account. Match with
-// errors.Is.
+// GraphQL-shaped errors body that is NOT a recognized caller-input rejection):
+// the committed request shape is wrong for every account (stale queryId,
+// missing xtid, feature mismatch), so the serving account must not be
+// charged — reads rotate to the next account. Match with errors.Is.
 var ErrEndpoint = errors.New("twitter: endpoint fault")
 
 // ErrOverloaded marks X-side overload (HTTP 5xx, or a LoadShed error entry —
 // code -1 / message containing "LoadShed"): retryable on another account with
 // backoff, never charged to the serving account. Match with errors.Is.
 var ErrOverloaded = errors.New("twitter: x overloaded")
+
+// ErrBadRequest marks deterministic CALLER-side input errors: a 400 whose
+// error entries carry X's input-validation code (214 — a bad variable, bad
+// cursor, malformed request field). Rotating to another account reproduces
+// the identical response, so the class is never retried, never charged to
+// the serving account, and never counted as an endpoint fault. Match with
+// errors.Is.
+var ErrBadRequest = errors.New("twitter: bad request (input rejected)")
 
 // errorClass categorizes Twitter API error responses for targeted handling.
 type errorClass int
@@ -51,6 +59,7 @@ const (
 	errForbidden                // 403 — forbidden (no recognized error code)
 	errEndpoint                 // HTTP 404 or GraphQL-shaped 400 — endpoint-wide fault, not the account's
 	errOverloaded               // HTTP 5xx or a LoadShed error entry — X shedding load
+	errBadRequest               // HTTP 400 with an input-validation marker — the caller's own error, deterministic
 
 	// errClassCount is one past the last class; metrics_test iterates [0, errClassCount)
 	// to prove every class has a twitter.outcome mapping. Keep it LAST.
@@ -160,15 +169,18 @@ func (e *APIError) Error() string {
 // Unwrap returns the underlying cause, if any.
 func (e *APIError) Unwrap() error { return e.Err }
 
-// Is reports sentinel membership: ErrEndpoint matches class errEndpoint and
-// ErrOverloaded matches errOverloaded, so errors.Is(err, ErrEndpoint) reaches
-// through fmt.Errorf("...: %w") wrappers.
+// Is reports sentinel membership: ErrEndpoint matches class errEndpoint,
+// ErrOverloaded matches errOverloaded and ErrBadRequest matches errBadRequest,
+// so errors.Is(err, ErrEndpoint) reaches through fmt.Errorf("...: %w")
+// wrappers.
 func (e *APIError) Is(target error) bool {
 	switch target {
 	case ErrEndpoint:
 		return e.Class == errEndpoint
 	case ErrOverloaded:
 		return e.Class == errOverloaded
+	case ErrBadRequest:
+		return e.Class == errBadRequest
 	}
 	return false
 }
@@ -200,6 +212,38 @@ func hasGraphQLErrors(body []byte) bool {
 	return json.Unmarshal(body, &probe) == nil && len(probe.Errors) > 0
 }
 
+// callerValidationCode is X's "request input failed validation" GraphQL error
+// code — issued for a bad variable, bad cursor or malformed request field.
+// It is the ONLY marker that separates a caller error from an endpoint fault:
+// a stale `features` set answers the same kind/name (kind:"Validation",
+// name:"BadRequestError", source:"Client") but code 336. Real captures show
+// the code either at the entry's top level or nested inside `extensions`
+// only (a twikit report captured {"extensions":{"code":214,...}} with no
+// top-level code), so both positions must be probed.
+const callerValidationCode = 214
+
+// hasCallerValidationError reports whether any error entry in the body
+// carries the input-validation code, at the top level or inside extensions.
+func hasCallerValidationError(body []byte) bool {
+	var errResp struct {
+		Errors []struct {
+			Code       int `json:"code"`
+			Extensions *struct {
+				Code int `json:"code"`
+			} `json:"extensions"`
+		} `json:"errors"`
+	}
+	if json.Unmarshal(body, &errResp) != nil {
+		return false
+	}
+	for _, e := range errResp.Errors {
+		if e.Code == callerValidationCode || (e.Extensions != nil && e.Extensions.Code == callerValidationCode) {
+			return true
+		}
+	}
+	return false
+}
+
 // newAPIError builds an APIError from a response. It preserves the existing
 // classifyError mapping for known JSON codes and folds HTTP statuses into the
 // endpoint / overload / rate-limit / forbidden classes.
@@ -208,7 +252,12 @@ func hasGraphQLErrors(body []byte) bool {
 // a 404 says the route itself is stale for every account (a stale queryId,
 // missing xtid or feature mismatch, see #61), a 5xx says X's edge is broken —
 // neither can be charged to the serving account regardless of what the body
-// claims. The 429/403 folds only fill in the errNone gap as before.
+// claims. The caller-validation fold (400 with a code-214 entry) is checked
+// BEFORE the 400 endpoint fold: input rejection is the caller's own error —
+// deterministic, so another account would produce the identical answer. A
+// GraphQL-shaped 400 WITHOUT the validation marker keeps errEndpoint — when
+// in doubt, the fault stays endpoint-side (today's behaviour). The 429/403
+// folds only fill in the errNone gap as before.
 func newAPIError(status int, body []byte, hdrs map[string]string) *APIError {
 	e := &APIError{
 		Status: status,
@@ -216,6 +265,8 @@ func newAPIError(status int, body []byte, hdrs map[string]string) *APIError {
 		Class:  classifyError(body, hdrs),
 	}
 	switch {
+	case status == 400 && hasCallerValidationError(body):
+		e.Class = errBadRequest
 	case status == 404, status == 400 && hasGraphQLErrors(body):
 		e.Class = errEndpoint
 	case status >= 500 && status < 600:

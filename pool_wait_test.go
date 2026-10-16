@@ -250,7 +250,7 @@ func TestPoolWait_CancelledCtxReturnsCtxError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, err := c.nextAccountWithWait(ctx, poolWaitEndpoint, func(a *Account) bool { return a.AllowRequest(poolWaitEndpoint) }, time.Now().Add(time.Minute))
+	_, err := c.nextAccountWithWait(ctx, poolWaitEndpoint, func(a *Account) bool { return a.AllowRequest(poolWaitEndpoint) }, nil, false, time.Now().Add(time.Minute))
 
 	assert.True(t, errors.Is(err, context.Canceled), "want context.Canceled, got %v", err)
 }

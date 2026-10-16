@@ -21,6 +21,7 @@ metrics.
 | `twitter.client.request.duration` | histogram | `s` | `twitter.operation`, `twitter.outcome` |
 | `twitter.client.timeline.freshness` | histogram | `s` | `twitter.operation` |
 | `twitter.client.pool.accounts` | observable gauge | `{account}` | `twitter.account.state` |
+| `twitter.client.pool.inflight` | observable gauge | `{request}` | none |
 | `twitter.client.pool.wait.duration` | histogram | `s` | `twitter.operation`, `twitter.result` |
 | `twitter.client.relogins` | counter | `{relogin}` | `twitter.outcome` |
 | `twitter.client.proxy.failures` | counter | `{failure}` | none |
@@ -67,6 +68,7 @@ instrumented.
 | `internal` | code 131 (recorded as `internal` even when the client then accepts usable data) |
 | `not_found` | HTTP 404 — the historical dead-route label (an endpoint fault under the hood: never charged to the account) |
 | `endpoint` | HTTP 400 with a GraphQL-shaped `errors` body — an endpoint-wide fault (stale features / request shape); never charged to the account |
+| `bad_request` | HTTP 400 with a GraphQL error entry carrying code `214` (top-level or inside `extensions`) — a deterministic caller-input rejection (`ErrBadRequest`): never retried, rotated or charged to the account, and not an endpoint fault |
 | `overloaded` | HTTP 5xx, or a `LoadShed` error entry (code -1 / message containing "LoadShed"); retried on another account, never charged to the serving one |
 | `transport` | the request failed before an HTTP response (timeout, reset, DNS on a direct account, ...) |
 | `proxy` | transport failure that looks like a proxy failure (`isProxyError`) on an attempt made through a per-account proxy; the same gate as `proxy.failures` |
@@ -198,11 +200,23 @@ sum to the pool size; all four states are always reported (zeros included).
 | `cooling_down` | soft-deactivated (auth/ban/failure cooldown); the pool reactivates it automatically |
 | `deactivated` | permanently deactivated (suspended) |
 
+### `twitter.client.pool.inflight`
+
+Observed on collection, alongside `pool.accounts` in the same callback (same
+one-client-per-provider rule). The sum of every pool account's in-flight
+request count — the requests currently holding a slot under
+`ClientConfig.MaxInFlightPerAccount` (default 2, negative disables the cap).
+The gauge counts slots, not sockets: a cancelled request releases its slot at once while its socket can outlive it until go-stealth's own timeout. Each account's count never exceeds the cap; a saturated pool waits on the
+`pool.wait` machinery instead of exceeding it, so a persistently pegged gauge
+means the cap or the account count is the bottleneck. Per-call `*WithSocial`
+clients register no gauge.
+
 ### `twitter.client.pool.wait.duration`
 
 One record per call that actually waited inside `nextAccountWithWait` — the
 sleep taken when every pool account is momentarily unusable for the endpoint
-(all active but endpoint-rate-limited or in proxy backoff). Calls served
+(all active but endpoint-rate-limited, in proxy backoff, or at the
+`MaxInFlightPerAccount` cap). Calls served
 without waiting record nothing, so the series only exists while the pool is
 contended. The value is the total time the call slept, which can add up to
 minutes of latency per request (bounded by `poolWaitCap`, 5 min). The wait

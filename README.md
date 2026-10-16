@@ -132,6 +132,8 @@ All methods below are on `*twitter.Client`. Every one of them needs an authentic
 
 The `social` package is a thin client for an external account-leasing service. `SearchWithSocial`, `SearchTweetsWithSocial`, `SearchUsersWithSocial`, `GetUserWithSocial`, `GetUserTweetsWithSocial` and `GetTweetConversationWithSocial` in the root package lease an account, run the call, retry on other accounts, and report the outcome. The repeated-header-less-88 escalation does not fire on this path: each attempt builds a fresh `Account`, so the count never reaches the threshold — a leased account that keeps answering 88 is reported to the credential service as `auth_error`, not `banned`.
 
+A caller-side cancellation or deadline (`context.Canceled`, `context.DeadlineExceeded`, or the caller ctx ending mid-request) is NOT the leased account's fault: it reports nothing to go-social (the vocabulary has no neutral status) and stops leasing immediately. Reports are sent on a detached, bounded context, so a `success` verdict still lands when the caller's ctx died before the response arrived.
+
 ## Error Handling
 
 Every request makes up to 3 attempts, rotating accounts on pool-based calls. Recovery per error class:
@@ -148,6 +150,7 @@ Every request makes up to 3 attempts, rotating accounts on pool-based calls. Rec
 | Locked | 326 | With a `CaptchaSolver`, relogin to solve the challenge and retry; otherwise, or on failure, soft-deactivate for `BanCooldown`. |
 | Blocked / not authorized | 161, 179, 219 | Soft-deactivate for `AuthCooldown`. |
 | Internal error | 131 | Treated as success if the body still carries `data`; otherwise retried. |
+| Caller input rejected | 400 + GraphQL code 214 | `ErrBadRequest` — returned immediately: X rejected the request's own input (bad variable, cursor or handle), so another account would answer identically. No retry, no rotation, no account charge, no endpoint-fault bookkeeping. |
 | Other non-200 | — | Counts against the account's health; past the threshold the account is soft-deactivated with a growing backoff (`NonResponsiveCooldown`, doubling, capped at 30 minutes). |
 | Transport failure | — | For an account with its own `Proxy`, a proxy-looking error (including a proxy CONNECT 407) is charged to the proxy: exponential backoff (`ProxyBackoffInitial` to `ProxyBackoffMax`) and a `proxy.down` alert, not an account failure. Any other transport error counts against the account. |
 
@@ -169,6 +172,10 @@ Errors returned by the client wrap `*twitter.APIError` (`Status`, `Codes`, `Mess
 | `IsForbidden` | HTTP 403 with no recognized code |
 
 `twitter.ErrNotFound` marks deterministic misses (deleted tweet, suspended or unavailable user): the account worked, the resource is not there. Test it with `errors.Is`.
+
+`twitter.ErrBadRequest` marks deterministic caller-input rejections: a GraphQL 400 whose error entries carry code `214` (top-level or inside `extensions`). A bad cursor, handle or variable is the caller's own error — it is never retried, never rotated to another account, never charged to account health, and never counted as an endpoint fault. A GraphQL 400 WITHOUT code 214 keeps the endpoint-fault classification: a stale `features` set answers `kind:"Validation"`/`name:"BadRequestError"` too (code 336), so the kind/name markers alone do not separate caller errors from stale request shapes — only the numeric code does.
+
+`twitter.ErrEndpoint` (HTTP 404, or GraphQL-shaped 400 without code 214) and `twitter.ErrOverloaded` (HTTP 5xx, `LoadShed`) are endpoint-side faults: the committed request shape or X itself is at fault, so the serving account is never charged and the call rotates. Test all sentinels with `errors.Is`.
 
 ### Relogin circuit breaker
 
@@ -203,6 +210,8 @@ The `*WithSocial` helpers lease a fresh single-account client per attempt, so th
 
 On top of that, each account is paced individually on pool requests: a random delay of `AccountPaceMin` to `AccountPaceMin + AccountPaceRandom` (default 0.8s to 2.0s) between consecutive requests by the same account. Pacing is keyed by account, so a busy caller does not delay callers using other accounts. Account-pinned POSTs and media uploads are not paced. Disable pacing with `AccountPaceDisabled`.
 
+Independently of pacing, `MaxInFlightPerAccount` (default 2) bounds how many requests may be in flight on one account at once: the pool skips an account at the cap, and when every eligible account is full the call waits for a slot on the same ctx-bounded machinery as endpoint-limit waits (`pool.wait` metric); the account-pinned paths wait for their own account's slot. A negative value disables the cap. Live in-flight counts are exported as the `twitter.client.pool.inflight` gauge (see `docs/metrics.md`). Caveat for `*WithSocial` callers: each lease builds a fresh single-account client, so the cap cannot span concurrent leases of the same underlying account — cross-lease concurrency control belongs to go-social.
+
 ## Anti-Detection
 
 - **xtid** — `x-client-transaction-id` generated from x.com page animation keys, refreshed every 30 minutes. Initialised lazily on the first request carrying an account's cookies (logged-out x.com serves a shell without the bundle). If initialization fails, the header is omitted, retries back off from 60 s to 15 min, and one `xtid.init_failed` alert per failure episode is sent to `PoolAlertHook`.
@@ -229,6 +238,7 @@ On top of that, each account is paced individually on pool requests: a random de
 | `NonResponsiveCooldown` | 5m | Base backoff for repeated non-200 failures (doubles, capped at 30m, ±30% jitter). |
 | `CaptchaSolver` | none | Solver for login challenges and locked accounts (`captcha.NewCapsolver`). |
 | `RateLimit` | 50 per 15m | Cap for endpoints without a measured seed. |
+| `MaxInFlightPerAccount` | 2 | Max concurrent requests per account. Pooled picks skip accounts at the cap and wait (bounded by the caller's ctx, on the same `pool.wait` machinery as endpoint limits) when every eligible account is full; the account-pinned POST and media paths wait for their account's slot. A negative value disables the cap. See [Rate Limiting](#rate-limiting). |
 | `AccountPaceMin` / `AccountPaceRandom` | 800ms / 1.2s | Per-account request spacing. |
 | `AccountPaceDisabled` | false | Turn per-account pacing off. |
 | `ProxyBackoffInitial` / `ProxyBackoffMax` | 30s / 30m | Backoff for failing proxies. |

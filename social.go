@@ -20,6 +20,13 @@ import (
 
 const maxSocialRetries = 6
 
+// socialReportTimeout bounds the usage report sent to go-social. The report
+// runs on a detached context (context.WithoutCancel): the caller's ctx may
+// already be done when a slow call finally returns, and a "success" report
+// must still reach the credential service instead of being dropped with the
+// caller's cancellation.
+const socialReportTimeout = 10 * time.Second
+
 // socialEndpointFaultStop bounds the run of consecutive endpoint faults —
 // each on a DIFFERENT lease — a *WithSocial call tolerates before giving up.
 // An ErrEndpoint hit means the committed request shape is stale for EVERY
@@ -156,15 +163,30 @@ func GetTweetConversationWithSocial(ctx context.Context, sc *social.Client, twee
 // retrying across accounts on failure — the acquire→call→ReportUsage loop
 // SearchWithSocial grew organically, generalized.
 func withSocialAccount[T any](ctx context.Context, sc *social.Client, op string, fn func(context.Context, *Client) (T, error)) (T, error) {
-	var lastErr error
+	var lastErr, bestErr error
 	var zero T
 	endpointFaults := 0
 	for attempt := range maxSocialRetries {
+		// The caller revoked the work: stop leasing and surface the ctx error.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return zero, ctxErr
+		}
 		res, err := tryWithAccount(ctx, sc, op, fn)
 		if err == nil {
 			return res, nil
 		}
-		if errors.Is(err, ErrNotFound) {
+		// A caller-side cancel/deadline is terminal: no retry can succeed on a
+		// dead ctx, and the error carries no verdict about any account.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			if !errors.Is(err, ctxErr) {
+				err = errors.Join(ctxErr, err)
+			}
+			return zero, err
+		}
+		if errors.Is(err, ErrNotFound) || errors.Is(err, ErrBadRequest) {
+			// Deterministic outcome: the resource is absent or the caller's
+			// input was rejected — every other lease answers identically, so a
+			// retry only burns go-social's rate budget.
 			return zero, err
 		}
 		if errors.Is(err, ErrEndpoint) {
@@ -172,19 +194,36 @@ func withSocialAccount[T any](ctx context.Context, sc *social.Client, op string,
 			if endpointFaults >= socialEndpointFaultStop {
 				// Two different leases hit the same endpoint fault: the
 				// request shape is dead for every account in the pool —
-				// more leases only burn the go-social rate budget.
+				// more leases only burn the go-social rate budget. An earlier
+				// non-endpoint failure is still the better answer for the
+				// caller, so keep it joined with this endpoint verdict.
+				if bestErr != nil {
+					return zero, errors.Join(bestErr, err)
+				}
 				return zero, err
 			}
 		} else {
 			endpointFaults = 0
 		}
 		lastErr = err
+		// Keep the most informative failure for the final error: a real
+		// per-account verdict (auth, rate-limit, transport) outranks endpoint
+		// faults and overloads, which say nothing about the credentials.
+		if !errors.Is(err, ErrEndpoint) && !errors.Is(err, ErrOverloaded) {
+			bestErr = err
+		}
 		slog.Warn("social request attempt failed, retrying",
 			slog.Int("attempt", attempt+1),
 			slog.Int("max", maxSocialRetries),
 			slog.Any("error", err))
 	}
-	return zero, fmt.Errorf("all %d accounts failed: %w", maxSocialRetries, lastErr)
+	// Surface the most informative failure, joined with the last one for
+	// context — errors.Is/As still reach both branches of the join.
+	retErr := lastErr
+	if bestErr != nil && bestErr != lastErr {
+		retErr = errors.Join(bestErr, lastErr)
+	}
+	return zero, fmt.Errorf("all %d accounts failed: %w", maxSocialRetries, retErr)
 }
 
 // tryWithAccount acquires one account, runs fn, and reports the result.
@@ -219,13 +258,17 @@ func tryWithAccount[T any](ctx context.Context, sc *social.Client, op string, fn
 	// this lease observed (op's endpoint when seen, else the latest endpoint),
 	// so the credential service can steer later leases by endpoint budget. It
 	// carries the window on success AND failure; with no header seen it sends
-	// the legacy body.
+	// the legacy body. The report runs on a detached, bounded ctx: the caller's
+	// ctx may already be done when a slow call returns, and dropping the
+	// verdict would silently mis-bill a healthy lease.
 	report := func(status string) {
 		var rl *social.RateLimit
 		if ep, st, ok := acc.latestRateLimit(op); ok {
 			rl = &social.RateLimit{Endpoint: ep, Limit: st.limit, Remaining: st.remaining, Reset: st.resetAt.Unix()}
 		}
-		_ = sc.ReportUsageWithRateLimit(ctx, "twitter", creds.ID, status, rl)
+		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), socialReportTimeout)
+		defer cancel()
+		_ = sc.ReportUsageWithRateLimit(rctx, "twitter", creds.ID, status, rl)
 	}
 
 	tw, err := NewClient(ClientConfig{
@@ -237,7 +280,9 @@ func tryWithAccount[T any](ctx context.Context, sc *social.Client, op string, fn
 		skipPoolGauge: true,
 	})
 	if err != nil {
-		report("auth_error")
+		if ctx.Err() == nil {
+			report("auth_error")
+		}
 		return zero, fmt.Errorf("create client for %s: %w", acc.Username, err)
 	}
 
@@ -248,6 +293,17 @@ func tryWithAccount[T any](ctx context.Context, sc *social.Client, op string, fn
 
 	res, err := fn(ctx, tw)
 	if err != nil {
+		// The caller revoked the work (its ctx is done). go-social's vocabulary has no neutral status and
+		// "auth_error" would poison a healthy lease in the shared pool: make
+		// NO report (the same rule as ErrOverloaded). Only the caller ctx's
+		// own Err() counts as a caller abort. An Is-match on the fn error would
+		// be wrong: net/http's Client.Timeout and go-stealth's per-request
+		// deadline also satisfy errors.Is(err, context.DeadlineExceeded), yet
+		// they are real network/proxy failures and fall through to the normal
+		// verdicts below.
+		if ctx.Err() != nil {
+			return zero, fmt.Errorf("%s: %w", acc.Username, err)
+		}
 		if errors.Is(err, ErrNotFound) {
 			// The account completed the request fine — the resource is just
 			// absent. Healthy account, deterministic miss: report success and
@@ -261,6 +317,15 @@ func tryWithAccount[T any](ctx context.Context, sc *social.Client, op string, fn
 			// credential is innocent. Report success (never auth_error, which
 			// would poison a healthy account in the shared pool) and let
 			// withSocialAccount rotate to the next lease inside its budget.
+			report("success")
+			return zero, fmt.Errorf("%s: %w", acc.Username, err)
+		}
+		if errors.Is(err, ErrBadRequest) {
+			// Deterministic caller error (#96): X rejected the caller's own
+			// input, the leased credential is innocent — report success (the
+			// request completed correctly) and propagate untouched so
+			// withSocialAccount does not burn another lease on an identical
+			// answer.
 			report("success")
 			return zero, fmt.Errorf("%s: %w", acc.Username, err)
 		}

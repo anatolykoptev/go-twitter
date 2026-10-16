@@ -70,7 +70,7 @@ func TestDoRequestWithBody_WarmFetchCarriesRequestCookie(t *testing.T) {
 
 	headers := twitterHeaders("tok-abc", "csrf-xyz", "")
 	// The real network leg dies on the dead proxy; only the header assembly matters.
-	_, _, _, _ = c.doRequestWithBody(c.client, "GET", "https://x.com/i/api/graphql/x/Op", headers, nil)
+	_, _, _, _ = c.doRequestWithBody(context.Background(), c.client, "GET", "https://x.com/i/api/graphql/x/Op", headers, nil)
 
 	got := backend.seen["https://x.com/tesla"]["cookie"]
 	if want := "auth_token=tok-abc; ct0=csrf-xyz"; got != want {
@@ -101,7 +101,7 @@ func TestNewClient_InitFailedAlertReachesPoolHookOnce(t *testing.T) {
 	}
 	for i := 0; i < 3; i++ {
 		h := twitterHeaders("", "", "") // guest: no auth_token
-		_, _, _, _ = c.doRequestWithBody(c.client, "GET", fmt.Sprintf("https://x.com/i/api/%d", i), h, nil)
+		_, _, _, _ = c.doRequestWithBody(context.Background(), c.client, "GET", fmt.Sprintf("https://x.com/i/api/%d", i), h, nil)
 	}
 	if got := alerts.Load(); got != 1 {
 		t.Fatalf("xtid.init_failed reached PoolAlertHook %d times, want exactly 1", got)
