@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.22](https://github.com/anatolykoptev/go-twitter/compare/v0.6.21...v0.6.22) (2026-10-16)
+
+
+### Features
+
+* **endpoints:** runtime queryId/feature refresh from X's own bundle ([#68](https://github.com/anatolykoptev/go-twitter/issues/68)) ([#104](https://github.com/anatolykoptev/go-twitter/issues/104)) ([1694834](https://github.com/anatolykoptev/go-twitter/commit/16948345ee32d9b0db9dbe9dcb251cfeca3bb109))
+
 ## [0.6.21](https://github.com/anatolykoptev/go-twitter/compare/v0.6.20...v0.6.21) (2026-10-16)
 
 
