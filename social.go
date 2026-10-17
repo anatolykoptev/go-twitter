@@ -27,6 +27,16 @@ const maxSocialRetries = 6
 // caller's cancellation.
 const socialReportTimeout = 10 * time.Second
 
+// socialAttemptTimeout bounds a single lease attempt inside the caller's
+// budget. Without it, one lease stalled mid-request (TLS accept-then-silent,
+// proxy hang — the tls-client timeout does not reliably fire during CONNECT)
+// burns the whole caller ctx and rotation never reaches a healthy account.
+// Sized above a cold call (~10s measured: fresh client + direct X request) so
+// healthy leases always finish, but small enough that a 30s caller budget
+// still fits a full second attempt. A var so tests can shorten it (the same
+// seam as testHookSocialClient).
+var socialAttemptTimeout = 20 * time.Second
+
 // socialEndpointFaultStop bounds the run of consecutive endpoint faults —
 // each on a DIFFERENT lease — a *WithSocial call tolerates before giving up.
 // An ErrEndpoint hit means the committed request shape is stale for EVERY
@@ -291,8 +301,21 @@ func tryWithAccount[T any](ctx context.Context, sc *social.Client, op string, fn
 		testHookSocialClient(tw)
 	}
 
-	res, err := fn(ctx, tw)
+	attemptCtx, attemptCancel := context.WithTimeout(ctx, socialAttemptTimeout)
+	res, err := fn(attemptCtx, tw)
+	// Read the deadline flag BEFORE cancel — attemptCancel would make
+	// attemptCtx.Err() report Canceled and hide whether the deadline fired.
+	attemptTimedOut := errors.Is(attemptCtx.Err(), context.DeadlineExceeded)
+	attemptCancel()
 	if err != nil {
+		// The attempt's own deadline fired while the caller's ctx still lives:
+		// a stalled transport, not an account verdict — no report (same rule as
+		// ErrOverloaded), rotate to the next lease. attemptCtx's deadline is the
+		// authority, NOT errors.Is(err, DeadlineExceeded): transport internals
+		// surface DeadlineExceeded on their own shorter timeouts too.
+		if ctx.Err() == nil && attemptTimedOut {
+			return zero, fmt.Errorf("%s: attempt timeout: %w", acc.Username, err)
+		}
 		// The caller revoked the work (its ctx is done). go-social's vocabulary has no neutral status and
 		// "auth_error" would poison a healthy lease in the shared pool: make
 		// NO report (the same rule as ErrOverloaded). Only the caller ctx's

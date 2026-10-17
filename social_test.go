@@ -182,3 +182,37 @@ func TestWithSocial_EndpointHints(t *testing.T) {
 		}
 	}
 }
+
+// A stalled lease must abort at socialAttemptTimeout and surface "attempt
+// timeout" — without the cap it would eat the caller's whole budget and block
+// rotation to a healthy account. No usage report may be posted for the stall
+// (transport fault, not an account verdict).
+func TestSocialAttemptTimeout_AbortsStalledAttempt(t *testing.T) {
+	orig := socialAttemptTimeout
+	socialAttemptTimeout = 50 * time.Millisecond
+	defer func() { socialAttemptTimeout = orig }()
+
+	var reports int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_ = json.NewEncoder(w).Encode(social.Credentials{
+				ID:          "acc-1",
+				Credentials: map[string]string{"username": "u", "auth_token": "a", "ct0": "c"},
+			})
+			return
+		}
+		reports++
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	sc := social.NewClient(srv.URL, "tok", "test")
+	_, err := tryWithAccount(context.Background(), sc, "UserTweets",
+		func(ctx context.Context, _ *Client) ([]*Tweet, error) {
+			<-ctx.Done() // stall until the attempt deadline fires
+			return nil, ctx.Err()
+		})
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "attempt timeout")
+	assert.Zero(t, reports, "stalled attempt must not post a usage report")
+}
