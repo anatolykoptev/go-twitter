@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.26](https://github.com/anatolykoptev/go-twitter/compare/v0.6.25...v0.6.26) (2026-10-17)
+
+
+### Bug Fixes
+
+* **social:** cap each lease attempt so stalls rotate ([#114](https://github.com/anatolykoptev/go-twitter/issues/114)) ([c4af9d7](https://github.com/anatolykoptev/go-twitter/commit/c4af9d77b4aafda6be8a39dd09950f2a0074bde2))
+
 ## [0.6.25](https://github.com/anatolykoptev/go-twitter/compare/v0.6.24...v0.6.25) (2026-10-17)
 
 
