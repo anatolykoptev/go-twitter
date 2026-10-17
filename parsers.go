@@ -509,6 +509,22 @@ type userResult struct {
 	ProfileBio struct {
 		Description string `json:"description"`
 	} `json:"profile_bio"`
+	// RelationshipCounts is the post-migration followers/following location.
+	// The 2026-10 schema rollout drops `legacy` ENTIRELY for some requests
+	// (verified by live capture 2026-10-17: elonmusk via UserByScreenName
+	// arrived with core/avatar/profile_bio populated and no legacy key at
+	// all — a hard cut, not the hybrid in-progress shape seen for core.*).
+	// Pointer so presence (not value) selects the source: a genuine zero
+	// count must not fall back to a stale legacy value.
+	RelationshipCounts *struct {
+		Followers int `json:"followers"`
+		Following int `json:"following"`
+	} `json:"relationship_counts"`
+	// TweetCounts is the post-migration statuses_count location
+	// (media_tweets also lives here but has no TwitterUser field).
+	TweetCounts *struct {
+		Tweets int `json:"tweets"`
+	} `json:"tweet_counts"`
 	Legacy struct {
 		Name            string `json:"name"`
 		ScreenName      string `json:"screen_name"`
@@ -572,6 +588,40 @@ func (r userResult) bio() string {
 // pre-migration legacy.verified.
 func (r userResult) isVerified() bool {
 	return r.IsBlueVerified || r.Verification.Verified || r.Legacy.Verified
+}
+
+// followers returns the follower count, preferring the post-migration
+// relationship_counts.followers when that object is present and falling back
+// to legacy.followers_count for the still-served old shape.
+func (r userResult) followers() int {
+	if r.RelationshipCounts != nil {
+		return r.RelationshipCounts.Followers
+	}
+	return r.Legacy.FollowersCount
+}
+
+// following returns the friends count from relationship_counts.following when
+// present, else legacy.friends_count.
+func (r userResult) following() int {
+	if r.RelationshipCounts != nil {
+		return r.RelationshipCounts.Following
+	}
+	return r.Legacy.FriendsCount
+}
+
+// tweets returns the statuses count from tweet_counts.tweets when present,
+// else legacy.statuses_count.
+func (r userResult) tweets() int {
+	if r.TweetCounts != nil {
+		return r.TweetCounts.Tweets
+	}
+	return r.Legacy.StatusesCount
+}
+
+// listed stays legacy-only: no post-migration listed_count location has been
+// observed in live captures (the no-legacy shape simply drops the field).
+func (r userResult) listed() int {
+	return r.Legacy.ListedCount
 }
 
 type tweetResult struct {
@@ -711,10 +761,10 @@ func parseUserResult(r userResult) (*TwitterUser, error) {
 		Handle:      r.screenName(),
 		DisplayName: r.displayName(),
 		Bio:         bio,
-		Followers:   r.Legacy.FollowersCount,
-		Following:   r.Legacy.FriendsCount,
-		TweetCount:  r.Legacy.StatusesCount,
-		ListedCount: r.Legacy.ListedCount,
+		Followers:   r.followers(),
+		Following:   r.following(),
+		TweetCount:  r.tweets(),
+		ListedCount: r.listed(),
 		CreatedAt:   createdAt,
 		IsVerified:  r.isVerified(),
 		HasAvatar:   avatarURL != "" && !strings.Contains(avatarURL, "default_profile"),
