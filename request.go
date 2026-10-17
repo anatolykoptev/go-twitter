@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -15,6 +17,23 @@ import (
 )
 
 const maxRetries = 3
+
+// dumpDir, when set via TWITTER_DUMP_DIR, makes every successful X response
+// land in <dir>/<endpoint>.json for upstream-shape forensics — the ground
+// truth when a parse silently zeroes fields after a server-side migration.
+var dumpDir = os.Getenv("TWITTER_DUMP_DIR")
+
+func dumpBody(endpoint string, body []byte) {
+	if dumpDir == "" {
+		return
+	}
+	if err := os.MkdirAll(dumpDir, 0o755); err != nil {
+		return
+	}
+	// Per-endpoint single file, last-writer-wins: the goal is a current
+	// specimen, not a log.
+	_ = os.WriteFile(filepath.Join(dumpDir, endpoint+".json"), body, 0o600)
+}
 
 // doGET executes a GET request with multi-account retry, ct0 rotation, relogin,
 // and guest-token fallback.
@@ -530,6 +549,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 			acc.RecordSuccess()
 			slog.Debug("errors with usable data, treating as success",
 				slog.String("endpoint", endpoint), slog.Int("class", int(errClass)))
+			dumpBody(endpoint, body)
 			return body, respHdrs, nil
 		}
 
@@ -542,6 +562,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 			}
 			c.recordAPICall(endpoint, true, false)
 			acc.RecordSuccess()
+			dumpBody(endpoint, body)
 			return body, respHdrs, nil
 
 		case errCSRF:

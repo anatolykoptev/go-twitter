@@ -253,3 +253,105 @@ func TestParseUserTweets_CoreAuthorShape(t *testing.T) {
 		t.Fatalf("AuthorID: want 295218901, got %q", tw.AuthorID)
 	}
 }
+
+// TestParseUserByScreenName_NoLegacyShape grounds the parser against a REAL,
+// live-captured UserByScreenName response (elonmusk, 2026-10-17) in the
+// post-2026-10 schema where X drops the `legacy` key ENTIRELY — a hard cut,
+// not the hybrid shape seen during the core.* migration. Follower/following/
+// tweet counts move to relationship_counts.* and tweet_counts.tweets; with a
+// legacy-only parser all three silently return 0 while name/bio/avatar keep
+// working — the exact production symptom (profile counters zeroed through the
+// go-social shared read path).
+//
+// Fixture provenance: testdata/ubsn_elonmusk_nolegacy.json is the verbatim
+// body returned by GetUserByScreenName through the deployed go-social shared
+// client on 2026-10-17.
+func TestParseUserByScreenName_NoLegacyShape(t *testing.T) {
+	body, err := os.ReadFile("testdata/ubsn_elonmusk_nolegacy.json")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+
+	user, err := parseUserByScreenName(body)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	if user.ID != "44196397" {
+		t.Fatalf("ID: want 44196397, got %q", user.ID)
+	}
+	if user.Handle != "elonmusk" {
+		t.Fatalf("Handle: want elonmusk, got %q", user.Handle)
+	}
+	if user.DisplayName != "Elon Musk" {
+		t.Fatalf("DisplayName: want Elon Musk, got %q", user.DisplayName)
+	}
+	// The bug under test: counts live in relationship_counts / tweet_counts,
+	// not legacy. A legacy-only read yields exactly 0 — assert the captured
+	// real values, not just non-zero.
+	if user.Followers != 241501933 {
+		t.Fatalf("Followers: want 241501933, got %d", user.Followers)
+	}
+	if user.Following != 1420 {
+		t.Fatalf("Following: want 1420, got %d", user.Following)
+	}
+	if user.TweetCount != 110396 {
+		t.Fatalf("TweetCount: want 110396, got %d", user.TweetCount)
+	}
+	// listed_count has no observed post-migration location — the field is
+	// simply absent in this shape; assert 0 rather than a wrong-source value.
+	if user.ListedCount != 0 {
+		t.Fatalf("ListedCount: want 0 (no new-shape location), got %d", user.ListedCount)
+	}
+	if !user.IsVerified {
+		t.Fatal("IsVerified: want true (is_blue_verified), got false")
+	}
+	if !user.HasAvatar {
+		t.Fatal("HasAvatar: want true from avatar.image_url, got false")
+	}
+	if !user.HasBio {
+		t.Fatal("HasBio: want true, got false")
+	}
+}
+
+// TestParseUserResult_RelationshipCountsPreferred proves presence (not value)
+// selects the source: when relationship_counts is present alongside legacy,
+// the new location is authoritative even if the legacy values differ — a
+// migration-in-progress hybrid must not read stale legacy counters.
+func TestParseUserResult_RelationshipCountsPreferred(t *testing.T) {
+	body := []byte(`{
+		"data": {
+			"user": {
+				"result": {
+					"__typename": "User",
+					"id": "VXNlcjoxMDI=",
+					"rest_id": "102",
+					"core": {"name": "Hybrid", "screen_name": "hybrid"},
+					"relationship_counts": {"followers": 10, "following": 0},
+					"tweet_counts": {"tweets": 3},
+					"legacy": {"followers_count": 999, "friends_count": 888, "statuses_count": 777, "listed_count": 5},
+					"is_blue_verified": false
+				}
+			}
+		}
+	}`)
+
+	user, err := parseUserByScreenName(body)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if user.Followers != 10 {
+		t.Fatalf("Followers: want 10 from relationship_counts, got %d", user.Followers)
+	}
+	// A genuine zero in the new location must not fall back to legacy's 888.
+	if user.Following != 0 {
+		t.Fatalf("Following: want 0 from relationship_counts, got %d", user.Following)
+	}
+	if user.TweetCount != 3 {
+		t.Fatalf("TweetCount: want 3 from tweet_counts, got %d", user.TweetCount)
+	}
+	// listed_count is legacy-only by design.
+	if user.ListedCount != 5 {
+		t.Fatalf("ListedCount: want 5 from legacy (only location), got %d", user.ListedCount)
+	}
+}
