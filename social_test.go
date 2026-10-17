@@ -143,3 +143,42 @@ func TestWithSocial_NotFoundNoRetry(t *testing.T) {
 	assert.Equal(t, 1, acquires, "not-found must not retry across accounts")
 	assert.Equal(t, "success", lastReport, "not-found is a healthy-account outcome")
 }
+
+// Each helper must send its GraphQL op name as the ?endpoint= acquire hint —
+// go-social steers leases by per-endpoint X rate-limit data keyed on that name.
+// A helper that forgets the hint silently degrades to global-cap accounting.
+func TestWithSocial_EndpointHints(t *testing.T) {
+	var gotEndpoints []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			gotEndpoints = append(gotEndpoints, r.URL.Query().Get("endpoint"))
+			w.WriteHeader(http.StatusServiceUnavailable) // fail acquire: helper returns before any call
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	sc := social.NewClient(srv.URL, "tok", "test")
+	ctx := context.Background()
+
+	calls := []struct {
+		name string
+		want string
+		fn   func()
+	}{
+		{"GetUserTweetsByID", "UserTweets", func() { _, _ = GetUserTweetsByIDWithSocial(ctx, sc, "42", 5) }},
+		{"GetFollowing", "Following", func() { _, _ = GetFollowingWithSocial(ctx, sc, "42", 5) }},
+		{"GetFollowers", "Followers", func() { _, _ = GetFollowersWithSocial(ctx, sc, "42", 5) }},
+		{"GetRetweeters", "Retweeters", func() { _, _ = GetRetweetersWithSocial(ctx, sc, "99", 5) }},
+		{"GetTweetByID", "TweetDetail", func() { _, _ = GetTweetByIDWithSocial(ctx, sc, "99") }},
+	}
+	for _, c := range calls {
+		gotEndpoints = nil
+		c.fn()
+		require.NotEmpty(t, gotEndpoints, c.name)
+		for _, ep := range gotEndpoints {
+			assert.Equal(t, c.want, ep, c.name)
+		}
+	}
+}
