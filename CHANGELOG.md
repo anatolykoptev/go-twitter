@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.27](https://github.com/anatolykoptev/go-twitter/compare/v0.6.26...v0.6.27) (2026-10-17)
+
+
+### Bug Fixes
+
+* **parsers:** read follower/tweet counts from post-legacy locations ([#117](https://github.com/anatolykoptev/go-twitter/issues/117)) ([d5ce58f](https://github.com/anatolykoptev/go-twitter/commit/d5ce58fd3eb29e0ac2bbdf3d5e16472f54822ec8))
+
 ## [0.6.26](https://github.com/anatolykoptev/go-twitter/compare/v0.6.25...v0.6.26) (2026-10-17)
 
 
