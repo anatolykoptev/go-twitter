@@ -346,3 +346,40 @@ func tryWithAccount[T any](ctx context.Context, sc *social.Client, op string, fn
 	report("success")
 	return res, nil
 }
+
+// GetUserTweetsByIDWithSocial fetches recent tweets for a numeric user ID —
+// the caller already resolved the handle, so no UserByScreenName lookup burns
+// the lease's budget.
+func GetUserTweetsByIDWithSocial(ctx context.Context, sc *social.Client, userID string, limit int) ([]*Tweet, error) {
+	return withSocialAccount(ctx, sc, "UserTweets", func(ctx context.Context, tw *Client) ([]*Tweet, error) {
+		return tw.GetUserTweets(ctx, userID, limit)
+	})
+}
+
+// GetFollowingWithSocial lists the accounts userID follows.
+func GetFollowingWithSocial(ctx context.Context, sc *social.Client, userID string, limit int) ([]*TwitterUser, error) {
+	return withSocialAccount(ctx, sc, "Following", func(ctx context.Context, tw *Client) ([]*TwitterUser, error) {
+		return tw.GetFollowing(ctx, userID, limit)
+	})
+}
+
+// GetFollowersWithSocial lists the accounts following userID.
+func GetFollowersWithSocial(ctx context.Context, sc *social.Client, userID string, limit int) ([]*TwitterUser, error) {
+	return withSocialAccount(ctx, sc, "Followers", func(ctx context.Context, tw *Client) ([]*TwitterUser, error) {
+		return tw.GetFollowers(ctx, userID, limit)
+	})
+}
+
+// GetRetweetersWithSocial lists the accounts that retweeted tweetID.
+func GetRetweetersWithSocial(ctx context.Context, sc *social.Client, tweetID string, limit int) ([]*TwitterUser, error) {
+	return withSocialAccount(ctx, sc, "Retweeters", func(ctx context.Context, tw *Client) ([]*TwitterUser, error) {
+		return tw.GetRetweeters(ctx, tweetID, limit)
+	})
+}
+
+// GetTweetByIDWithSocial fetches a single tweet via the TweetDetail page.
+func GetTweetByIDWithSocial(ctx context.Context, sc *social.Client, tweetID string) (*Tweet, error) {
+	return withSocialAccount(ctx, sc, "TweetDetail", func(ctx context.Context, tw *Client) (*Tweet, error) {
+		return tw.GetTweetByID(ctx, tweetID)
+	})
+}
