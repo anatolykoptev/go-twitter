@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.6.25](https://github.com/anatolykoptev/go-twitter/compare/v0.6.24...v0.6.25) (2026-10-17)
+
+
+### Features
+
+* **social:** WithSocial helpers for remaining read ops ([#112](https://github.com/anatolykoptev/go-twitter/issues/112)) ([dceb5ff](https://github.com/anatolykoptev/go-twitter/commit/dceb5ff45b6742300fd0c3f65f3f38d348f0ccf4))
+
 ## [0.6.24](https://github.com/anatolykoptev/go-twitter/compare/v0.6.23...v0.6.24) (2026-10-16)
 
 
