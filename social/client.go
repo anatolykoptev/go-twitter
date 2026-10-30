@@ -4,6 +4,7 @@ package social
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -76,11 +77,26 @@ func (c *Client) AcquireAccountFor(ctx context.Context, platform, endpoint strin
 	return &creds, nil
 }
 
+// Sentinel errors of AcquireNamedAccount, matched with errors.Is.
+var (
+	// ErrAccountNotFound: go-social does not know the requested username (404).
+	ErrAccountNotFound = errors.New("go-social: account not found")
+	// ErrAccountUnavailable: the account exists but cannot be leased now, or the
+	// name is ambiguous (409).
+	ErrAccountUnavailable = errors.New("go-social: account unavailable or ambiguous")
+	// ErrAccountMismatch: a 200 answered with a different account than requested.
+	ErrAccountMismatch = errors.New("go-social: leased a different account than requested")
+)
+
 // AcquireNamedAccount leases exactly the account named by username: the
-// service pins the lease (?username=) and never substitutes another — 404 for
-// unknown, 409 for unavailable/ambiguous. A 200 whose returned username does
-// not match the requested one (case-insensitive) is an error: silently holding
-// a different account would run the caller's work under the wrong identity.
+// service pins the lease (?username=) and never substitutes another — 404
+// (ErrAccountNotFound) for unknown, 409 (ErrAccountUnavailable) for
+// unavailable/ambiguous. A 200 whose returned username does not match the
+// requested one (case-insensitive) is ErrAccountMismatch: silently holding a
+// different account would run the caller's work under the wrong identity. The
+// wrongly leased account is not reported back: the usage API has no neutral
+// status (any verdict would mis-bill a healthy account), so that lease simply
+// runs out at its expires_in.
 func (c *Client) AcquireNamedAccount(ctx context.Context, platform, username string) (*Credentials, error) {
 	u := fmt.Sprintf("%s/%s/account?%s", c.baseURL, platform, url.Values{"username": {username}}.Encode())
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
@@ -96,7 +112,13 @@ func (c *Client) AcquireNamedAccount(ctx context.Context, platform, username str
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusNotFound:
+		return nil, fmt.Errorf("go-social returned %d for %q: %w", resp.StatusCode, username, ErrAccountNotFound)
+	case http.StatusConflict:
+		return nil, fmt.Errorf("go-social returned %d for %q: %w", resp.StatusCode, username, ErrAccountUnavailable)
+	default:
 		return nil, fmt.Errorf("go-social returned %d", resp.StatusCode)
 	}
 
@@ -105,7 +127,7 @@ func (c *Client) AcquireNamedAccount(ctx context.Context, platform, username str
 		return nil, fmt.Errorf("decode go-social response: %w", err)
 	}
 	if got := creds.Credentials["username"]; !strings.EqualFold(got, username) {
-		return nil, fmt.Errorf("go-social leased %q, want %q", got, username)
+		return nil, fmt.Errorf("go-social leased %q, want %q: %w", got, username, ErrAccountMismatch)
 	}
 	return &creds, nil
 }

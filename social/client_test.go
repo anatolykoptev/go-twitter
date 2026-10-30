@@ -71,16 +71,29 @@ func TestAcquireNamedAccount_Mismatch(t *testing.T) {
 	c := NewClient(srv.URL, "tok", "consumer")
 	_, err := c.AcquireNamedAccount(context.Background(), "twitter", "ExampleUser")
 	assert.ErrorContains(t, err, `leased "SomeoneElse"`)
+	assert.ErrorIs(t, err, ErrAccountMismatch)
 }
 
 func TestAcquireNamedAccount_Statuses(t *testing.T) {
-	for _, code := range []int{http.StatusNotFound, http.StatusConflict} {
+	for code, want := range map[int]error{
+		http.StatusNotFound:           ErrAccountNotFound,
+		http.StatusConflict:           ErrAccountUnavailable,
+		http.StatusServiceUnavailable: nil,
+	} {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			w.WriteHeader(code)
 		}))
 		c := NewClient(srv.URL, "tok", "consumer")
 		_, err := c.AcquireNamedAccount(context.Background(), "twitter", "OtherUser")
 		assert.ErrorContains(t, err, fmt.Sprintf("returned %d", code))
+		if want != nil {
+			assert.ErrorIs(t, err, want, "status %d", code)
+		}
+		for _, other := range []error{ErrAccountNotFound, ErrAccountUnavailable, ErrAccountMismatch} {
+			if other != want {
+				assert.NotErrorIs(t, err, other, "status %d must not match %v", code, other)
+			}
+		}
 		srv.Close()
 	}
 }
