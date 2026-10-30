@@ -127,7 +127,7 @@ func (c *Client) AcquireNamedAccount(ctx context.Context, platform, username str
 		return nil, fmt.Errorf("decode go-social response: %w", err)
 	}
 	if got := creds.Credentials["username"]; !strings.EqualFold(got, username) {
-		return nil, fmt.Errorf("go-social leased %q, want %q: %w", got, username, ErrAccountMismatch)
+		return nil, fmt.Errorf("go-social leased a different account than %q: %w", username, ErrAccountMismatch)
 	}
 	return &creds, nil
 }

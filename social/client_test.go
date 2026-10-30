@@ -70,7 +70,8 @@ func TestAcquireNamedAccount_Mismatch(t *testing.T) {
 
 	c := NewClient(srv.URL, "tok", "consumer")
 	_, err := c.AcquireNamedAccount(context.Background(), "twitter", "ExampleUser")
-	assert.ErrorContains(t, err, `leased "SomeoneElse"`)
+	assert.NotContains(t, err.Error(), "SomeoneElse", "the other lessee must not leak into the error")
+	assert.ErrorContains(t, err, `than "ExampleUser"`)
 	assert.ErrorIs(t, err, ErrAccountMismatch)
 }
 

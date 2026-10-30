@@ -228,7 +228,7 @@ per-account pacer (`WithAccountPace`, default 0.8 s + random) still spaces conse
 account. To restore the old delay: `twitter.NewClient(cfg, twitter.WithRequestJitter(500*time.Millisecond, 2500*time.Millisecond))`.
 Writes and media uploads keep their own jitter either way.
 The `*WithSocial` helpers build a client per call, so they share one pacer per account across calls
-(consecutive calls that lease the same account are spaced by the pace) and take the same options as a
+(within one process, and per pace config: consecutive calls that lease the same account with the same pace are spaced by it; other processes and other pace settings do not share state) and take the same options as a
 trailing argument, e.g. `twitter.GetUserWithSocial(ctx, sc, "handle", twitter.WithRequestJitter(500*time.Millisecond, 2500*time.Millisecond))`.
 
 ## Configuration
