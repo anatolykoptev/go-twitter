@@ -162,7 +162,7 @@ func TestDeviceNotifications(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			var restN, gqlN int
-			got, err := deviceNotifications(tc.ctx, 20, tc.rest(&restN), tc.gql(&gqlN))
+			got, err := deviceNotifications(tc.ctx, 20, tc.rest(&restN), tc.gql(&gqlN), nil)
 			if tc.wantErr {
 				require.Error(t, err)
 			} else {
@@ -176,13 +176,13 @@ func TestDeviceNotifications(t *testing.T) {
 
 	t.Run("cancelled ctx surfaces context.Canceled", func(t *testing.T) {
 		var n int
-		_, err := deviceNotifications(cancelled, 20, func(ctx context.Context, _ int) ([]*Tweet, error) { return nil, ctx.Err() }, src(gq, nil, &n))
+		_, err := deviceNotifications(cancelled, 20, func(ctx context.Context, _ int) ([]*Tweet, error) { return nil, ctx.Err() }, src(gq, nil, &n), nil)
 		require.ErrorIs(t, err, context.Canceled)
 		assert.Zero(t, n)
 	})
 	t.Run("both sources broken keeps both errors", func(t *testing.T) {
 		var n int
-		_, err := deviceNotifications(context.Background(), 20, src(nil, gone(404), &n), src(nil, boom, &n))
+		_, err := deviceNotifications(context.Background(), 20, src(nil, gone(404), &n), src(nil, boom, &n), nil)
 		require.ErrorIs(t, err, ErrEndpoint)
 		require.ErrorIs(t, err, boom)
 	})
@@ -307,4 +307,107 @@ func TestParseTweetNotifications_SkipsPromoted(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, tweets, 1)
 	assert.Equal(t, "1985000000000000002", tweets[0].ID)
+}
+
+func entryJSON(id string, extra string) string {
+	return `{"entryId": "tweet-` + id + `"` + extra + `, "content": {"item": {"content": {"tweet": {"id": "` + id + `"}}}}}`
+}
+
+const dfUsers = `"users": {"11": {"screen_name": "belled_a"}, "22": {"screen_name": "stranger"}}`
+
+// A present timeline is authoritative even when it lists nothing usable: a
+// promoted-only timeline must yield no tweets (neither the ad nor the stranger's
+// retweet original that rides along in globalObjects.tweets).
+//
+// Mutation: devicefollow.go parseDeviceFollow, replace `if hasTimeline {` of the
+// listed-filter with `if len(listed) > 0 {` => this test goes RED
+// (`Should be empty, but was [...]`).
+func TestParseDeviceFollow_PromotedOnlyTimelineYieldsNothing(t *testing.T) {
+	body := []byte(`{"globalObjects": {` + dfUsers + `, "tweets": {
+	  "1985000000000000007": {"id_str": "1985000000000000007", "full_text": "ad", "user_id_str": "22"},
+	  "1985000000000000009": {"id_str": "1985000000000000009", "full_text": "rt original", "user_id_str": "22"}}},
+	  "timeline": {"instructions": [{"addEntries": {"entries": [
+	    {"entryId": "promoted-tweet-1985000000000000007", "content": {"item": {"content": {"tweet": {"id": "1985000000000000007"}}}}}]}}]}}`)
+	tweets, err := parseDeviceFollow(body)
+	require.NoError(t, err)
+	assert.Empty(t, tweets)
+
+	// An empty timeline object is still a timeline.
+	tweets, err = parseDeviceFollow([]byte(`{"globalObjects": {"tweets": {"1": {"id_str": "1", "user_id_str": "22"}}}, "timeline": {"instructions": []}}`))
+	require.NoError(t, err)
+	assert.Empty(t, tweets)
+}
+
+// Tweets listed through timelineModule items and replaceEntry are feed items too.
+func TestParseDeviceFollow_ModuleItemsAndReplaceEntryKept(t *testing.T) {
+	body := []byte(`{"globalObjects": {` + dfUsers + `, "tweets": {
+	  "1985000000000000001": {"id_str": "1985000000000000001", "user_id_str": "11"},
+	  "1985000000000000002": {"id_str": "1985000000000000002", "user_id_str": "11"},
+	  "1985000000000000003": {"id_str": "1985000000000000003", "user_id_str": "11"},
+	  "1985000000000000009": {"id_str": "1985000000000000009", "user_id_str": "22"}}},
+	  "timeline": {"instructions": [
+	    {"addEntries": {"entries": [
+	      ` + entryJSON("1985000000000000001", "") + `,
+	      {"entryId": "module-1", "content": {"timelineModule": {"items": [
+	        {"entryId": "m-1", "item": {"item": {"content": {"tweet": {"id": "1985000000000000002"}}}}}]}}}]}},
+	    {"replaceEntry": {"entryIdToReplace": "x", "entry": ` + entryJSON("1985000000000000003", "") + `}}]}}`)
+	tweets, err := parseDeviceFollow(body)
+	require.NoError(t, err)
+	var ids []string
+	for _, tw := range tweets {
+		ids = append(ids, tw.ID)
+	}
+	assert.Equal(t, []string{"1985000000000000003", "1985000000000000002", "1985000000000000001"}, ids)
+}
+
+// Without any timeline there is nothing to filter by: keep every tweet, count it.
+func TestParseDeviceFollow_NoTimelineKeepsAllAndCounts(t *testing.T) {
+	before := deviceFollowNoTimeline.Load()
+	tweets, err := parseDeviceFollow([]byte(`{"globalObjects": {"tweets": {"1985000000000000001": {"id_str": "1985000000000000001", "user_id_str": "11"}}}}`))
+	require.NoError(t, err)
+	assert.Len(t, tweets, 1)
+	assert.Equal(t, before+1, deviceFollowNoTimeline.Load())
+}
+
+// Entries carrying promotedMetadata are ads whatever their entryId says.
+func TestPromotedMetadataSkipped(t *testing.T) {
+	body := []byte(`{"globalObjects": {"tweets": {
+	  "1985000000000000001": {"id_str": "1985000000000000001", "user_id_str": "11"},
+	  "1985000000000000002": {"id_str": "1985000000000000002", "user_id_str": "11"}}},
+	  "timeline": {"instructions": [{"addEntries": {"entries": [
+	    ` + entryJSON("1985000000000000001", "") + `,
+	    {"entryId": "tweet-1985000000000000002", "content": {"item": {"content": {"tweet": {"id": "1985000000000000002", "promotedMetadata": {"advertiser_id": "1"}}}}}}]}}]}}`)
+	tweets, err := parseDeviceFollow(body)
+	require.NoError(t, err)
+	require.Len(t, tweets, 1)
+	assert.Equal(t, "1985000000000000001", tweets[0].ID)
+
+	fx, err := os.ReadFile("testdata/tweet_notifications.json")
+	require.NoError(t, err)
+	var doc map[string]any
+	require.NoError(t, json.Unmarshal(fx, &doc))
+	ents := doc["data"].(map[string]any)["viewer_v2"].(map[string]any)["user_results"].(map[string]any)["result"].(map[string]any)["tweet_notification_timeline"].(map[string]any)["timeline"].(map[string]any)["instructions"].([]any)[0].(map[string]any)["entries"].([]any)
+	ents[1].(map[string]any)["content"].(map[string]any)["promotedMetadata"] = map[string]any{"advertiser_id": "1"}
+	out, err := json.Marshal(doc)
+	require.NoError(t, err)
+	xt, _, err := parseTweetNotifications(out)
+	require.NoError(t, err)
+	require.Len(t, xt, 1)
+	assert.Equal(t, "1985000000000000002", xt[0].ID)
+}
+
+func TestWarnLimiter(t *testing.T) {
+	now := time.Unix(1000, 0)
+	w := &warnLimiter{every: time.Minute, now: func() time.Time { return now }}
+	ok, n := w.allow()
+	assert.True(t, ok)
+	assert.Zero(t, n)
+	for i := 0; i < 3; i++ {
+		ok, _ = w.allow()
+		assert.False(t, ok)
+	}
+	now = now.Add(61 * time.Second)
+	ok, n = w.allow()
+	assert.True(t, ok)
+	assert.Equal(t, 3, n, "suppressed repeats are reported with the next emission")
 }

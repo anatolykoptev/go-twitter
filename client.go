@@ -38,6 +38,7 @@ type Client struct {
 	warmDoerOverride     warmDoer                                         // test seam: replaces the account client for xtid warm-page fetches
 	qid                  *qidRefresher                                    // nil = the process-wide queryId refresher; only tests set it
 	requestJitter        *stealth.Jitter                                  // pre-request jitter for pool requests (opt-in); nil = none
+	deviceWarn           warnLimiter                                      // rate-limits the both-sources-failed warning of GetDeviceNotifications
 	jitterSleep          func(ctx context.Context, d time.Duration) error // test seam: replaces the real sleep in preRequestJitter
 
 	mu                sync.Mutex

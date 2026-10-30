@@ -10,6 +10,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -121,13 +123,23 @@ func tweetNotificationsURL(count int) (string, error) {
 // too, both sources are broken and the joined error is returned; a cancelled or
 // expired ctx is always returned as is.
 func (c *Client) GetDeviceNotifications(ctx context.Context, count int) ([]*Tweet, error) {
-	return deviceNotifications(ctx, count, c.GetDeviceFollowTweets, c.GetTweetNotifications)
+	return deviceNotifications(ctx, count, c.GetDeviceFollowTweets, c.GetTweetNotifications, c.warnBothFailed)
+}
+
+// warnBothFailed logs the "both sources broken" condition at most once a
+// minute per client, with the number of suppressed repeats.
+func (c *Client) warnBothFailed(restErr, gqlErr error) {
+	if ok, n := c.deviceWarn.allow(); ok {
+		slog.Warn("device notifications: REST dead and GraphQL fallback failed",
+			slog.String("op", tweetNotificationsOp), slog.Any("rest_error", restErr), slog.Any("error", gqlErr),
+			slog.Int("suppressed", n))
+	}
 }
 
 type feedFetcher func(ctx context.Context, count int) ([]*Tweet, error)
 
 // deviceNotifications is GetDeviceNotifications with the two sources injected.
-func deviceNotifications(ctx context.Context, count int, rest, gql feedFetcher) ([]*Tweet, error) {
+func deviceNotifications(ctx context.Context, count int, rest, gql feedFetcher, onBothFailed func(restErr, gqlErr error)) ([]*Tweet, error) {
 	tweets, err := rest(ctx, count)
 	if err == nil {
 		return tweets, nil
@@ -142,8 +154,9 @@ func deviceNotifications(ctx context.Context, count int, rest, gql feedFetcher) 
 	}
 	g, gerr := gql(ctx, count)
 	if gerr != nil {
-		slog.Warn("device notifications: REST dead and GraphQL fallback failed",
-			slog.String("op", tweetNotificationsOp), slog.Any("rest_error", err), slog.Any("error", gerr))
+		if onBothFailed != nil {
+			onBothFailed(err, gerr)
+		}
 		return nil, errors.Join(err, gerr)
 	}
 	return g, nil
@@ -172,25 +185,8 @@ func parseDeviceFollow(body []byte) ([]*Tweet, error) {
 				Name       string `json:"name"`
 			} `json:"users"`
 		} `json:"globalObjects"`
-		Timeline struct {
-			Instructions []struct {
-				AddEntries struct {
-					Entries []struct {
-						EntryID string `json:"entryId"`
-						Content struct {
-							Item struct {
-								Content struct {
-									Tweet struct {
-										ID string `json:"id"`
-									} `json:"tweet"`
-								} `json:"content"`
-							} `json:"item"`
-						} `json:"content"`
-					} `json:"entries"`
-				} `json:"addEntries"`
-			} `json:"instructions"`
-		} `json:"timeline"`
-		Errors []struct {
+		Timeline json.RawMessage `json:"timeline"`
+		Errors   []struct {
 			Code    int    `json:"code"`
 			Message string `json:"message"`
 		} `json:"errors"`
@@ -201,23 +197,26 @@ func parseDeviceFollow(body []byte) ([]*Tweet, error) {
 	if len(raw.Errors) > 0 {
 		return nil, fmt.Errorf("twitter API error %d: %s", raw.Errors[0].Code, raw.Errors[0].Message)
 	}
+	// A present timeline is authoritative, even when it lists nothing (for
+	// example only promoted entries): the tweets outside it are references, not
+	// feed items. Without any timeline there is nothing to filter by.
+	hasTimeline := len(raw.Timeline) > 0 && string(raw.Timeline) != "null"
 	listed := map[string]struct{}{}
-	for _, ins := range raw.Timeline.Instructions {
-		for _, e := range ins.AddEntries.Entries {
-			if strings.HasPrefix(e.EntryID, "promoted") {
-				continue
-			}
-			if id := e.Content.Item.Content.Tweet.ID; id != "" {
-				listed[id] = struct{}{}
-			}
+	if hasTimeline {
+		var tl any
+		if err := json.Unmarshal(raw.Timeline, &tl); err != nil {
+			return nil, fmt.Errorf("unmarshal device_follow timeline: %w", err)
 		}
+		collectListedTweets(tl, listed)
+	} else {
+		noteDeviceFollowWithoutTimeline()
 	}
 	tweets := make([]*Tweet, 0, len(raw.GlobalObjects.Tweets))
 	for key, lt := range raw.GlobalObjects.Tweets {
 		if lt.IDStr == "" {
 			continue
 		}
-		if len(listed) > 0 {
+		if hasTimeline {
 			if _, ok := listed[lt.IDStr]; !ok {
 				if _, ok := listed[key]; !ok {
 					continue
@@ -244,6 +243,82 @@ func parseDeviceFollow(body []byte) ([]*Tweet, error) {
 	sortNewestFirst(tweets)
 	return tweets, nil
 }
+
+// collectListedTweets gathers the ids of tweets the timeline lists, in ANY
+// entry shape (addEntries entries, timelineModule items, replaceEntry), by
+// walking the decoded JSON for {"tweet": {"id": ...}} items. Promoted content is
+// skipped: an entry whose entryId starts with "promoted", or any object carrying
+// promotedMetadata, contributes nothing.
+func collectListedTweets(v any, out map[string]struct{}) {
+	switch n := v.(type) {
+	case map[string]any:
+		if id, _ := n["entryId"].(string); strings.HasPrefix(id, "promoted") {
+			return
+		}
+		if pm, ok := n["promotedMetadata"]; ok && pm != nil {
+			return
+		}
+		if t, ok := n["tweet"].(map[string]any); ok {
+			if id, _ := t["id"].(string); id != "" {
+				if pm, ok := t["promotedMetadata"]; !ok || pm == nil {
+					out[id] = struct{}{}
+				}
+			}
+		}
+		for _, c := range n {
+			collectListedTweets(c, out)
+		}
+	case []any:
+		for _, c := range n {
+			collectListedTweets(c, out)
+		}
+	}
+}
+
+var (
+	deviceFollowNoTimeline     atomic.Int64
+	deviceFollowNoTimelineOnce sync.Once
+)
+
+// noteDeviceFollowWithoutTimeline counts responses that carry no timeline (so
+// the listed-only filter could not run) and logs the first one.
+func noteDeviceFollowWithoutTimeline() {
+	deviceFollowNoTimeline.Add(1)
+	deviceFollowNoTimelineOnce.Do(func() {
+		slog.Warn("device_follow: response has no timeline; cannot tell feed items from referenced tweets, returning all")
+	})
+}
+
+// warnLimiter lets a repeating warning through at most once per interval and
+// reports how many were suppressed meanwhile. The zero value is usable.
+type warnLimiter struct {
+	mu         sync.Mutex
+	last       time.Time
+	suppressed int
+	every      time.Duration    // zero = a minute
+	now        func() time.Time // nil = time.Now
+}
+
+func (w *warnLimiter) allow() (ok bool, suppressed int) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	every, now := w.every, w.now
+	if every == 0 {
+		every = time.Minute
+	}
+	if now == nil {
+		now = time.Now
+	}
+	t := now()
+	if !w.last.IsZero() && t.Sub(w.last) < every {
+		w.suppressed++
+		return false, 0
+	}
+	suppressed, w.suppressed, w.last = w.suppressed, 0, t
+	return true, suppressed
+}
+
+func hasJSONValue(r json.RawMessage) bool { return len(r) > 0 && string(r) != "null" }
 
 // sortNewestFirst orders tweets by descending snowflake id (numeric: a longer
 // id is larger, equal lengths compare lexically).
@@ -285,9 +360,11 @@ type xwebTimeline struct {
 		Entries []struct {
 			EntryID string `json:"entry_id"`
 			Content struct {
-				Content struct {
-					TypeName     string `json:"__typename"`
-					TweetResults struct {
+				PromotedMetadata json.RawMessage `json:"promotedMetadata"`
+				Content          struct {
+					PromotedMetadata json.RawMessage `json:"promotedMetadata"`
+					TypeName         string          `json:"__typename"`
+					TweetResults     struct {
 						Result xwebTweetResult `json:"result"`
 					} `json:"tweet_results"`
 				} `json:"content"`
@@ -328,7 +405,8 @@ func parseTweetNotifications(body []byte) ([]*Tweet, string, error) {
 	var tweets []*Tweet
 	for _, ins := range tl.Instructions {
 		for _, e := range ins.Entries {
-			if e.Content.Content.TypeName != "TimelineTweet" || strings.HasPrefix(e.EntryID, "promoted") {
+			if e.Content.Content.TypeName != "TimelineTweet" || strings.HasPrefix(e.EntryID, "promoted") ||
+				hasJSONValue(e.Content.PromotedMetadata) || hasJSONValue(e.Content.Content.PromotedMetadata) {
 				continue
 			}
 			r := e.Content.Content.TweetResults.Result
