@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.7.0](https://github.com/anatolykoptev/go-twitter/compare/v0.6.27...v0.7.0) (2026-10-30)
+
+
+### ⚠ BREAKING CHANGES
+
+* pooled requests are sent without pre-request jitter by default; opt back in with WithRequestJitter(min, max).
+
+### Features
+
+* realtime primitives, no pre-request jitter by default, fix GraphQL bell fallback ([#120](https://github.com/anatolykoptev/go-twitter/issues/120)) ([8d1b9f2](https://github.com/anatolykoptev/go-twitter/commit/8d1b9f2d52d894d3a670c12429a2bf1ae30a1b67))
+
+
+### Miscellaneous
+
+* release 0.7.0 ([#123](https://github.com/anatolykoptev/go-twitter/issues/123)) ([f0130bc](https://github.com/anatolykoptev/go-twitter/commit/f0130bc5d17e114160b9cc1e22b31a76eb73e8ad))
+
 ## [0.6.27](https://github.com/anatolykoptev/go-twitter/compare/v0.6.26...v0.6.27) (2026-10-17)
 
 
