@@ -24,7 +24,8 @@ type RequestTrace struct {
 type CallTrace struct {
 	Endpoint string
 	Entry    time.Time // doPoolRequest entered
-	// JitterDone is after the anti-fingerprint sleep (stealth.DefaultJitter).
+	// JitterDone is after the opt-in pre-request jitter (WithRequestJitter);
+	// it equals Entry's instant when no jitter is configured.
 	JitterDone time.Time
 	// Picked is after the pool handed out an account (includes any pool wait).
 	Picked time.Time
@@ -40,6 +41,10 @@ type CallTrace struct {
 	Status   int
 	Bytes    int
 	Proxied  bool // the serving account has its own proxy
+
+	// rt is the owning RequestTrace: its mutex guards every field above, so a
+	// concurrent Calls() reads a consistent snapshot.
+	rt *RequestTrace
 }
 
 type requestTraceKey struct{}
@@ -68,7 +73,7 @@ func beginCall(ctx context.Context, endpoint string) *CallTrace {
 	if t == nil {
 		return nil
 	}
-	c := &CallTrace{Endpoint: endpoint, Entry: time.Now()}
+	c := &CallTrace{Endpoint: endpoint, Entry: time.Now(), rt: t}
 	t.mu.Lock()
 	t.calls = append(t.calls, c)
 	t.mu.Unlock()
@@ -90,39 +95,37 @@ func currentCall(ctx context.Context) *CallTrace {
 	return t.calls[len(t.calls)-1]
 }
 
-func (c *CallTrace) jitterDone() {
-	if c != nil && c.JitterDone.IsZero() {
-		c.JitterDone = time.Now()
+// update runs fn on the CallTrace under the owning RequestTrace's mutex.
+func (c *CallTrace) update(fn func()) {
+	if c == nil || c.rt == nil {
+		return
 	}
+	c.rt.mu.Lock()
+	defer c.rt.mu.Unlock()
+	fn()
+}
+
+func (c *CallTrace) jitterDone() {
+	c.update(func() {
+		if c.JitterDone.IsZero() {
+			c.JitterDone = time.Now()
+		}
+	})
 }
 
 func (c *CallTrace) picked(proxied bool) {
-	if c != nil {
-		c.Picked, c.Proxied = time.Now(), proxied
-	}
+	c.update(func() { c.Picked, c.Proxied = time.Now(), proxied })
 }
 
-func (c *CallTrace) paced() {
-	if c != nil {
-		c.Paced = time.Now()
-	}
-}
+func (c *CallTrace) paced() { c.update(func() { c.Paced = time.Now() }) }
 
-func (c *CallTrace) headersStart() {
-	if c != nil {
-		c.HeadersStart = time.Now()
-	}
-}
+func (c *CallTrace) headersStart() { c.update(func() { c.HeadersStart = time.Now() }) }
 
-func (c *CallTrace) ready() {
-	if c != nil {
-		c.Ready = time.Now()
-	}
-}
+func (c *CallTrace) ready() { c.update(func() { c.Ready = time.Now() }) }
 
 func (c *CallTrace) done(status, bytes int) {
-	if c != nil {
+	c.update(func() {
 		c.Done, c.Status, c.Bytes = time.Now(), status, bytes
 		c.Attempts++
-	}
+	})
 }
