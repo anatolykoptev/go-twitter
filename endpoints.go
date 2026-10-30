@@ -90,9 +90,11 @@ var Endpoints = map[string]Endpoint{
 	"CommunityTweetsTimeline":  {ID: "Mvs5UOOEkpXVMDZtUcxR-Q", Name: "CommunityTweetsTimeline", Features: gqlFeatures()},  // seed — auto-maintained by gql-sync
 	"BlueVerifiedFollowers":    {ID: "OBBd6Dw-4qEYbsu3hGkyxg", Name: "BlueVerifiedFollowers", Features: gqlFeatures()},    // seed — auto-maintained by gql-sync
 	// Device-notification timeline: fallback source for the device_follow.json
-	// feed (tweets from accounts the viewer belled). env override is the
-	// hotfix path.
-	"tweetNotificationsQuery": {ID: "CrGC20_ACwMpmZo78DTR5Q", Name: "tweetNotificationsQuery", Features: gqlFeatures()},
+	// feed (tweets from accounts the viewer belled). x-web (Vite/Relay) stack:
+	// the ID is params.id of the chunk tweet-notifications-*.js (variables:
+	// tweetNotificationsProviders). gql-sync cannot extract it yet (#119); env
+	// override is the hotfix path.
+	"tweetNotificationsQuery": {ID: "tNwvgqJyhttOF1-7q_v3qA", Name: "tweetNotificationsQuery"},
 
 	// T5.5 engagement mutations (account-pinned POST, mirror CreateTweet).
 	//

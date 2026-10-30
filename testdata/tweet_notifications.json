@@ -1,0 +1,137 @@
+{
+  "data": {
+    "viewer_v2": {
+      "user_results": {
+        "result": {
+          "__typename": "User",
+          "id": "VXNlcjpQTEFDRUhPTERFUg",
+          "tweet_notification_timeline": {
+            "id": "placeholder-timeline-id",
+            "timeline": {
+              "id": "placeholder-timeline-id",
+              "instructions": [
+                {
+                  "__typename": "TimelineAddEntries",
+                  "entries": [
+                    {
+                      "content": {
+                        "__typename": "TimelineTimelineCursor",
+                        "cursor_type": "Top",
+                        "value": "PLACEHOLDER_TOP_CURSOR"
+                      },
+                      "entry_id": "cursor-top-0000000000000",
+                      "sort_index": "1793384687999"
+                    },
+                    {
+                      "content": {
+                        "__typename": "TimelineTimelineItem",
+                        "content": {
+                          "__isTimelineTimelineItemContent": "TimelineTweet",
+                          "__typename": "TimelineTweet",
+                          "display_type": "Tweet",
+                          "tweet_results": {
+                            "id": "PLACEHOLDER_TWEET_RESULTS_ID",
+                            "rest_id": "1985000000000000001",
+                            "result": {
+                              "__isTweetResult": "Tweet",
+                              "__typename": "Tweet",
+                              "rest_id": "1985000000000000001",
+                              "core": {
+                                "user_results": {
+                                  "result": {
+                                    "__typename": "User",
+                                    "id": "VXNlcjpQTEFDRUhPTERFUg1",
+                                    "rest_id": "3100000000000000001",
+                                    "core": {
+                                      "name": "Reuters",
+                                      "screen_name": "Reuters"
+                                    }
+                                  }
+                                }
+                              },
+                              "details": {
+                                "full_text": "placeholder headline 1",
+                                "created_at_ms": 1793384687000,
+                                "display_text_range": [
+                                  0,
+                                  22
+                                ]
+                              },
+                              "legacy": {
+                                "conversation_id_str": "1985000000000000001",
+                                "lang": "en",
+                                "possibly_sensitive": false
+                              }
+                            }
+                          }
+                        }
+                      },
+                      "entry_id": "tweet-1985000000000000001",
+                      "sort_index": "1793384687001"
+                    },
+                    {
+                      "content": {
+                        "__typename": "TimelineTimelineItem",
+                        "content": {
+                          "__isTimelineTimelineItemContent": "TimelineTweet",
+                          "__typename": "TimelineTweet",
+                          "display_type": "Tweet",
+                          "tweet_results": {
+                            "id": "PLACEHOLDER_TWEET_RESULTS_ID",
+                            "rest_id": "1985000000000000002",
+                            "result": {
+                              "__isTweetResult": "Tweet",
+                              "__typename": "Tweet",
+                              "rest_id": "1985000000000000002",
+                              "core": {
+                                "user_results": {
+                                  "result": {
+                                    "__typename": "User",
+                                    "id": "VXNlcjpQTEFDRUhPTERFUg2",
+                                    "rest_id": "3100000000000000002",
+                                    "core": {
+                                      "name": "zerohedge",
+                                      "screen_name": "zerohedge"
+                                    }
+                                  }
+                                }
+                              },
+                              "details": {
+                                "full_text": "placeholder headline 2",
+                                "created_at_ms": 1793384547000,
+                                "display_text_range": [
+                                  0,
+                                  22
+                                ]
+                              },
+                              "legacy": {
+                                "conversation_id_str": "1985000000000000002",
+                                "lang": "en",
+                                "possibly_sensitive": false
+                              }
+                            }
+                          }
+                        }
+                      },
+                      "entry_id": "tweet-1985000000000000002",
+                      "sort_index": "1793384687002"
+                    },
+                    {
+                      "content": {
+                        "__typename": "TimelineTimelineCursor",
+                        "cursor_type": "Bottom",
+                        "value": "PLACEHOLDER_BOTTOM_CURSOR"
+                      },
+                      "entry_id": "cursor-bottom-0000000000000",
+                      "sort_index": "1793384687000"
+                    }
+                  ]
+                }
+              ]
+            }
+          }
+        }
+      }
+    }
+  }
+}
