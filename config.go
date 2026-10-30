@@ -3,6 +3,7 @@ package twitter
 import (
 	"time"
 
+	stealth "github.com/anatolykoptev/go-stealth"
 	"github.com/anatolykoptev/go-stealth/ratelimit"
 	"github.com/anatolykoptev/go-twitter/captcha"
 	"github.com/anatolykoptev/go-twitter/xtid"
@@ -123,6 +124,11 @@ type ClientConfig struct {
 	// enabled with safe defaults).
 	AccountPaceDisabled bool
 
+	// RequestJitter overrides the random delay applied before every pool GET/POST
+	// (see WithRequestJitter). nil = stealth.DefaultJitter (500ms-2.5s), the
+	// historical behaviour. A zero Jitter disables the delay. The pinned write
+	// path (doPOST) and media upload keep stealth.DefaultJitter regardless.
+	RequestJitter *stealth.Jitter
 	// MaxInFlightPerAccount caps the number of requests a single account may
 	// have in flight at once — the in-process counterpart of nitter's
 	// maxConcurrentReqs. A pool pick that would exceed the cap skips the

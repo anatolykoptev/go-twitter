@@ -76,6 +76,40 @@ func (c *Client) AcquireAccountFor(ctx context.Context, platform, endpoint strin
 	return &creds, nil
 }
 
+// AcquireNamedAccount leases exactly the account named by username: the
+// service pins the lease (?username=) and never substitutes another — 404 for
+// unknown, 409 for unavailable/ambiguous. A 200 whose returned username does
+// not match the requested one (case-insensitive) is an error: silently holding
+// a different account would run the caller's work under the wrong identity.
+func (c *Client) AcquireNamedAccount(ctx context.Context, platform, username string) (*Credentials, error) {
+	u := fmt.Sprintf("%s/%s/account?%s", c.baseURL, platform, url.Values{"username": {username}}.Encode())
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("X-Consumer", c.consumer)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("go-social request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("go-social returned %d", resp.StatusCode)
+	}
+
+	var creds Credentials
+	if err := json.NewDecoder(resp.Body).Decode(&creds); err != nil {
+		return nil, fmt.Errorf("decode go-social response: %w", err)
+	}
+	if got := creds.Credentials["username"]; !strings.EqualFold(got, username) {
+		return nil, fmt.Errorf("go-social leased %q, want %q", got, username)
+	}
+	return &creds, nil
+}
+
 // RateLimit is the last X rate-limit window a lease observed for one endpoint,
 // taken from the x-rate-limit-limit / -remaining / -reset response headers.
 type RateLimit struct {

@@ -3,6 +3,7 @@ package social
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -34,6 +35,54 @@ func TestAcquireAccount(t *testing.T) {
 	assert.Equal(t, "acc-123", creds.ID)
 	assert.Equal(t, "u", creds.Credentials["username"])
 	assert.Equal(t, "http://proxy:8080", creds.Proxy)
+}
+
+func TestAcquireNamedAccount(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, http.MethodGet, r.Method)
+		assert.Equal(t, "/twitter/account", r.URL.Path)
+		assert.Equal(t, "username=ExampleUser", r.URL.RawQuery)
+		assert.Equal(t, "Bearer test-token", r.Header.Get("Authorization"))
+
+		_ = json.NewEncoder(w).Encode(Credentials{
+			ID:          "acc-9",
+			Credentials: map[string]string{"username": "exampleuser", "auth_token": "t", "ct0": "c"},
+			ExpiresIn:   300,
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "test-token", "test-consumer")
+	creds, err := c.AcquireNamedAccount(context.Background(), "twitter", "ExampleUser")
+	require.NoError(t, err)
+	assert.Equal(t, "acc-9", creds.ID)
+	assert.Equal(t, "exampleuser", creds.Credentials["username"]) // case-insensitive match
+}
+
+func TestAcquireNamedAccount_Mismatch(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(Credentials{
+			ID:          "acc-1",
+			Credentials: map[string]string{"username": "SomeoneElse", "auth_token": "t", "ct0": "c"},
+		})
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL, "tok", "consumer")
+	_, err := c.AcquireNamedAccount(context.Background(), "twitter", "ExampleUser")
+	assert.ErrorContains(t, err, `leased "SomeoneElse"`)
+}
+
+func TestAcquireNamedAccount_Statuses(t *testing.T) {
+	for _, code := range []int{http.StatusNotFound, http.StatusConflict} {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(code)
+		}))
+		c := NewClient(srv.URL, "tok", "consumer")
+		_, err := c.AcquireNamedAccount(context.Background(), "twitter", "OtherUser")
+		assert.ErrorContains(t, err, fmt.Sprintf("returned %d", code))
+		srv.Close()
+	}
 }
 
 func TestAcquireAccount_ServerError(t *testing.T) {
