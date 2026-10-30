@@ -22,7 +22,7 @@ var ErrNotFound = errors.New("twitter: resource not found")
 // for: the request fails closed instead.
 var ErrProxyClientUnavailable = errors.New("twitter: account proxy client unavailable")
 
-// ErrEndpoint marks endpoint-wide faults (HTTP 404, or 400 carrying a
+// ErrEndpoint marks endpoint-wide faults (HTTP 404 or 410, or 400 carrying a
 // GraphQL-shaped errors body that is NOT a recognized caller-input rejection):
 // the committed request shape is wrong for every account (stale queryId,
 // missing xtid, feature mismatch), so the serving account must not be
@@ -57,7 +57,7 @@ const (
 	errNotAuthorized            // 179, 219 — not authorized
 	errInternal                 // 131 — Twitter internal error
 	errForbidden                // 403 — forbidden (no recognized error code)
-	errEndpoint                 // HTTP 404 or GraphQL-shaped 400 — endpoint-wide fault, not the account's
+	errEndpoint                 // HTTP 404/410 or GraphQL-shaped 400 — endpoint-wide fault, not the account's
 	errOverloaded               // HTTP 5xx or a LoadShed error entry — X shedding load
 	errBadRequest               // HTTP 400 with an input-validation marker — the caller's own error, deterministic
 
@@ -248,8 +248,8 @@ func hasCallerValidationError(body []byte) bool {
 // classifyError mapping for known JSON codes and folds HTTP statuses into the
 // endpoint / overload / rate-limit / forbidden classes.
 //
-// The endpoint-fault folds (404, GraphQL-shaped 400, 5xx) WIN over body codes:
-// a 404 says the route itself is stale for every account (a stale queryId,
+// The endpoint-fault folds (404, 410, GraphQL-shaped 400, 5xx) WIN over body codes:
+// a 404/410 says the route itself is stale or retired for every account (a stale queryId,
 // missing xtid or feature mismatch, see #61), a 5xx says X's edge is broken —
 // neither can be charged to the serving account regardless of what the body
 // claims. The caller-validation fold (400 with a code-214 entry) is checked
@@ -267,7 +267,7 @@ func newAPIError(status int, body []byte, hdrs map[string]string) *APIError {
 	switch {
 	case status == 400 && hasCallerValidationError(body):
 		e.Class = errBadRequest
-	case status == 404, status == 400 && hasGraphQLErrors(body):
+	case status == 404, status == 410, status == 400 && hasGraphQLErrors(body):
 		e.Class = errEndpoint
 	case status >= 500 && status < 600:
 		e.Class = errOverloaded

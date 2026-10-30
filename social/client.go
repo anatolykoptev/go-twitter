@@ -4,6 +4,7 @@ package social
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -72,6 +73,61 @@ func (c *Client) AcquireAccountFor(ctx context.Context, platform, endpoint strin
 	var creds Credentials
 	if err := json.NewDecoder(resp.Body).Decode(&creds); err != nil {
 		return nil, fmt.Errorf("decode go-social response: %w", err)
+	}
+	return &creds, nil
+}
+
+// Sentinel errors of AcquireNamedAccount, matched with errors.Is.
+var (
+	// ErrAccountNotFound: go-social does not know the requested username (404).
+	ErrAccountNotFound = errors.New("go-social: account not found")
+	// ErrAccountUnavailable: the account exists but cannot be leased now, or the
+	// name is ambiguous (409).
+	ErrAccountUnavailable = errors.New("go-social: account unavailable or ambiguous")
+	// ErrAccountMismatch: a 200 answered with a different account than requested.
+	ErrAccountMismatch = errors.New("go-social: leased a different account than requested")
+)
+
+// AcquireNamedAccount leases exactly the account named by username: the
+// service pins the lease (?username=) and never substitutes another — 404
+// (ErrAccountNotFound) for unknown, 409 (ErrAccountUnavailable) for
+// unavailable/ambiguous. A 200 whose returned username does not match the
+// requested one (case-insensitive) is ErrAccountMismatch: silently holding a
+// different account would run the caller's work under the wrong identity. The
+// wrongly leased account is not reported back: the usage API has no neutral
+// status (any verdict would mis-bill a healthy account), so that lease simply
+// runs out at its expires_in.
+func (c *Client) AcquireNamedAccount(ctx context.Context, platform, username string) (*Credentials, error) {
+	u := fmt.Sprintf("%s/%s/account?%s", c.baseURL, platform, url.Values{"username": {username}}.Encode())
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+c.token)
+	req.Header.Set("X-Consumer", c.consumer)
+
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("go-social request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	switch resp.StatusCode {
+	case http.StatusOK:
+	case http.StatusNotFound:
+		return nil, fmt.Errorf("go-social returned %d for %q: %w", resp.StatusCode, username, ErrAccountNotFound)
+	case http.StatusConflict:
+		return nil, fmt.Errorf("go-social returned %d for %q: %w", resp.StatusCode, username, ErrAccountUnavailable)
+	default:
+		return nil, fmt.Errorf("go-social returned %d", resp.StatusCode)
+	}
+
+	var creds Credentials
+	if err := json.NewDecoder(resp.Body).Decode(&creds); err != nil {
+		return nil, fmt.Errorf("decode go-social response: %w", err)
+	}
+	if got := creds.Credentials["username"]; !strings.EqualFold(got, username) {
+		return nil, fmt.Errorf("go-social leased a different account than %q: %w", username, ErrAccountMismatch)
 	}
 	return &creds, nil
 }

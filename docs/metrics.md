@@ -87,7 +87,7 @@ visible as a `banned` outcome. It is signalled instead by the
 
 Buckets (seconds): `0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30` - sized for a
 50 ms to 30 s HTTP call. The duration covers the HTTP round trip only, not the
-anti-fingerprint jitter, per-account pacing or retry backoff.
+opt-in request jitter, per-account pacing or retry backoff.
 
 ### `twitter.client.timeline.freshness`
 

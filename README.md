@@ -219,7 +219,17 @@ Independently of pacing, `MaxInFlightPerAccount` (default 2) bounds how many req
 - **CT0** — never rotated on a timer or replaced with a client-generated value on an established session; x.com validates it server-side, so doing so causes CSRF 353 errors. The client adopts the ct0 from each successful response's `set-cookie`, persists it to the session file, and on a 353 adopts the server-offered ct0 before falling back to relogin. A generated ct0 is used only at login, when x.com sets none.
 - **TLS** — browser-grade JA3 fingerprints via go-stealth, with a per-account browser profile (`AssignBrowserProfile`).
 - **Headers** — fixed header ordering and client hints derived from the account's user agent.
-- **Jitter** — randomized delay before every request.
+- **Jitter** — no pre-request delay by default (the per-account pacer still spaces one account's requests); opt in with `WithRequestJitter(min, max)`. Writes and media uploads keep their own jitter.
+
+**Pre-request jitter is off by default.** Earlier versions slept a random 0.5-2.5 s before every
+pooled request, which made up most of a read's latency (median 1.49 s of a 1.99 s call). Account
+rotation and quotas are expected to be handled by the service that leases accounts, and the
+per-account pacer (`WithAccountPace`, default 0.8 s + random) still spaces consecutive requests of one
+account. To restore the old delay: `twitter.NewClient(cfg, twitter.WithRequestJitter(500*time.Millisecond, 2500*time.Millisecond))`.
+Writes and media uploads keep their own jitter either way.
+The `*WithSocial` helpers build a client per call, so they share one pacer per account across calls
+(within one process, and per pace config: consecutive calls that lease the same account with the same pace are spaced by it; other processes and other pace settings do not share state) and take the same options as a
+trailing argument, e.g. `twitter.GetUserWithSocial(ctx, sc, "handle", twitter.WithRequestJitter(500*time.Millisecond, 2500*time.Millisecond))`.
 
 ## Configuration
 

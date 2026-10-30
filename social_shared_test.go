@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/anatolykoptev/go-stealth/ratelimit"
 	"github.com/anatolykoptev/go-twitter/social"
 	"github.com/anatolykoptev/go-twitter/xtid"
 	"github.com/stretchr/testify/assert"
@@ -85,6 +86,11 @@ type socialRig struct {
 	// leaseProxy, when set, is stamped onto every Credentials the fake
 	// go-social hands out — the seam for a malformed/dead-proxy lease.
 	leaseProxy string
+
+	// sameAccount makes the fake go-social lease one account every time, and
+	// keepPacer keeps the production account pacer on the per-call clients
+	// (the rig otherwise disables it to stay fast).
+	sameAccount, keepPacer bool
 }
 
 func newSocialRig(t *testing.T) *socialRig {
@@ -129,7 +135,7 @@ func newSocialRigX(t *testing.T, xHandler http.HandlerFunc) *socialRig {
 		r.acquireQueries = append(r.acquireQueries, req.URL.RawQuery)
 		r.reportsMu.Unlock()
 		who := "a"
-		if r.acquire.Add(1)%2 == 0 {
+		if r.acquire.Add(1)%2 == 0 && !r.sameAccount {
 			who = "b"
 		}
 		_ = json.NewEncoder(w).Encode(social.Credentials{
@@ -155,7 +161,9 @@ func newSocialRigX(t *testing.T, xHandler http.HandlerFunc) *socialRig {
 	testHookSocialClient = func(c *Client) {
 		c.client = bc
 		c.warmDoerOverride = r.warm
-		c.accountPacer = nil
+		if !r.keepPacer {
+			c.accountPacer = nil
+		}
 	}
 	t.Cleanup(func() {
 		testHookSocialClient = nil
@@ -269,4 +277,79 @@ func TestSocial_SharedXtid_WarmFetchUsesCurrentCallCookie(t *testing.T) {
 	assert.Contains(t, r.warm.cookies[0], "auth_token=toka")
 	assert.Contains(t, r.warm.cookies[1], "auth_token=tokb",
 		"call 2 warm fetch must use call 2's cookie, not call 1's")
+}
+
+// The per-call clients of the *WithSocial path must share one pacer keyed by
+// account: two consecutive calls that lease the same account are spaced by the
+// pace even though each builds its own Client. Options passed to the helper
+// reach the per-call client (the 1500ms pace here).
+//
+// Mutation: social.go tryWithAccount, `cfg.sharedPacer = socialPacerFor(cfg)` ->
+// `cfg.sharedPacer = nil` (a fresh per-client pacer again) => RED:
+// "two *WithSocial calls on one account were not spaced by the account pace".
+func TestSocial_AccountPacerSharedAcrossPerCallClients(t *testing.T) {
+	const pace = 1500 * time.Millisecond
+	r := newSocialRig(t)
+	r.sameAccount, r.keepPacer = true, true
+	t.Cleanup(func() {
+		socialPacerMu.Lock()
+		socialPacers = map[[2]time.Duration]*ratelimit.KeyedPacer{}
+		socialPacerMu.Unlock()
+	})
+	ctx := context.Background()
+
+	// Warm-up with pacing off: one-time xtid/session setup is not part of the span.
+	_, err := GetUserWithSocial(ctx, r.sc, "tesla", WithAccountPace(0, 0))
+	require.NoError(t, err)
+
+	start := time.Now()
+	for i := 0; i < 2; i++ {
+		_, err = GetUserWithSocial(ctx, r.sc, "tesla", WithAccountPace(pace, 0))
+		require.NoError(t, err)
+	}
+	assert.GreaterOrEqual(t, time.Since(start), pace-50*time.Millisecond,
+		"two *WithSocial calls on one account were not spaced by the account pace")
+}
+
+// Every *WithSocial helper must hand its trailing options to the per-call client.
+//
+// Mutation: social.go GetFollowingWithSocial, drop `, opts...` from the
+// withSocialAccount call => TestSocial_AllHelpersApplyOptions/GetFollowing goes
+// RED (`option was not applied`).
+func TestSocial_AllHelpersApplyOptions(t *testing.T) {
+	ctx := context.Background()
+	calls := map[string]func(sc *social.Client, opt ClientOption){
+		"Search": func(sc *social.Client, o ClientOption) { _, _ = SearchWithSocial(ctx, sc, "q", 5, o) },
+		"SearchTweets": func(sc *social.Client, o ClientOption) {
+			_, _ = SearchTweetsWithSocial(ctx, sc, "q", SearchLatest, 5, o)
+		},
+		"SearchUsers":          func(sc *social.Client, o ClientOption) { _, _ = SearchUsersWithSocial(ctx, sc, "q", 5, o) },
+		"GetUser":              func(sc *social.Client, o ClientOption) { _, _ = GetUserWithSocial(ctx, sc, "tesla", o) },
+		"GetUserTweets":        func(sc *social.Client, o ClientOption) { _, _ = GetUserTweetsWithSocial(ctx, sc, "tesla", 5, o) },
+		"GetTweetConversation": func(sc *social.Client, o ClientOption) { _, _, _ = GetTweetConversationWithSocial(ctx, sc, "1", o) },
+		"GetUserTweetsByID":    func(sc *social.Client, o ClientOption) { _, _ = GetUserTweetsByIDWithSocial(ctx, sc, "999", 5, o) },
+		"GetFollowing":         func(sc *social.Client, o ClientOption) { _, _ = GetFollowingWithSocial(ctx, sc, "999", 5, o) },
+		"GetFollowers":         func(sc *social.Client, o ClientOption) { _, _ = GetFollowersWithSocial(ctx, sc, "999", 5, o) },
+		"GetRetweeters":        func(sc *social.Client, o ClientOption) { _, _ = GetRetweetersWithSocial(ctx, sc, "1", 5, o) },
+		"GetTweetByID":         func(sc *social.Client, o ClientOption) { _, _ = GetTweetByIDWithSocial(ctx, sc, "1", o) },
+	}
+	require.Len(t, calls, 11, "one entry per *WithSocial helper")
+	for name, call := range calls {
+		t.Run(name, func(t *testing.T) {
+			r := newSocialRig(t)
+			var applied atomic.Int32
+			opt := func(cfg *ClientConfig) {
+				applied.Add(1)
+				WithAccountPace(0, 0)(cfg) // keep the journey fast
+			}
+			done := make(chan struct{})
+			go func() { defer close(done); call(r.sc, opt) }()
+			select {
+			case <-done:
+			case <-time.After(60 * time.Second):
+				t.Fatal("helper did not return")
+			}
+			assert.Positive(t, applied.Load(), "option was not applied")
+		})
+	}
 }

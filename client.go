@@ -29,14 +29,17 @@ type Client struct {
 	xtidMgr              *xtid.Manager
 	xpffGen              *xpff.Generator
 	cfg                  ClientConfig
-	reloginGate          AutoReloginGate                 // nil = always allow
-	nonResponsiveBackoff pool.BackoffConfig              // transient-failure backoff (base from cfg, x2, cap 30m)
-	accountPacer         *ratelimit.KeyedPacer           // per-account human-pace spacing (keyed by account, nil = disabled)
-	alertHook            func(topic string, payload any) // proxy/pool event sink (PoolAlertHook or slog fallback)
-	metrics              *clientMetrics                  // OpenTelemetry instruments (nil-safe)
-	poolGaugeReg         metric.Registration             // pool.accounts callback; unregistered by Close (guarded by mu)
-	warmDoerOverride     warmDoer                        // test seam: replaces the account client for xtid warm-page fetches
-	qid                  *qidRefresher                   // nil = the process-wide queryId refresher; only tests set it
+	reloginGate          AutoReloginGate                                  // nil = always allow
+	nonResponsiveBackoff pool.BackoffConfig                               // transient-failure backoff (base from cfg, x2, cap 30m)
+	accountPacer         *ratelimit.KeyedPacer                            // per-account human-pace spacing (keyed by account, nil = disabled)
+	alertHook            func(topic string, payload any)                  // proxy/pool event sink (PoolAlertHook or slog fallback)
+	metrics              *clientMetrics                                   // OpenTelemetry instruments (nil-safe)
+	poolGaugeReg         metric.Registration                              // pool.accounts callback; unregistered by Close (guarded by mu)
+	warmDoerOverride     warmDoer                                         // test seam: replaces the account client for xtid warm-page fetches
+	qid                  *qidRefresher                                    // nil = the process-wide queryId refresher; only tests set it
+	requestJitter        *stealth.Jitter                                  // pre-request jitter for pool requests (opt-in); nil = none
+	deviceWarn           warnLimiter                                      // rate-limits the both-sources-failed warning of GetDeviceNotifications
+	jitterSleep          func(ctx context.Context, d time.Duration) error // test seam: replaces the real sleep in preRequestJitter
 
 	mu                sync.Mutex
 	guestToken        string
@@ -51,7 +54,14 @@ type Client struct {
 }
 
 // NewClient creates a fully-wired Twitter client.
-func NewClient(cfg ClientConfig) (*Client, error) {
+//
+// Optional ClientOptions (WithRequestJitter, WithoutRequestJitter,
+// WithAccountPace) adjust the config after it is passed in. Without WithRequestJitter pooled
+// requests are sent without a pre-request delay.
+func NewClient(cfg ClientConfig, clientOpts ...ClientOption) (*Client, error) {
+	for _, o := range clientOpts {
+		o(&cfg)
+	}
 	cfg.defaults()
 
 	for _, acc := range cfg.Accounts {
@@ -175,12 +185,15 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 	}
 	xpffGen := xpff.New(xpffGuestID, defaultUserAgent)
 
-	// Per-account human-pace spacing. ADDITIVE to the anti-fingerprint jitter: it
+	// Per-account human-pace spacing. Independent of the opt-in pre-request jitter: it
 	// spaces a single account's consecutive requests for stealth, keyed by
 	// account (not domain), so a low-frequency caller is never starved by a
 	// global gate. The per-account-per-endpoint rate limiter remains the
 	// authoritative throughput ceiling; this pace stays well under it.
-	accountPacer := buildAccountPacer(cfg)
+	accountPacer := cfg.sharedPacer
+	if accountPacer == nil {
+		accountPacer = buildAccountPacer(cfg)
+	}
 
 	c := &Client{
 		client:               bc,
@@ -190,6 +203,7 @@ func NewClient(cfg ClientConfig) (*Client, error) {
 		cfg:                  cfg,
 		nonResponsiveBackoff: nonResponsiveBackoff,
 		accountPacer:         accountPacer,
+		requestJitter:        cfg.RequestJitter,
 		alertHook:            alertHook,
 		metrics:              m,
 	}
@@ -343,6 +357,7 @@ func (c *Client) doPoolReq(ctx context.Context, bc *stealth.BrowserClient, metho
 func (c *Client) observedPoolReq(ctx context.Context, endpoint string, bc *stealth.BrowserClient, method, urlStr string, payload []byte, headers map[string]string) ([]byte, map[string]string, int, error) {
 	start := time.Now()
 	body, hdrs, status, err := c.doPoolReq(ctx, bc, method, urlStr, payload, headers)
+	currentCall(ctx).done(status, len(body))
 	c.metrics.recordRequest(endpoint, time.Since(start), attemptOutcome(status, body, hdrs, err, bc != c.client))
 	return body, hdrs, status, err
 }
@@ -407,6 +422,7 @@ func (c *Client) doRequest(ctx context.Context, bc *stealth.BrowserClient, metho
 // deadline aborts the in-flight request instead of parking it until
 // go-stealth's internal request timeout fires.
 func (c *Client) doRequestWithBody(ctx context.Context, bc *stealth.BrowserClient, method, urlStr string, headers map[string]string, body io.Reader) ([]byte, map[string]string, int, error) {
+	currentCall(ctx).headersStart()
 	urlPath := urlStr
 	if u, parseErr := url.Parse(urlStr); parseErr == nil {
 		urlPath = u.Path
@@ -428,6 +444,7 @@ func (c *Client) doRequestWithBody(ctx context.Context, bc *stealth.BrowserClien
 		slog.Debug("xpff: failed to generate header", slog.Any("error", xpffErr))
 	}
 
+	currentCall(ctx).ready()
 	return bc.DoWithHeaderOrderCtx(ctx, method, urlStr, headers, body, twitterHeaderOrder)
 }
 

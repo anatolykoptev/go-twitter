@@ -89,6 +89,12 @@ var Endpoints = map[string]Endpoint{
 	"ListLatestTweetsTimeline": {ID: "27HKUy8ulrflZ9Tole038g", Name: "ListLatestTweetsTimeline", Features: gqlFeatures()}, // seed — auto-maintained by gql-sync
 	"CommunityTweetsTimeline":  {ID: "Mvs5UOOEkpXVMDZtUcxR-Q", Name: "CommunityTweetsTimeline", Features: gqlFeatures()},  // seed — auto-maintained by gql-sync
 	"BlueVerifiedFollowers":    {ID: "OBBd6Dw-4qEYbsu3hGkyxg", Name: "BlueVerifiedFollowers", Features: gqlFeatures()},    // seed — auto-maintained by gql-sync
+	// Device-notification timeline: fallback source for the device_follow.json
+	// feed (tweets from accounts the viewer belled). x-web (Vite/Relay) stack:
+	// the ID is params.id of the chunk tweet-notifications-*.js (variables:
+	// tweetNotificationsProviders). gql-sync cannot extract it yet (#119); env
+	// override is the hotfix path.
+	"tweetNotificationsQuery": {ID: "tNwvgqJyhttOF1-7q_v3qA", Name: "tweetNotificationsQuery"},
 
 	// T5.5 engagement mutations (account-pinned POST, mirror CreateTweet).
 	//
@@ -137,6 +143,7 @@ var envOverrides = map[string]string{
 	"ListLatestTweetsTimeline": "TWITTER_QID_LIST_LATEST_TWEETS_TIMELINE",
 	"CommunityTweetsTimeline":  "TWITTER_QID_COMMUNITY_TWEETS_TIMELINE",
 	"BlueVerifiedFollowers":    "TWITTER_QID_BLUE_VERIFIED_FOLLOWERS",
+	"tweetNotificationsQuery":  "TWITTER_QID_TWEET_NOTIFICATIONS_QUERY",
 
 	// T5.5 engagement mutations.
 	"FavoriteTweet":   "TWITTER_QID_FAVORITE_TWEET",
@@ -159,6 +166,7 @@ var knownManualQueryIDs = map[string]string{
 	"ListLatestTweetsTimeline": "requires authenticated session; not in the unauthenticated x.com bundles gql-sync walks",
 	"CommunityTweetsTimeline":  "requires authenticated session; not in the unauthenticated x.com bundles gql-sync walks",
 	"BlueVerifiedFollowers":    "requires authenticated session; not in the unauthenticated x.com bundles gql-sync walks",
+	"tweetNotificationsQuery":  "requires authenticated session; not in the unauthenticated x.com bundles gql-sync walks",
 
 	// T5.5 engagement mutations — the public bundles carry these only as Relay
 	// persisted-query hashes, which are a different identifier and return HTTP 422

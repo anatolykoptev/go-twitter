@@ -226,10 +226,12 @@ func (c *Client) nextUsableAt(endpoint string) (at time.Time, ok bool) {
 // doPoolRequest executes a pool-rotated request (GET or POST) with retry, ct0 rotation,
 // relogin, and guest-token fallback.
 func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string, payload []byte) ([]byte, map[string]string, error) {
-	// Anti-fingerprint jitter
-	if err := stealth.DefaultJitter.Sleep(ctx); err != nil {
+	ct := beginCall(ctx, endpoint) // nil unless the caller attached a RequestTrace
+	// Pre-request jitter: off unless the client opted in with WithRequestJitter.
+	if err := c.preRequestJitter(ctx); err != nil {
 		return nil, nil, err
 	}
+	ct.jitterDone()
 
 	// One wait budget for the whole request: nextAccountWithWait runs once per
 	// attempt, so a per-call cap would allow maxRetries x poolWaitCap.
@@ -357,11 +359,12 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 			break
 		}
 		heldAcc = acc // the pick consumed this account's in-flight slot inside the filter
+		ct.picked(acc.Proxy != "")
 
 		// Per-account human-pace spacing, applied AFTER the pool selects the
 		// account and keyed by that account. Keying by account (not domain) means
 		// a low-frequency caller is never starved by a high-frequency one — each
-		// account self-paces its own rhythm. Additive to the anti-fingerprint
+		// account self-paces its own rhythm. Independent of the opt-in pre-request
 		// jitter above; well under the per-account rate ceiling so it never caps
 		// throughput. nil pacer = pacing disabled.
 		if c.accountPacer != nil {
@@ -369,6 +372,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 				return nil, nil, err
 			}
 		}
+		ct.paced()
 
 		// NO proactive ct0 rotation: an established session's ct0 is validated
 		// server-side, so replacing it with a client-random value on a timer
@@ -1082,6 +1086,9 @@ func requiresAuth(endpoint string) bool {
 		// (the Mar-2026 lesson, plan §T5 / doc §8).
 		"Bookmarks", "HomeTimeline", "HomeLatestTimeline",
 		"ListLatestTweetsTimeline", "CommunityTweetsTimeline", "BlueVerifiedFollowers",
+		// Device-notification feed: the legacy REST read and its GraphQL
+		// fallback are both per-account feeds — a real account always.
+		"DeviceFollow", "tweetNotificationsQuery",
 		// T5.5 engagement mutations: writes always need a real account, never a
 		// guest token. (ReplyTweet routes through the CreateTweet op, already above.)
 		"FavoriteTweet", "UnfavoriteTweet", "CreateRetweet", "DeleteRetweet",

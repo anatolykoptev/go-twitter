@@ -3,6 +3,7 @@ package twitter
 import (
 	"time"
 
+	stealth "github.com/anatolykoptev/go-stealth"
 	"github.com/anatolykoptev/go-stealth/ratelimit"
 	"github.com/anatolykoptev/go-twitter/captcha"
 	"github.com/anatolykoptev/go-twitter/xtid"
@@ -123,6 +124,11 @@ type ClientConfig struct {
 	// enabled with safe defaults).
 	AccountPaceDisabled bool
 
+	// RequestJitter opts in to a random delay before every pool GET/POST (see
+	// WithRequestJitter). nil (the default) and a zero Jitter send immediately.
+	// The pinned write path (doPOST) and media upload keep stealth.DefaultJitter
+	// regardless, and the per-account pacer is independent of this field.
+	RequestJitter *stealth.Jitter
 	// MaxInFlightPerAccount caps the number of requests a single account may
 	// have in flight at once — the in-process counterpart of nitter's
 	// maxConcurrentReqs. A pool pick that would exceed the cap skips the
@@ -142,6 +148,11 @@ type ClientConfig struct {
 	// (the *WithSocial path). The manager's own hook owns the alert; NewClient
 	// does not overwrite it. Unexported: package-internal wiring, no public API.
 	sharedXtid *xtid.Manager
+
+	// sharedPacer, when set, replaces the per-client account pacer so spacing
+	// survives across clients that serve the same account (the per-call clients
+	// behind the *WithSocial helpers). Internal; see socialPacerFor.
+	sharedPacer *ratelimit.KeyedPacer
 
 	// skipPoolGauge suppresses the twitter.client.pool.accounts callback. The
 	// gauge has no per-client attribute, so a one-account per-call client would
