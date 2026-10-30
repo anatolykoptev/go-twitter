@@ -46,6 +46,8 @@ func okWindow(string, int) rlWindow {
 func TestDefaultClient_NoPreRequestJitter(t *testing.T) {
 	f := newRLFakeX(t, okWindow)
 	c, _ := newRLClient(t, 1, 50, nil)
+	prev := stealth.DefaultJitter
+	t.Cleanup(func() { stealth.DefaultJitter = prev })
 	stealth.DefaultJitter = stealth.Jitter{Min: 3 * time.Second, Max: 4 * time.Second}
 	rec := &jitterRecorder{}
 	c.jitterSleep = rec.sleep
@@ -154,4 +156,27 @@ func TestWithAccountPace(t *testing.T) {
 	WithAccountPace(0, time.Second)(&m)
 	m.defaults()
 	assert.Equal(t, time.Nanosecond, m.AccountPaceMin, "zero min must not fall back to the 800ms default")
+}
+
+// WithAccountPace(min, 0) must space by ~min, not min plus the 1.2s default
+// random component (defaults() replaces a zero AccountPaceRandom).
+//
+// Mutation: options.go WithAccountPace, drop the `if random <= 0 { random =
+// time.Nanosecond }` floor => TestWithAccountPace_ZeroRandomMeansNoRandom goes
+// RED (`AccountPaceRandom` becomes 1.2s).
+func TestWithAccountPace_ZeroRandomMeansNoRandom(t *testing.T) {
+	cfg := ClientConfig{}
+	WithAccountPace(100*time.Millisecond, 0)(&cfg)
+	cfg.defaults()
+	assert.Equal(t, 100*time.Millisecond, cfg.AccountPaceMin)
+	assert.Less(t, cfg.AccountPaceRandom, time.Millisecond, "zero random must not be replaced by the 1.2s default")
+
+	p := buildAccountPacer(cfg)
+	ctx := context.Background()
+	require.NoError(t, p.Wait(ctx, "acct"))
+	start := time.Now()
+	require.NoError(t, p.Wait(ctx, "acct"))
+	gap := time.Since(start)
+	assert.GreaterOrEqual(t, gap, 90*time.Millisecond)
+	assert.Less(t, gap, 300*time.Millisecond, "spacing must be ~100ms, not 100ms + up to 1.2s")
 }

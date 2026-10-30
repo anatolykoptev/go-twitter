@@ -34,9 +34,9 @@ func WithoutRequestJitter() ClientOption { return WithRequestJitter(0, 0) }
 
 // WithAccountPace overrides the per-account human-pace spacing for this client
 // only: consecutive requests of one account are spaced by [min, min+random).
-// WithAccountPace(0, 0) disables the pacer. A zero min with a positive random is
-// treated as a 1ns floor (a zero AccountPaceMin would otherwise be replaced by
-// the 800ms default). Removing the pace makes one account's request rhythm
+// WithAccountPace(0, 0) disables the pacer. A zero min or zero random is
+// treated as a 1ns floor (a zero field would otherwise be replaced by the 800ms /
+// 1.2s default), so WithAccountPace(100ms, 0) spaces by exactly ~100ms. Removing the pace makes one account's request rhythm
 // more regular; the per-endpoint rate limiter still applies.
 func WithAccountPace(min, random time.Duration) ClientOption {
 	return func(cfg *ClientConfig) {
@@ -45,11 +45,13 @@ func WithAccountPace(min, random time.Duration) ClientOption {
 			return
 		}
 		cfg.AccountPaceDisabled = false
+		// defaults() replaces a zero min or zero random with the 800ms / 1.2s
+		// defaults, so an intentional zero is expressed as a 1ns floor.
 		if min <= 0 {
 			min = time.Nanosecond
 		}
-		if random < 0 {
-			random = 0
+		if random <= 0 {
+			random = time.Nanosecond
 		}
 		cfg.AccountPaceMin, cfg.AccountPaceRandom = min, random
 	}
