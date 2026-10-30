@@ -227,7 +227,7 @@ func (c *Client) nextUsableAt(endpoint string) (at time.Time, ok bool) {
 // relogin, and guest-token fallback.
 func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string, payload []byte) ([]byte, map[string]string, error) {
 	ct := beginCall(ctx, endpoint) // nil unless the caller attached a RequestTrace
-	// Anti-fingerprint jitter (configurable per client; default stealth.DefaultJitter)
+	// Pre-request jitter: off unless the client opted in with WithRequestJitter.
 	if err := c.preRequestJitter(ctx); err != nil {
 		return nil, nil, err
 	}
@@ -364,7 +364,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 		// Per-account human-pace spacing, applied AFTER the pool selects the
 		// account and keyed by that account. Keying by account (not domain) means
 		// a low-frequency caller is never starved by a high-frequency one — each
-		// account self-paces its own rhythm. Additive to the anti-fingerprint
+		// account self-paces its own rhythm. Independent of the opt-in pre-request
 		// jitter above; well under the per-account rate ceiling so it never caps
 		// throughput. nil pacer = pacing disabled.
 		if c.accountPacer != nil {

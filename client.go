@@ -37,7 +37,7 @@ type Client struct {
 	poolGaugeReg         metric.Registration                              // pool.accounts callback; unregistered by Close (guarded by mu)
 	warmDoerOverride     warmDoer                                         // test seam: replaces the account client for xtid warm-page fetches
 	qid                  *qidRefresher                                    // nil = the process-wide queryId refresher; only tests set it
-	requestJitter        *stealth.Jitter                                  // pre-request jitter for pool requests; nil = stealth.DefaultJitter (read at call time)
+	requestJitter        *stealth.Jitter                                  // pre-request jitter for pool requests (opt-in); nil = none
 	jitterSleep          func(ctx context.Context, d time.Duration) error // test seam: replaces the real sleep in preRequestJitter
 
 	mu                sync.Mutex
@@ -55,8 +55,8 @@ type Client struct {
 // NewClient creates a fully-wired Twitter client.
 //
 // Optional ClientOptions (WithRequestJitter, WithoutRequestJitter,
-// WithAccountPace) adjust the config after it is passed in; without any option
-// behaviour is unchanged.
+// WithAccountPace) adjust the config after it is passed in. Without WithRequestJitter pooled
+// requests are sent without a pre-request delay.
 func NewClient(cfg ClientConfig, clientOpts ...ClientOption) (*Client, error) {
 	for _, o := range clientOpts {
 		o(&cfg)
@@ -184,7 +184,7 @@ func NewClient(cfg ClientConfig, clientOpts ...ClientOption) (*Client, error) {
 	}
 	xpffGen := xpff.New(xpffGuestID, defaultUserAgent)
 
-	// Per-account human-pace spacing. ADDITIVE to the anti-fingerprint jitter: it
+	// Per-account human-pace spacing. Independent of the opt-in pre-request jitter: it
 	// spaces a single account's consecutive requests for stealth, keyed by
 	// account (not domain), so a low-frequency caller is never starved by a
 	// global gate. The per-account-per-endpoint rate limiter remains the

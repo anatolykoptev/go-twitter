@@ -124,10 +124,10 @@ type ClientConfig struct {
 	// enabled with safe defaults).
 	AccountPaceDisabled bool
 
-	// RequestJitter overrides the random delay applied before every pool GET/POST
-	// (see WithRequestJitter). nil = stealth.DefaultJitter (500ms-2.5s), the
-	// historical behaviour. A zero Jitter disables the delay. The pinned write
-	// path (doPOST) and media upload keep stealth.DefaultJitter regardless.
+	// RequestJitter opts in to a random delay before every pool GET/POST (see
+	// WithRequestJitter). nil (the default) and a zero Jitter send immediately.
+	// The pinned write path (doPOST) and media upload keep stealth.DefaultJitter
+	// regardless, and the per-account pacer is independent of this field.
 	RequestJitter *stealth.Jitter
 	// MaxInFlightPerAccount caps the number of requests a single account may
 	// have in flight at once — the in-process counterpart of nitter's

@@ -10,25 +10,26 @@ import (
 // ClientOption adjusts a ClientConfig before NewClient builds the client.
 type ClientOption func(*ClientConfig)
 
-// WithRequestJitter replaces the random delay (default 500ms-2.5s) applied
-// before every pool-rotated GET/POST with a uniform delay in [min, max).
-// It does not affect the pinned write path (doPOST) or media upload, which keep
-// their human pacing.
+// WithRequestJitter opts back in to a random delay before every pool-rotated
+// GET/POST, drawn uniformly from [min, max). By default a client sends
+// immediately: account rotation and quotas belong to the service that leases
+// accounts, and the old 500ms-2.5s sleep dominated read latency (median ~1.5s
+// of a ~2s call). The per-account pacer (WithAccountPace) is unaffected and
+// still spaces consecutive requests of one account. The pinned write path
+// (doPOST) and media upload keep their own human pacing regardless.
 //
-// Intended for latency-critical read polling: the default jitter dominates the
-// wall time of a call (median ~1.5s of ~2s). Shrinking it makes request timing
-// more regular and therefore easier to fingerprint; callers should randomize
-// their own poll schedule instead.
+// stealth.DefaultJitter reproduces the previous default:
+//
+//	twitter.WithRequestJitter(stealth.DefaultJitter.Min, stealth.DefaultJitter.Max)
 func WithRequestJitter(min, max time.Duration) ClientOption {
 	return func(cfg *ClientConfig) {
 		cfg.RequestJitter = &stealth.Jitter{Min: min, Max: max}
 	}
 }
 
-// WithoutRequestJitter removes the pre-request delay entirely; equivalent to
-// WithRequestJitter(0, 0). See WithRequestJitter for when this is appropriate
-// (latency-critical read polling) and what it costs (more regular request
-// timing; randomize the poll schedule yourself).
+// WithoutRequestJitter removes the pre-request delay; equivalent to
+// WithRequestJitter(0, 0). This is already the default and exists to state the
+// intent explicitly (and to override an earlier WithRequestJitter).
 func WithoutRequestJitter() ClientOption { return WithRequestJitter(0, 0) }
 
 // WithAccountPace overrides the per-account human-pace spacing for this client
@@ -54,14 +55,13 @@ func WithAccountPace(min, random time.Duration) ClientOption {
 	}
 }
 
-// preRequestJitter sleeps the configured pre-request jitter (nil config =
-// stealth.DefaultJitter, read at call time). A non-positive draw does not sleep.
+// preRequestJitter sleeps the pre-request jitter opted into with
+// WithRequestJitter. Unset (the default) or a non-positive draw does not sleep.
 func (c *Client) preRequestJitter(ctx context.Context) error {
-	j := stealth.DefaultJitter
-	if c.requestJitter != nil {
-		j = *c.requestJitter
+	if c.requestJitter == nil {
+		return nil
 	}
-	d := j.Duration()
+	d := c.requestJitter.Duration()
 	if d <= 0 {
 		return nil
 	}

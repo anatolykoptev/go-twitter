@@ -7,6 +7,7 @@ import (
 	"time"
 
 	stealth "github.com/anatolykoptev/go-stealth"
+	"github.com/anatolykoptev/go-stealth/ratelimit"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -35,23 +36,20 @@ func okWindow(string, int) rlWindow {
 	return rlWindow{limit: 50, remaining: 40, reset: time.Now().Add(time.Minute)}
 }
 
-// A client built with WithoutRequestJitter performs zero jitter sleep on a GET
-// and does not spend the default 0.5-2.5s before sending.
+// A default client (no option) performs zero pre-request jitter on a GET, even
+// when the process-wide stealth.DefaultJitter holds a long sentinel range.
 //
-// Mutation: request.go doPoolRequest, replace c.preRequestJitter(ctx) with
-// stealth.DefaultJitter.Sleep(ctx) => this test goes RED (elapsed assertion).
-func TestWithoutRequestJitter_NoSleepOnGET(t *testing.T) {
+// Mutation: options.go preRequestJitter, replace the nil-config early return
+// with `j := stealth.DefaultJitter` (default resolves to stealth.DefaultJitter
+// again) => TestDefaultClient_NoPreRequestJitter goes RED:
+// "default client must not sleep before the request".
+func TestDefaultClient_NoPreRequestJitter(t *testing.T) {
 	f := newRLFakeX(t, okWindow)
 	c, _ := newRLClient(t, 1, 50, nil)
-	// Sentinel far above the ~0.5s baseline of a GET here: a client that falls
-	// back to the process default sleeps 3-4s and trips the elapsed bound.
 	stealth.DefaultJitter = stealth.Jitter{Min: 3 * time.Second, Max: 4 * time.Second}
-
-	var cfg ClientConfig
-	WithoutRequestJitter()(&cfg)
-	c.requestJitter = cfg.RequestJitter
 	rec := &jitterRecorder{}
 	c.jitterSleep = rec.sleep
+	require.Nil(t, c.requestJitter)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -60,33 +58,51 @@ func TestWithoutRequestJitter_NoSleepOnGET(t *testing.T) {
 	elapsed := time.Since(start)
 	require.NoError(t, err)
 
-	assert.Empty(t, rec.got(), "no-jitter client must not sleep before the request")
-	assert.Less(t, elapsed, 2*time.Second, "GET paid the process-default jitter instead of the configured none")
+	assert.Empty(t, rec.got(), "default client must not sleep before the request")
+	assert.Less(t, elapsed, 2*time.Second, "GET paid the process-default jitter")
 	assert.Equal(t, 1, f.hitsFor("tokA"))
 }
 
-// A default client (no option) still draws from the 500ms-2.5s range.
+// WithoutRequestJitter after WithRequestJitter turns the delay off again.
+func TestWithoutRequestJitter_OverridesOptIn(t *testing.T) {
+	var cfg ClientConfig
+	WithRequestJitter(time.Second, 2*time.Second)(&cfg)
+	WithoutRequestJitter()(&cfg)
+	c := &Client{requestJitter: cfg.RequestJitter}
+	rec := &jitterRecorder{}
+	c.jitterSleep = rec.sleep
+	require.NoError(t, c.preRequestJitter(context.Background()))
+	assert.Empty(t, rec.got())
+}
+
+// The per-account pacer still spaces two back-to-back requests on one account
+// when pre-request jitter is off.
 //
-// Mutation: same line as above => the recorder sees no call => RED.
-func TestDefaultClient_UsesDefaultJitterRange(t *testing.T) {
+// Mutation: request.go doPoolRequest, delete the `c.accountPacer.Wait(ctx,
+// acc.ID())` call => the elapsed assertion goes RED.
+func TestDefaultClient_AccountPacerStillSpacesRequests(t *testing.T) {
+	const pace = time.Second
 	f := newRLFakeX(t, okWindow)
 	c, _ := newRLClient(t, 1, 50, nil)
-	stealth.DefaultJitter = stealth.Jitter{Min: 500 * time.Millisecond, Max: 2500 * time.Millisecond}
 	rec := &jitterRecorder{}
 	c.jitterSleep = rec.sleep
 
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	for i := 0; i < 5; i++ {
-		_, _, err := c.doPoolRequest(ctx, "GET", rlEndpoint, f.url(), nil)
+	// Warm-up without a pacer so one-time setup cost is not part of the span.
+	_, _, err := c.doPoolRequest(ctx, "GET", rlEndpoint, f.url(), nil)
+	require.NoError(t, err)
+
+	c.accountPacer = ratelimit.NewKeyedPacer(pace, 0)
+	start := time.Now()
+	for i := 0; i < 2; i++ {
+		_, _, err = c.doPoolRequest(ctx, "GET", rlEndpoint, f.url(), nil)
 		require.NoError(t, err)
 	}
-	ds := rec.got()
-	require.Len(t, ds, 5)
-	for _, d := range ds {
-		assert.GreaterOrEqual(t, d, 500*time.Millisecond)
-		assert.Less(t, d, 2500*time.Millisecond)
-	}
+
+	// The first paced request fires at once; the second waits out the pace.
+	assert.GreaterOrEqual(t, time.Since(start), pace-50*time.Millisecond, "second request on the same account was not paced")
+	assert.Empty(t, rec.got(), "pacing must not be implemented via the jitter hook")
 }
 
 func TestWithRequestJitter_CustomRange(t *testing.T) {
@@ -119,7 +135,7 @@ func TestNewClient_WiresRequestJitter(t *testing.T) {
 	d, err := NewClient(ClientConfig{DisableGuestFallback: true, SessionDir: t.TempDir()})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = d.Close() })
-	assert.Nil(t, d.requestJitter, "unset => stealth.DefaultJitter")
+	assert.Nil(t, d.requestJitter, "unset => no pre-request jitter")
 	assert.NotNil(t, d.accountPacer)
 }
 
