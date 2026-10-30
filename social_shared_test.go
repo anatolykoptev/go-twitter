@@ -310,3 +310,46 @@ func TestSocial_AccountPacerSharedAcrossPerCallClients(t *testing.T) {
 	assert.GreaterOrEqual(t, time.Since(start), pace-50*time.Millisecond,
 		"two *WithSocial calls on one account were not spaced by the account pace")
 }
+
+// Every *WithSocial helper must hand its trailing options to the per-call client.
+//
+// Mutation: social.go GetFollowingWithSocial, drop `, opts...` from the
+// withSocialAccount call => TestSocial_AllHelpersApplyOptions/GetFollowing goes
+// RED (`option was not applied`).
+func TestSocial_AllHelpersApplyOptions(t *testing.T) {
+	ctx := context.Background()
+	calls := map[string]func(sc *social.Client, opt ClientOption){
+		"Search": func(sc *social.Client, o ClientOption) { _, _ = SearchWithSocial(ctx, sc, "q", 5, o) },
+		"SearchTweets": func(sc *social.Client, o ClientOption) {
+			_, _ = SearchTweetsWithSocial(ctx, sc, "q", SearchLatest, 5, o)
+		},
+		"SearchUsers":          func(sc *social.Client, o ClientOption) { _, _ = SearchUsersWithSocial(ctx, sc, "q", 5, o) },
+		"GetUser":              func(sc *social.Client, o ClientOption) { _, _ = GetUserWithSocial(ctx, sc, "tesla", o) },
+		"GetUserTweets":        func(sc *social.Client, o ClientOption) { _, _ = GetUserTweetsWithSocial(ctx, sc, "tesla", 5, o) },
+		"GetTweetConversation": func(sc *social.Client, o ClientOption) { _, _, _ = GetTweetConversationWithSocial(ctx, sc, "1", o) },
+		"GetUserTweetsByID":    func(sc *social.Client, o ClientOption) { _, _ = GetUserTweetsByIDWithSocial(ctx, sc, "999", 5, o) },
+		"GetFollowing":         func(sc *social.Client, o ClientOption) { _, _ = GetFollowingWithSocial(ctx, sc, "999", 5, o) },
+		"GetFollowers":         func(sc *social.Client, o ClientOption) { _, _ = GetFollowersWithSocial(ctx, sc, "999", 5, o) },
+		"GetRetweeters":        func(sc *social.Client, o ClientOption) { _, _ = GetRetweetersWithSocial(ctx, sc, "1", 5, o) },
+		"GetTweetByID":         func(sc *social.Client, o ClientOption) { _, _ = GetTweetByIDWithSocial(ctx, sc, "1", o) },
+	}
+	require.Len(t, calls, 11, "one entry per *WithSocial helper")
+	for name, call := range calls {
+		t.Run(name, func(t *testing.T) {
+			r := newSocialRig(t)
+			var applied atomic.Int32
+			opt := func(cfg *ClientConfig) {
+				applied.Add(1)
+				WithAccountPace(0, 0)(cfg) // keep the journey fast
+			}
+			done := make(chan struct{})
+			go func() { defer close(done); call(r.sc, opt) }()
+			select {
+			case <-done:
+			case <-time.After(60 * time.Second):
+				t.Fatal("helper did not return")
+			}
+			assert.Positive(t, applied.Load(), "option was not applied")
+		})
+	}
+}
