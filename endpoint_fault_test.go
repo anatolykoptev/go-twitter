@@ -416,3 +416,45 @@ func TestEndpointFault_OverloadedSkipsBackoffWhenPoolEmpty(t *testing.T) {
 	assert.Less(t, elapsed, 500*time.Millisecond,
 		"with no eligible account the retry backoff must be skipped, not slept")
 }
+
+// HTTP 410 means the route is retired for every account, exactly like 404: it
+// classifies as an endpoint fault and is never charged to the serving account.
+//
+// Mutation: errors.go newAPIError, drop `status == 410,` from the endpoint-fold
+// case => TestNewAPIError_410IsEndpointFault and
+// TestEndpointFault_410NeverChargedToAccount go RED.
+func TestNewAPIError_410IsEndpointFault(t *testing.T) {
+	for _, body := range []string{``, `{"errors":[{"message":"Gone"}]}`} {
+		e := newAPIError(http.StatusGone, []byte(body), nil)
+		assert.Equal(t, errEndpoint, e.Class, "body %q", body)
+		assert.True(t, IsEndpointFault(e))
+		assert.ErrorIs(t, e, ErrEndpoint)
+	}
+}
+
+func TestEndpointFault_410NeverChargedToAccount(t *testing.T) {
+	fake := newPoolWaitFake(t)
+	fake.status.Store(http.StatusGone)
+	fake.body = `{"errors":[{"message":"Gone"}]}`
+
+	c, accs := newPoolWaitClient(t, 2)
+
+	origBase := twitterBase
+	twitterBase = fake.srv.URL + "/i/api/graphql"
+	t.Cleanup(func() { twitterBase = origBase })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	const calls = 12 // > 5 consecutive failures needed to trip one account
+	for i := 0; i < calls; i++ {
+		_, err := c.SearchTimeline(ctx, "golang", 10)
+		require.Error(t, err, "call %d", i)
+		assert.True(t, errors.Is(err, ErrEndpoint), "call %d: want endpoint fault, got %v", i, err)
+	}
+	for _, a := range accs {
+		total, failed, _ := a.Stats()
+		assert.Zero(t, failed, "account %s must not be charged a 410", a.Username)
+		assert.Zero(t, total, "account %s: a 410 is not the account's request", a.Username)
+		assert.True(t, a.IsActive(), "account %s must never soft-deactivate on 410", a.Username)
+	}
+}
