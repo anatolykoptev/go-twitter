@@ -43,8 +43,8 @@
                                     "id": "VXNlcjpQTEFDRUhPTERFUg1",
                                     "rest_id": "3100000000000000001",
                                     "core": {
-                                      "name": "Reuters",
-                                      "screen_name": "Reuters"
+                                      "name": "news_a",
+                                      "screen_name": "news_a"
                                     }
                                   }
                                 }
@@ -90,8 +90,8 @@
                                     "id": "VXNlcjpQTEFDRUhPTERFUg2",
                                     "rest_id": "3100000000000000002",
                                     "core": {
-                                      "name": "zerohedge",
-                                      "screen_name": "zerohedge"
+                                      "name": "news_b",
+                                      "screen_name": "news_b"
                                     }
                                   }
                                 }

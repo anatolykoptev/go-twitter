@@ -7,14 +7,17 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 )
 
 // deviceFollowURL is the legacy endpoint serving the merged timeline of new
 // tweets from every account the viewer enabled device notifications ("bell")
 // for: one feed covering all belled authors.
-const deviceFollowURL = "https://x.com/i/api/2/notifications/device_follow.json"
+// A var (not const) only so tests can point it at a fake server.
+var deviceFollowURL = "https://x.com/i/api/2/notifications/device_follow.json"
 
 // deviceFollowEndpoint is the rate-limit/metrics key for the REST bell source.
 const deviceFollowEndpoint = "DeviceFollow"
@@ -111,11 +114,12 @@ func tweetNotificationsURL(count int) (string, error) {
 }
 
 // GetDeviceNotifications polls the merged device-notifications feed: REST
-// device_follow.json first, GraphQL tweetNotificationsQuery when REST is gone
-// (404/410/endpoint fault) or answers empty. An empty REST answer plus a failing
-// GraphQL fallback is not an error — a freshly belled account legitimately has
-// nothing yet and the fallback is best effort — so it yields an empty poll and a
-// logged warning. Any other REST error is returned as is.
+// device_follow.json, with GraphQL tweetNotificationsQuery as the fallback when
+// REST is gone (HTTP 404/410 or another endpoint fault). An empty REST answer is
+// a normal quiet poll and does NOT trigger the fallback — that would double the
+// request volume in the steady state and hide failures. If the fallback fails
+// too, both sources are broken and the joined error is returned; a cancelled or
+// expired ctx is always returned as is.
 func (c *Client) GetDeviceNotifications(ctx context.Context, count int) ([]*Tweet, error) {
 	return deviceNotifications(ctx, count, c.GetDeviceFollowTweets, c.GetTweetNotifications)
 }
@@ -125,21 +129,22 @@ type feedFetcher func(ctx context.Context, count int) ([]*Tweet, error)
 // deviceNotifications is GetDeviceNotifications with the two sources injected.
 func deviceNotifications(ctx context.Context, count int, rest, gql feedFetcher) ([]*Tweet, error) {
 	tweets, err := rest(ctx, count)
-	if err != nil {
-		var ae *APIError
-		if (errors.As(err, &ae) && (ae.Status == http.StatusNotFound || ae.Status == http.StatusGone)) || IsEndpointFault(err) {
-			return gql(ctx, count)
-		}
-		return nil, err
-	}
-	if len(tweets) > 0 {
+	if err == nil {
 		return tweets, nil
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, errors.Join(ctxErr, err)
+	}
+	var ae *APIError
+	dead := IsEndpointFault(err) || (errors.As(err, &ae) && (ae.Status == http.StatusNotFound || ae.Status == http.StatusGone))
+	if !dead {
+		return nil, err
 	}
 	g, gerr := gql(ctx, count)
 	if gerr != nil {
-		slog.Warn("device notifications: REST empty and GraphQL fallback failed; returning empty poll",
-			slog.String("op", tweetNotificationsOp), slog.Any("error", gerr))
-		return tweets, nil
+		slog.Warn("device notifications: REST dead and GraphQL fallback failed",
+			slog.String("op", tweetNotificationsOp), slog.Any("rest_error", err), slog.Any("error", gerr))
+		return nil, errors.Join(err, gerr)
 	}
 	return g, nil
 }
@@ -147,6 +152,11 @@ func deviceNotifications(ctx context.Context, count int, rest, gql feedFetcher) 
 // parseDeviceFollow decodes the globalObjects shape: device_follow.json
 // answers like the 1.5 API, with all tweets under globalObjects.tweets and
 // their authors under globalObjects.users keyed by user id.
+//
+// globalObjects.tweets also carries tweets the feed merely references (the
+// original behind a retweet, whose author the viewer may not follow), so when the
+// timeline lists tweet entries only those are returned. Tweets come back newest
+// first (descending snowflake id) with CreatedAt set.
 func parseDeviceFollow(body []byte) ([]*Tweet, error) {
 	var raw struct {
 		GlobalObjects struct {
@@ -155,12 +165,31 @@ func parseDeviceFollow(body []byte) ([]*Tweet, error) {
 				FullText  string `json:"full_text"`
 				Text      string `json:"text"`
 				UserIDStr string `json:"user_id_str"`
+				CreatedAt string `json:"created_at"`
 			} `json:"tweets"`
 			Users map[string]struct {
 				ScreenName string `json:"screen_name"`
 				Name       string `json:"name"`
 			} `json:"users"`
 		} `json:"globalObjects"`
+		Timeline struct {
+			Instructions []struct {
+				AddEntries struct {
+					Entries []struct {
+						EntryID string `json:"entryId"`
+						Content struct {
+							Item struct {
+								Content struct {
+									Tweet struct {
+										ID string `json:"id"`
+									} `json:"tweet"`
+								} `json:"content"`
+							} `json:"item"`
+						} `json:"content"`
+					} `json:"entries"`
+				} `json:"addEntries"`
+			} `json:"instructions"`
+		} `json:"timeline"`
 		Errors []struct {
 			Code    int    `json:"code"`
 			Message string `json:"message"`
@@ -172,23 +201,60 @@ func parseDeviceFollow(body []byte) ([]*Tweet, error) {
 	if len(raw.Errors) > 0 {
 		return nil, fmt.Errorf("twitter API error %d: %s", raw.Errors[0].Code, raw.Errors[0].Message)
 	}
+	listed := map[string]struct{}{}
+	for _, ins := range raw.Timeline.Instructions {
+		for _, e := range ins.AddEntries.Entries {
+			if strings.HasPrefix(e.EntryID, "promoted") {
+				continue
+			}
+			if id := e.Content.Item.Content.Tweet.ID; id != "" {
+				listed[id] = struct{}{}
+			}
+		}
+	}
 	tweets := make([]*Tweet, 0, len(raw.GlobalObjects.Tweets))
-	for _, lt := range raw.GlobalObjects.Tweets {
+	for key, lt := range raw.GlobalObjects.Tweets {
 		if lt.IDStr == "" {
 			continue
+		}
+		if len(listed) > 0 {
+			if _, ok := listed[lt.IDStr]; !ok {
+				if _, ok := listed[key]; !ok {
+					continue
+				}
+			}
 		}
 		text := lt.FullText
 		if text == "" {
 			text = lt.Text
 		}
 		t := &Tweet{ID: lt.IDStr, AuthorID: lt.UserIDStr, Text: text}
+		t.CreatedAt = parseTwitterTime(lt.CreatedAt, "device_follow")
+		if t.CreatedAt.IsZero() {
+			if ts, err := SnowflakeTime(lt.IDStr); err == nil {
+				t.CreatedAt = ts
+			}
+		}
 		if u, ok := raw.GlobalObjects.Users[lt.UserIDStr]; ok {
 			t.AuthorHandle = u.ScreenName
 			t.AuthorName = u.Name
 		}
 		tweets = append(tweets, t)
 	}
+	sortNewestFirst(tweets)
 	return tweets, nil
+}
+
+// sortNewestFirst orders tweets by descending snowflake id (numeric: a longer
+// id is larger, equal lengths compare lexically).
+func sortNewestFirst(ts []*Tweet) {
+	sort.SliceStable(ts, func(i, j int) bool {
+		a, b := ts[i].ID, ts[j].ID
+		if len(a) != len(b) {
+			return len(a) > len(b)
+		}
+		return a > b
+	})
 }
 
 // xwebTweetResult is a tweet in the x-web (Vite/Relay) response shape: text and
@@ -262,7 +328,7 @@ func parseTweetNotifications(body []byte) ([]*Tweet, string, error) {
 	var tweets []*Tweet
 	for _, ins := range tl.Instructions {
 		for _, e := range ins.Entries {
-			if e.Content.Content.TypeName != "TimelineTweet" {
+			if e.Content.Content.TypeName != "TimelineTweet" || strings.HasPrefix(e.EntryID, "promoted") {
 				continue
 			}
 			r := e.Content.Content.TweetResults.Result

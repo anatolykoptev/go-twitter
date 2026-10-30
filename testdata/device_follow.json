@@ -4,8 +4,8 @@
       "3100000000000000001": {
         "id": 3100000000000000001,
         "id_str": "3100000000000000001",
-        "name": "Deltaone",
-        "screen_name": "DeItaone",
+        "name": "News A",
+        "screen_name": "news_a",
         "location": "",
         "description": "",
         "entities": {"description": {"urls": []}}
@@ -13,8 +13,8 @@
       "3100000000000000002": {
         "id": 3100000000000000002,
         "id_str": "3100000000000000002",
-        "name": "zerohedge",
-        "screen_name": "zerohedge",
+        "name": "news_b",
+        "screen_name": "news_b",
         "location": "",
         "description": "",
         "entities": {"description": {"urls": []}}
@@ -46,7 +46,7 @@
         "created_at": "Thu Oct 30 10:18:10 +0000 2026",
         "id": 1985000000000000002,
         "id_str": "1985000000000000002",
-        "full_text": "RT @Reuters: markets up",
+        "full_text": "RT @news_c: markets up",
         "truncated": false,
         "display_text_range": [0, 22],
         "entities": {"hashtags": [], "symbols": [], "user_mentions": [], "urls": []},
