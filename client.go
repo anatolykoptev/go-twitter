@@ -189,7 +189,10 @@ func NewClient(cfg ClientConfig, clientOpts ...ClientOption) (*Client, error) {
 	// account (not domain), so a low-frequency caller is never starved by a
 	// global gate. The per-account-per-endpoint rate limiter remains the
 	// authoritative throughput ceiling; this pace stays well under it.
-	accountPacer := buildAccountPacer(cfg)
+	accountPacer := cfg.sharedPacer
+	if accountPacer == nil {
+		accountPacer = buildAccountPacer(cfg)
+	}
 
 	c := &Client{
 		client:               bc,

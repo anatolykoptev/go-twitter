@@ -149,6 +149,11 @@ type ClientConfig struct {
 	// does not overwrite it. Unexported: package-internal wiring, no public API.
 	sharedXtid *xtid.Manager
 
+	// sharedPacer, when set, replaces the per-client account pacer so spacing
+	// survives across clients that serve the same account (the per-call clients
+	// behind the *WithSocial helpers). Internal; see socialPacerFor.
+	sharedPacer *ratelimit.KeyedPacer
+
 	// skipPoolGauge suppresses the twitter.client.pool.accounts callback. The
 	// gauge has no per-client attribute, so a one-account per-call client would
 	// overwrite the series of the long-lived pool (see docs/metrics.md).

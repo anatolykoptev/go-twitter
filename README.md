@@ -227,6 +227,9 @@ rotation and quotas are expected to be handled by the service that leases accoun
 per-account pacer (`WithAccountPace`, default 0.8 s + random) still spaces consecutive requests of one
 account. To restore the old delay: `twitter.NewClient(cfg, twitter.WithRequestJitter(500*time.Millisecond, 2500*time.Millisecond))`.
 Writes and media uploads keep their own jitter either way.
+The `*WithSocial` helpers build a client per call, so they share one pacer per account across calls
+(consecutive calls that lease the same account are spaced by the pace) and take the same options as a
+trailing argument, e.g. `twitter.GetUserWithSocial(ctx, sc, "handle", twitter.WithRequestJitter(500*time.Millisecond, 2500*time.Millisecond))`.
 
 ## Configuration
 
