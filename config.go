@@ -142,6 +142,13 @@ type ClientConfig struct {
 	// own request timeout.
 	MaxInFlightPerAccount int
 
+	// XtidKeySource selects the page x-client-transaction-id keys are derived
+	// from. The zero value keeps the account-cookie page; xtid.KeySourceLoggedOut
+	// reads the cookie-less https://x.com/i/jf/ page like the reference
+	// implementation. The GO_TWITTER_XTID_KEY_SOURCE=logged-out env var selects
+	// the same for managers this client does not own. Default: account page.
+	XtidKeySource xtid.KeySource
+
 	// sharedXtid, when set, replaces the per-client xtid manager so key
 	// material, the refresh schedule, the per-kind negative cache, the init
 	// singleflight and the init-failed alert survive across short-lived clients

@@ -143,6 +143,9 @@ func NewClient(cfg ClientConfig, clientOpts ...ClientOption) (*Client, error) {
 	if mgr == nil {
 		fetcher := &bundle.StealthFetcher{Client: bc, UserAgent: defaultUserAgent}
 		mgr = xtid.NewManager(fetcher)
+		if cfg.XtidKeySource != xtid.KeySourceAccountPage {
+			mgr.SetKeySource(cfg.XtidKeySource)
+		}
 		mgr.SetInitFailedHook(func(err error) {
 			alertHook("xtid.init_failed", map[string]any{"error": err.Error()})
 		})

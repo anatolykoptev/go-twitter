@@ -749,7 +749,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 		if status != 200 {
 			c.recordAPICall(endpoint, false, false)
 			apiErr := newAPIError(status, body, respHdrs)
-			apiErr.Message = fmt.Sprintf("%s (guest retry) HTTP %d: %s", endpoint, status, truncateBytes(body, 200))
+			apiErr.Message = withAuthFailure(lastErr, fmt.Sprintf("%s (guest retry) HTTP %d: %s", endpoint, status, truncateBytes(body, 200)))
 			return nil, nil, apiErr
 		}
 		c.recordAPICall(endpoint, true, false)
@@ -758,11 +758,22 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 	if status != 200 {
 		c.recordAPICall(endpoint, false, false)
 		apiErr := newAPIError(status, body, respHdrs)
-		apiErr.Message = fmt.Sprintf("%s (guest) HTTP %d: %s", endpoint, status, truncateBytes(body, 200))
+		apiErr.Message = withAuthFailure(lastErr, fmt.Sprintf("%s (guest) HTTP %d: %s", endpoint, status, truncateBytes(body, 200)))
 		return nil, nil, apiErr
 	}
 	c.recordAPICall(endpoint, true, false)
 	return body, respHdrs, nil
+}
+
+// withAuthFailure prefixes a guest-fallback failure message with the
+// authenticated failure that triggered the fallback. Without it the caller only
+// sees "(guest) HTTP 404" and the real cause (the logged-in request was
+// rejected) is invisible. authErr already names the endpoint and status.
+func withAuthFailure(authErr error, guestMsg string) string {
+	if authErr == nil {
+		return guestMsg
+	}
+	return fmt.Sprintf("authenticated request failed: %v; then %s", authErr, guestMsg)
 }
 
 // recoverCSRF handles a CSRF error 353 for a pool (GET/POST) request without ever

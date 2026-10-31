@@ -215,6 +215,8 @@ Independently of pacing, `MaxInFlightPerAccount` (default 2) bounds how many req
 ## Anti-Detection
 
 - **xtid** — `x-client-transaction-id` generated from x.com page animation keys, refreshed every 30 minutes. Initialised lazily on the first request carrying an account's cookies (logged-out x.com serves a shell without the bundle). If initialization fails, the header is omitted, retries back off from 60 s to 15 min, and one `xtid.init_failed` alert per failure episode is sent to `PoolAlertHook`.
+
+  Key source: by default the keys come from the account-cookie page (`https://x.com/tesla`, falling back to the logged-out landing page). `ClientConfig.XtidKeySource = xtid.KeySourceLoggedOut`, or the environment variable `GO_TWITTER_XTID_KEY_SOURCE=logged-out`, derives them instead from the cookie-less `https://x.com/i/jf/` page, as the reference implementation does; no account cookies are sent for key derivation. `XtidKeySource` is ignored when the xtid manager is shared (the `*WithSocial` helpers); the environment variable still applies to the shared manager. `cmd/xtid-probe` measures which source X accepts.
 - **xpff** — `x-xp-forwarded-for` generated from the session's `guest_id` and user agent.
 - **CT0** — never rotated on a timer or replaced with a client-generated value on an established session; x.com validates it server-side, so doing so causes CSRF 353 errors. The client adopts the ct0 from each successful response's `set-cookie`, persists it to the session file, and on a 353 adopts the server-offered ct0 before falling back to relogin. A generated ct0 is used only at login, when x.com sets none.
 - **TLS** — browser-grade JA3 fingerprints via go-stealth, with a per-account browser profile (`AssignBrowserProfile`).

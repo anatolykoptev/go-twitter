@@ -51,6 +51,31 @@ func onDemandLegacyURL(html string) string {
 	return fmt.Sprintf(onDemandURLTemplate, m[1])
 }
 
+// onDemandNameRe finds the chunk id registered under the name "ondemand.s" in an
+// inline webpack runtime.
+var onDemandNameRe = regexp.MustCompile(`(\d+):\s*["']ondemand\.s["']`)
+
+// onDemandURLFromRuntime ports the reference implementation's
+// ON_DEMAND_FILE_HASH_REGEX: in the webpack runtime the chunk-name map
+// `({<id>:"ondemand.s",...})[e]||e)+"."+({...,<id>:"<hash>",...})[e]` yields the
+// file hash. The reference uses a backreference for <id>, which RE2 lacks, so
+// the id is captured first and then substituted into a second pattern. Returns
+// "" when the page carries no such runtime.
+func onDemandURLFromRuntime(html string) string {
+	for _, m := range onDemandNameRe.FindAllStringSubmatchIndex(html, -1) {
+		id := html[m[2]:m[3]]
+		re, err := regexp.Compile(`\}\)\[e\]\s*\|\|\s*e\)\s*\+\s*["']\.["']\s*\+\s*\(\{[\s\S]*?\b` +
+			id + `:\s*["']([a-zA-Z0-9_-]+)["']`)
+		if err != nil {
+			continue
+		}
+		if h := re.FindStringSubmatch(html[m[1]:]); len(h) > 1 {
+			return fmt.Sprintf(onDemandURLTemplate, h[1])
+		}
+	}
+	return ""
+}
+
 func getVerificationKey(html string) string {
 	re := regexp.MustCompile(`<meta[^>]+name=["']twitter-site-verification["'][^>]+content=["']([^"']+)["']`)
 	matches := re.FindStringSubmatch(html)
@@ -93,6 +118,34 @@ type svgFrame struct {
 	data [][]int
 }
 
+// structuralPathRe locates the animation path the way the reference
+// implementation does: svg -> first child (<g>) -> that child's second child
+// (<path>). The first path is the X logo outline; the second carries the cubic
+// keyframe data in its d attribute.
+var structuralPathRe = regexp.MustCompile(
+	`^<svg[^>]*>\s*<g[^>]*>\s*<path\b[^>]*?(?:/>|>\s*</path>)\s*<path\b[^>]*?\sd=["']([^"']+)["']`)
+
+// fillPathRes are the legacy lookups by the literal animation fill colour. They
+// stay as a fallback for markup without the <svg><g><path><path> shape.
+var fillPathRes = []*regexp.Regexp{
+	regexp.MustCompile(`<path[^>]*d=["']([^"']+)["'][^>]*fill=["']#1d9bf008["']`),
+	regexp.MustCompile(`<path[^>]*fill=["']#1d9bf008["'][^>]*d=["']([^"']+)["']`),
+}
+
+// animationPathData returns the animation path's d attribute from one
+// loading-x-anim <svg> element: structural position first, fill colour second.
+func animationPathData(svg string) string {
+	if m := structuralPathRe.FindStringSubmatch(svg); len(m) > 1 {
+		return m[1]
+	}
+	for _, re := range fillPathRes {
+		if m := re.FindStringSubmatch(svg); len(m) > 1 {
+			return m[1]
+		}
+	}
+	return ""
+}
+
 func getSVGFrames(html string) []svgFrame {
 	frames := make([]svgFrame, 4)
 	for i := 0; i < 4; i++ {
@@ -102,18 +155,12 @@ func getSVGFrames(html string) []svgFrame {
 			continue
 		}
 
-		// Match path with fill="#1d9bf008" — the animation path
-		pathPattern := regexp.MustCompile(`<path[^>]*d=["']([^"']+)["'][^>]*fill=["']#1d9bf008["']`)
-		pathMatch := pathPattern.FindStringSubmatch(svgMatch)
-		if len(pathMatch) < 2 {
-			pathPattern2 := regexp.MustCompile(`<path[^>]*fill=["']#1d9bf008["'][^>]*d=["']([^"']+)["']`)
-			pathMatch = pathPattern2.FindStringSubmatch(svgMatch)
-			if len(pathMatch) < 2 {
-				continue
-			}
+		pathData := animationPathData(svgMatch)
+		if pathData == "" {
+			continue
 		}
 
-		frames[i] = svgFrame{id: i, data: parsePathData(pathMatch[1])}
+		frames[i] = svgFrame{id: i, data: parsePathData(pathData)}
 	}
 	return frames
 }
