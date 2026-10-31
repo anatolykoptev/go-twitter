@@ -163,7 +163,10 @@ recorded through whichever client triggered or observed the refresh, so the
   attempts the spacing refused.
   - `twitter.trigger`: `first` (no successful refresh yet), `ttl` (the active map
     outlived 6 h), `fault` (3 endpoint faults on one operation within 2 min).
-  - `twitter.result`: `ok`; `fetch_failed` (the page or no bundle could be read:
+  - `twitter.result`: `ok`; `ok_xweb_only` (a success from an x-web-only page: with
+    `TWITTER_QID_XWEB=on`, the Vite-only page's legacy chunks were all fetched and held
+    no legacy operation, so only the x-web native ids were applied; it also logs
+    `x-web-only page`); `fetch_failed` (the page or no bundle could be read:
     network, logged-out shell, no x-web scripts); `rejected` (read, but failed
     validation, so nothing was applied); `panic` (the walk panicked on a bundle body and was
     recovered); `suppressed` (an attempt was due but the 15 min / failure-backoff spacing refused it;
@@ -171,7 +174,7 @@ recorded through whichever client triggered or observed the refresh, so the
   - A `fetch_failed` or `rejected` result keeps the last good map. The first
     failure after a success (or after process start) also fires one
     `queryid.refresh_failed` pool alert; further failures do not until a success
-    in between. Alert on `rate(refreshes{result!="ok"})` for a persistent break.
+    in between. Alert on `rate(refreshes{result!~"ok|ok_xweb_only"})` for a persistent break.
 - `changed`: how many operation IDs differed from the compiled set on the last
   successful refresh (operations pinned by a `TWITTER_QID_*` override are not
   counted: the refreshed id is not applied to them). A non-zero value means the binary is behind X: rebuild with

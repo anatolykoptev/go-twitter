@@ -7,6 +7,7 @@ package gqlextract
 import (
 	"log/slog"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -223,4 +224,16 @@ func (e *Extractor) Result() map[string]string {
 func (e *Extractor) Invalid(name string) bool {
 	_, bad := e.invalid[name]
 	return bad
+}
+
+// Ops returns every legacy-shape operation the extractor resolved, tagged
+// StackLegacy, sorted by name. It exists so a combined inventory can report
+// which stack each id came from.
+func (e *Extractor) Ops() []Op {
+	out := make([]Op, 0, len(e.ops))
+	for name, op := range e.ops {
+		out = append(out, Op{Name: name, ID: op.id, Stack: StackLegacy, Source: op.src})
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out
 }
