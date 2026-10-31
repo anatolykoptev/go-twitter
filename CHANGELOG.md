@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.7.2](https://github.com/anatolykoptev/go-twitter/compare/v0.7.1...v0.7.2) (2026-10-31)
+
+
+### Features
+
+* exported X limit table, per-account budget share, account hold, request observer ([#125](https://github.com/anatolykoptev/go-twitter/issues/125)) ([811bb2b](https://github.com/anatolykoptev/go-twitter/commit/811bb2b9dab246d32c906fea5c6c9792f9854bdc))
+
 ## [0.7.1](https://github.com/anatolykoptev/go-twitter/compare/v0.7.0...v0.7.1) (2026-10-31)
 
 
