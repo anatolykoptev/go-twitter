@@ -177,6 +177,7 @@ func TestRequiresAuth_ReadCluster(t *testing.T) {
 	for _, op := range []string{
 		"Bookmarks", "HomeTimeline", "HomeLatestTimeline",
 		"ListLatestTweetsTimeline", "CommunityTweetsTimeline", "BlueVerifiedFollowers",
+		"UserTweetsAndReplies",
 	} {
 		assert.True(t, requiresAuth(op), "op %q must require auth (no guest fallback)", op)
 	}
