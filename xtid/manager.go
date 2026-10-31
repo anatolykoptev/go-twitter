@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -28,11 +29,33 @@ const (
 	// fetch (see SetWarmPageHook).
 	AuthedWarmPageURL = authedWarmPageURL
 
+	// LoggedOutPageURL is the cookie-less page the reference implementation
+	// (Lqm1/x-client-transaction-id) derives its keys from. It serves the
+	// responsive-web runtime, the verification meta and the loading animation.
+	LoggedOutPageURL = "https://x.com/i/jf/"
+
+	// KeySourceEnv selects the key source for managers built by NewManager:
+	// "logged-out" uses LoggedOutPageURL, anything else the default.
+	KeySourceEnv = "GO_TWITTER_XTID_KEY_SOURCE"
+
 	// initTimeout bounds one shared init attempt (it outlives any single caller).
 	initTimeout = 90 * time.Second
 	// Negative-cache backoff after an init failure: base, doubling, capped at max.
 	defaultBackoffBase = 60 * time.Second
 	defaultBackoffMax  = 15 * time.Minute
+)
+
+// KeySource selects which page the verification key, animation frames and
+// indices script are read from.
+type KeySource int
+
+const (
+	// KeySourceAccountPage (default) reads the account-cookie page, falling back
+	// to the logged-out landing page.
+	KeySourceAccountPage KeySource = iota
+	// KeySourceLoggedOut reads LoggedOutPageURL without cookies, as the reference
+	// implementation does. Account cookies are never sent for key derivation.
+	KeySourceLoggedOut
 )
 
 // ErrUnavailable is returned by GenerateID when no ClientTransaction could be
@@ -61,6 +84,8 @@ type Manager struct {
 	failing      bool // alert dedupe: true between an ok->failed transition and the next success
 	onInitFailed func(error)
 	onWarmPage   func(pageURL string, page []byte)
+
+	keySource KeySource // guarded by mu
 
 	now         func() time.Time
 	backoffBase time.Duration
@@ -93,7 +118,12 @@ type failState struct {
 // NewManager creates a new transaction ID manager backed by the given Fetcher.
 // The runtime passes a stealth-backed Fetcher; tests pass a stub.
 func NewManager(f bundle.Fetcher) *Manager {
+	src := KeySourceAccountPage
+	if os.Getenv(KeySourceEnv) == "logged-out" {
+		src = KeySourceLoggedOut
+	}
 	return &Manager{
+		keySource:       src,
 		refreshInterval: 30 * time.Minute,
 		fetcher:         f,
 		now:             time.Now,
@@ -111,6 +141,14 @@ func (m *Manager) SetRefreshInterval(d time.Duration) {
 	}
 	m.mu.Lock()
 	m.refreshInterval = d
+	m.mu.Unlock()
+}
+
+// SetKeySource overrides which page keys are derived from (default
+// KeySourceAccountPage, or the KeySourceEnv value at construction).
+func (m *Manager) SetKeySource(s KeySource) {
+	m.mu.Lock()
+	m.keySource = s
 	m.mu.Unlock()
 }
 
@@ -149,6 +187,13 @@ func (m *Manager) Initialize() error {
 // an account's cookies) it is tried first against the authenticated warm page;
 // the unauthenticated fetcher is the fallback attempt.
 func (m *Manager) initialize(ctx context.Context, auth bundle.Fetcher) error {
+	m.mu.RLock()
+	src := m.keySource
+	m.mu.RUnlock()
+	if src == KeySourceLoggedOut {
+		// Cookie-less by design: the shared unauthenticated fetcher, never auth.
+		return m.initFrom(ctx, retryFetcher{m.fetcher}, LoggedOutPageURL)
+	}
 	if auth == nil {
 		return m.initFrom(ctx, retryFetcher{m.fetcher}, warmPageURL)
 	}
@@ -171,31 +216,12 @@ func (m *Manager) initialize(ctx context.Context, auth bundle.Fetcher) error {
 // initFrom fetches the warm page through f, locates the indices file, fetches it
 // and builds the ClientTransaction.
 func (m *Manager) initFrom(ctx context.Context, f bundle.Fetcher, pageURL string) error {
-	page, err := bundle.FetchPage(ctx, f, pageURL)
-	if err != nil {
-		return fmt.Errorf("fetch warm page: %w", err)
-	}
-	if pageURL == authedWarmPageURL {
-		m.mu.RLock()
-		hook := m.onWarmPage
-		m.mu.RUnlock()
-		if hook != nil {
-			hook(pageURL, page)
-		}
-	}
-	homeHTML := string(page)
-
-	indicesURL, err := m.locateIndices(ctx, f, homeHTML, pageURL)
+	homeHTML, indicesJS, err := m.fetchMaterial(ctx, f, pageURL)
 	if err != nil {
 		return err
 	}
 
-	indicesJS, err := f.Fetch(ctx, indicesURL)
-	if err != nil {
-		return fmt.Errorf("fetch indices file: %w", err)
-	}
-
-	ct, err := newClientTransaction(homeHTML, string(indicesJS))
+	ct, err := newClientTransaction(homeHTML, indicesJS)
 	if err != nil {
 		return fmt.Errorf("build client transaction: %w", err)
 	}
@@ -209,10 +235,52 @@ func (m *Manager) initFrom(ctx context.Context, f bundle.Fetcher, pageURL string
 	return nil
 }
 
+// fetchMaterial fetches the warm page and the indices file it points to.
+func (m *Manager) fetchMaterial(ctx context.Context, f bundle.Fetcher, pageURL string) (homeHTML, indicesJS string, err error) {
+	page, err := bundle.FetchPage(ctx, f, pageURL)
+	if err != nil {
+		return "", "", fmt.Errorf("fetch warm page: %w", err)
+	}
+	if pageURL == authedWarmPageURL {
+		m.mu.RLock()
+		hook := m.onWarmPage
+		m.mu.RUnlock()
+		if hook != nil {
+			hook(pageURL, page)
+		}
+	}
+	homeHTML = string(page)
+
+	indicesURL, err := m.locateIndices(ctx, f, homeHTML, pageURL)
+	if err != nil {
+		return "", "", err
+	}
+
+	js, err := f.Fetch(ctx, indicesURL)
+	if err != nil {
+		return "", "", fmt.Errorf("fetch indices file: %w", err)
+	}
+	return homeHTML, string(js), nil
+}
+
+// FetchKeyMaterial returns the warm page and indices file that a key derivation
+// from pageURL would use, without touching the manager's cached keys. It exists
+// for diagnostics (cmd/xtid-probe) that compare key sources.
+func (m *Manager) FetchKeyMaterial(ctx context.Context, f bundle.Fetcher, pageURL string) (page, indices string, err error) {
+	return m.fetchMaterial(ctx, retryFetcher{f}, pageURL)
+}
+
+// NewClientTransaction builds a ClientTransaction from a warm page and the
+// indices file, for diagnostics (cmd/xtid-probe). GenerateID is its output.
+func NewClientTransaction(homeHTML, indicesJS string) (*ClientTransaction, error) {
+	return newClientTransaction(homeHTML, indicesJS)
+}
+
 // locateIndices resolves the URL of the file holding the key-byte indices
 // (ondemand.s in the legacy webpack build, sign.o-* in the Vite build).
 //
-// Order: the legacy direct-embed fast-path (`"ondemand.s":"<hash>"`); then, for a
+// Order: the legacy direct-embed fast-path (`"ondemand.s":"<hash>"`); the
+// reference's inline webpack-runtime chunk map; then, for a
 // Vite page (x-web script links), a bounded scan of those chunks; otherwise the
 // bundle core's webpack chunk-map lookup. A Vite page never falls through to the
 // chunk-map path — it has none, and that path refetches more warm pages.
@@ -220,8 +288,13 @@ func (m *Manager) locateIndices(ctx context.Context, f bundle.Fetcher, homeHTML,
 	if legacy := onDemandLegacyURL(homeHTML); legacy != "" {
 		return legacy, nil
 	}
+	if u := onDemandURLFromRuntime(homeHTML); u != "" {
+		return u, nil
+	}
 	if scripts := bundle.ViteScripts(homeHTML, pageURL); len(scripts) > 0 {
-		if bundle.IsLoggedOutShell(scripts) {
+		// The logged-out page IS the logged-out shell; only an account page that
+		// came back as one means the cookies were refused.
+		if pageURL != LoggedOutPageURL && bundle.IsLoggedOutShell(scripts) {
 			return "", bundle.ErrLoggedOutShell
 		}
 		return bundle.FindIndicesURL(ctx, f, scripts, bundle.DefaultScanConcurrency, bundle.DefaultScanMax)

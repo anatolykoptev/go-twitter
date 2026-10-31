@@ -51,6 +51,31 @@ func onDemandLegacyURL(html string) string {
 	return fmt.Sprintf(onDemandURLTemplate, m[1])
 }
 
+// onDemandNameRe finds the chunk id registered under the name "ondemand.s" in an
+// inline webpack runtime.
+var onDemandNameRe = regexp.MustCompile(`(\d+):\s*["']ondemand\.s["']`)
+
+// onDemandURLFromRuntime ports the reference implementation's
+// ON_DEMAND_FILE_HASH_REGEX: in the webpack runtime the chunk-name map
+// `({<id>:"ondemand.s",...})[e]||e)+"."+({...,<id>:"<hash>",...})[e]` yields the
+// file hash. The reference uses a backreference for <id>, which RE2 lacks, so
+// the id is captured first and then substituted into a second pattern. Returns
+// "" when the page carries no such runtime.
+func onDemandURLFromRuntime(html string) string {
+	for _, m := range onDemandNameRe.FindAllStringSubmatchIndex(html, -1) {
+		id := html[m[2]:m[3]]
+		re, err := regexp.Compile(`\}\)\[e\]\s*\|\|\s*e\)\s*\+\s*["']\.["']\s*\+\s*\(\{[\s\S]*?\b` +
+			id + `:\s*["']([a-zA-Z0-9_-]+)["']`)
+		if err != nil {
+			continue
+		}
+		if h := re.FindStringSubmatch(html[m[1]:]); len(h) > 1 {
+			return fmt.Sprintf(onDemandURLTemplate, h[1])
+		}
+	}
+	return ""
+}
+
 func getVerificationKey(html string) string {
 	re := regexp.MustCompile(`<meta[^>]+name=["']twitter-site-verification["'][^>]+content=["']([^"']+)["']`)
 	matches := re.FindStringSubmatch(html)

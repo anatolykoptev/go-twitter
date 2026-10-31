@@ -120,6 +120,11 @@ func TestInitFailedHook_OncePerTransition(t *testing.T) {
 	}
 	want := func(n int32, when string) {
 		t.Helper()
+		// A refresh of stale keys runs in the background, so its alert lands
+		// shortly after the request that triggered it.
+		for deadline := time.Now().Add(2 * time.Second); alerts.Load() < n && time.Now().Before(deadline); {
+			time.Sleep(time.Millisecond)
+		}
 		if got := alerts.Load(); got != n {
 			t.Fatalf("%s: alert fired %d times, want %d", when, got, n)
 		}
