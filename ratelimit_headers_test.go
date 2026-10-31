@@ -490,12 +490,10 @@ func TestRateLimitHeaders_HoldIsCounted(t *testing.T) {
 	assert.Equal(t, map[string]string{attrOperation: "UserTweets"}, attrMap(sum.DataPoints[0].Attributes))
 }
 
-// In-flight accounting: with header state remaining=10, a burst of 20
-// concurrent picks admits at most 10 before any response lands — every pick
-// the estimate still covers, and no more — instead of all 20 on the strength
-// of one stale response. At the never-set pct the budget floor is 0, so the
-// whole reported window is spendable; RateLimitHeadroom applies to what X
-// reported, not to pick decrements.
+// In-flight accounting: with header state remaining=10 and headroom 2, a burst of
+// 20 concurrent picks admits at most 8 before any response lands, instead of all
+// 20 on the strength of one stale response. The headroom applies at every budget
+// share — at the never-set pct the floor IS the headroom.
 //
 // Mutation: account.go AllowRequest, drop the `st.remaining--` decrement => RED.
 func TestRateLimitHeaders_ConcurrentPicksSpendTheEstimate(t *testing.T) {
@@ -516,6 +514,6 @@ func TestRateLimitHeaders_ConcurrentPicksSpendTheEstimate(t *testing.T) {
 	}
 	wg.Wait()
 
-	assert.EqualValues(t, 10, allowed.Load(), "every pick the remaining estimate covers may pass before a response lands")
+	assert.EqualValues(t, 10-RateLimitHeadroom, allowed.Load(), "only remaining-headroom picks may pass before a response lands")
 	assert.True(t, acc.IsEndpointRateLimited(rlEndpoint), "the spent estimate holds the endpoint until reset")
 }

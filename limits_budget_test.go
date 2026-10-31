@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -96,7 +97,7 @@ func TestBudgetPct_SetBudgetPctReleasesBudgetHold(t *testing.T) {
 
 	t.Run("lower holds on the next pick", func(t *testing.T) {
 		acc := newRateTestAccount("u", cfg)
-		report(acc, 8) // pct 100: floor 0 => allowed
+		report(acc, 8) // pct 100: floor is the headroom 2; 8 > 2 => allowed
 		require.True(t, acc.AllowRequest("UserTweets"),
 			"pct 100 admits while the window has remaining")
 		acc.SetBudgetPct(80)
@@ -128,19 +129,24 @@ func TestBudgetPct_SetBudgetPctReleasesBudgetHold(t *testing.T) {
 // The header gate and the cold-path counter enforce ONE budget formula: an
 // account may spend max(1, limit*pct/100) requests of a window on either
 // path, so from a fresh window (remaining == limit) both gates must admit the
-// same count at every pct — before the fix the header gate's
-// headroom+withheld threshold diverged from the scaled cap and, at
-// limit*pct/100 <= RateLimitHeadroom, held the endpoint after the first
-// response.
+// same count at every pct — with one documented exception: the header band
+// always keeps RateLimitHeadroom slots for requests already in flight (X's
+// remaining does not count them), so at pct 99/100 it admits 48 of 50, up to
+// 2 fewer than the cold counter.
 //
 // Mutation: account.go budgetFloorLocked — return
 // RateLimitHeadroom+limit-scaledByPct(limit, a.budgetPct) (the old
-// headroom+withheld threshold) => RED (the header column comes up short).
+// headroom+withheld threshold) => RED (the header column comes up short);
+// drop the max(RateLimitHeadroom, ...) clamp => RED at pct 99/100 (the header
+// column spends the headroom).
 func TestBudgetPct_GateParity(t *testing.T) {
 	cfg := ratelimit.Config{RequestsPerWindow: 500, WindowDuration: 15 * time.Minute}
 	for _, pct := range []int{1, 5, 50, 80, 99, 100} {
 		t.Run(fmt.Sprintf("pct%d", pct), func(t *testing.T) {
 			want := scaledByPct(50, pct) // max(1, 50*pct/100) — the one formula
+			// Documented headroom: the header band never spends the last
+			// RateLimitHeadroom slots of the reported window, at any share.
+			headerWant := min(want, 50-RateLimitHeadroom)
 
 			cold := newRateTestAccount("u", cfg)
 			cold.SetBudgetPct(pct)
@@ -159,10 +165,42 @@ func TestBudgetPct_GateParity(t *testing.T) {
 			}
 
 			assert.Equal(t, want, coldN, "cold path must admit the scaled cap")
-			assert.Equal(t, coldN, headerN,
-				"header gate must admit the same count as the local counter")
+			assert.Equal(t, headerWant, headerN,
+				"header gate must admit the scaled share, capped at limit-headroom")
 		})
 	}
+}
+
+// The never-set pct is the full budget, but the header band still keeps
+// RateLimitHeadroom slots for requests already in flight: X's remaining does
+// not count them, so letting a concurrent burst spend the whole reported
+// window overshoots into a 429 — the pre-PR gate held at
+// remaining <= RateLimitHeadroom and the zero value must keep that exactly.
+// Reported remaining 3: two concurrent picks admit only one.
+//
+// Mutation: account.go:346 — drop the max(RateLimitHeadroom, ...) clamp
+// (return limit-scaledByPct(limit, a.budgetPct)) => RED (both picks pass).
+func TestBudgetPct_DefaultPctKeepsHeaderHeadroom(t *testing.T) {
+	acc := newRateTestAccount("u", ratelimit.Config{RequestsPerWindow: 50, WindowDuration: 15 * time.Minute})
+	acc.recordWindow("UserTweets", rateLimitObs{limit: 50, remaining: 3, resetAt: time.Now().Add(15 * time.Minute)})
+
+	var allowed atomic.Int32
+	var wg sync.WaitGroup
+	for range 2 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if acc.AllowRequest("UserTweets") {
+				allowed.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	assert.EqualValues(t, 1, allowed.Load(),
+		"remaining 3 with headroom 2 admits exactly one pick; the second must be refused")
+	assert.True(t, acc.IsEndpointRateLimited("UserTweets"),
+		"the estimate at the headroom holds the endpoint until reset")
 }
 
 // T2 — cold/local path scales the limiter cap by the budget: a seeded 50 at

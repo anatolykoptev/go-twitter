@@ -319,14 +319,16 @@ func scaledByPct(raw, pct int) int {
 }
 
 // budgetFloorLocked returns the remaining-estimate level at or below which the
-// endpoint counts as spent FOR THIS ACCOUNT: basis - max(1, basis*pct/100) —
-// the exact complement of the scaled cap the cold path enforces, so the header
-// gate and the local counter admit the same count from a fresh window. The
-// basis is the window's reported limit, else the seeded/registered cap, else
-// the measured table, else the configured fallback; <= 0 (no cap known) means
-// the budget cannot gate and only X's own exhaustion holds the endpoint.
-// Derived at read time, never persisted: a SetBudgetPct that raises the share
-// releases a budget-only hold on the next pick. a.mu must be held.
+// endpoint counts as spent FOR THIS ACCOUNT: max(RateLimitHeadroom, basis -
+// max(1, basis*pct/100)) — the complement of the scaled cap the cold path
+// enforces, but never below the in-flight headroom: X's remaining does not
+// count requests already picked, so the headroom applies at every share,
+// including the full budget. The basis is the window's reported limit, else
+// the seeded/registered cap, else the measured table, else the configured
+// fallback; <= 0 (no cap known) means the budget cannot gate and only X's own
+// exhaustion holds the endpoint. Derived at read time, never persisted: a
+// SetBudgetPct that raises the share releases a budget-only hold on the next
+// pick. a.mu must be held.
 func (a *Account) budgetFloorLocked(endpoint string, reportedLimit int) int {
 	limit := reportedLimit
 	if limit <= 0 {
@@ -341,7 +343,7 @@ func (a *Account) budgetFloorLocked(endpoint string, reportedLimit int) int {
 	if limit <= 0 {
 		return 0
 	}
-	return limit - scaledByPct(limit, a.budgetPct)
+	return max(RateLimitHeadroom, limit-scaledByPct(limit, a.budgetPct))
 }
 
 // scaledCapLocked returns the cold-path cap the local limiter must enforce for
