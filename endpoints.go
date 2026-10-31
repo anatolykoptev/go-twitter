@@ -234,11 +234,6 @@ func gqlFeatures() map[string]any {
 	return compiledGQLFeatures()
 }
 
-// GraphQLFeatures returns a copy of the GraphQL feature switches the library
-// sends with its read endpoints, for tools (cmd/xtid-probe) that issue their own
-// GraphQL requests.
-func GraphQLFeatures() map[string]any { return gqlFeatures() }
-
 // compiledGQLFeatures is the compiled baseline: the generated set when present,
 // else the committed literal. Fresh copy on every call.
 func compiledGQLFeatures() map[string]any {

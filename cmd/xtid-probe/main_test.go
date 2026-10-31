@@ -25,3 +25,16 @@ func TestKeyReport(t *testing.T) {
 		t.Fatalf("keyReport with unavailable c = %q", got)
 	}
 }
+
+func TestStopReason(t *testing.T) {
+	for _, s := range []int{401, 403, 429} {
+		if stopReason(s) == "" {
+			t.Errorf("status %d must stop the run", s)
+		}
+	}
+	for _, s := range []int{200, 404, -1} {
+		if stopReason(s) != "" {
+			t.Errorf("status %d must not stop the run", s)
+		}
+	}
+}

@@ -263,23 +263,6 @@ func (m *Manager) fetchMaterial(ctx context.Context, f bundle.Fetcher, pageURL s
 	return homeHTML, string(js), nil
 }
 
-// FetchKeyMaterial returns the warm page and indices file that a key derivation
-// from pageURL would use, without touching the manager's cached keys. It exists
-// for diagnostics (cmd/xtid-probe) that compare key sources.
-func (m *Manager) FetchKeyMaterial(ctx context.Context, f bundle.Fetcher, pageURL string) (page, indices string, err error) {
-	return m.fetchMaterial(ctx, retryFetcher{f}, pageURL)
-}
-
-// AnimationKey returns the derived animation key. It is key material: for
-// diagnostics (cmd/xtid-probe, which compares keys without printing them).
-func (ct *ClientTransaction) AnimationKey() string { return ct.animationKey }
-
-// NewClientTransaction builds a ClientTransaction from a warm page and the
-// indices file, for diagnostics (cmd/xtid-probe). GenerateID is its output.
-func NewClientTransaction(homeHTML, indicesJS string) (*ClientTransaction, error) {
-	return newClientTransaction(homeHTML, indicesJS)
-}
-
 // locateIndices resolves the URL of the file holding the key-byte indices
 // (ondemand.s in the legacy webpack build, sign.o-* in the Vite build).
 //

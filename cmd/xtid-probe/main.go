@@ -15,7 +15,7 @@
 //
 // FILE holds "auth_token=...; ct0=..." (cookie-header or one pair per line). It
 // is read once and never printed. The probe prints status codes and counts
-// only: no bodies, headers, ids or credentials. It stops at the first HTTP 429.
+// only: no bodies, headers, ids or credentials. It stops at the first HTTP 401, 403 or 429 and says why.
 package main
 
 import (
@@ -32,8 +32,9 @@ import (
 
 	stealth "github.com/anatolykoptev/go-stealth"
 	twitter "github.com/anatolykoptev/go-twitter"
-	"github.com/anatolykoptev/go-twitter/cmd/xtid-probe/legacyxtid"
+	"github.com/anatolykoptev/go-twitter/cmd/xtid-probe/internal/legacyxtid"
 	"github.com/anatolykoptev/go-twitter/internal/bundle"
+	"github.com/anatolykoptev/go-twitter/internal/xtidprobe"
 	"github.com/anatolykoptev/go-twitter/xtid"
 )
 
@@ -104,6 +105,7 @@ func main() {
 
 	if *userID == "" {
 		id, lerr := lookupUserID(ctx, authToken, ct0, *user)
+		time.Sleep(*pace)
 		if lerr != nil {
 			fmt.Fprintln(os.Stderr, "user lookup failed:", redact.Replace(lerr.Error()))
 			os.Exit(1)
@@ -111,7 +113,7 @@ func main() {
 		*userID = id
 	}
 
-	variants := buildVariants(ctx, acctFetch, guestFetch, redact)
+	variants := buildVariants(ctx, acctFetch, guestFetch, *pace, redact)
 	path := "/i/api/graphql/" + *qid + "/" + operation
 	reqURL := buildURL(*qid, *userID)
 	headers := baseHeaders(authToken, ct0)
@@ -137,8 +139,8 @@ loop:
 				status = -1
 			}
 			counts[v.name][status]++
-			if status == 429 {
-				stopped = fmt.Sprintf("stopped on HTTP 429 (variant %s, round %d)", v.name, r+1)
+			if why := stopReason(status); why != "" {
+				stopped = fmt.Sprintf("stopped on HTTP %d (variant %s, round %d): %s", status, v.name, r+1, why)
 				break loop
 			}
 			time.Sleep(*pace)
@@ -159,10 +161,11 @@ loop:
 	}
 }
 
-func buildVariants(ctx context.Context, acct, guest bundle.Fetcher, redact *strings.Replacer) []variant {
-	mgr := xtid.NewManager(guest)
-	acctPage, acctJS, aerr := mgr.FetchKeyMaterial(ctx, acct, xtid.AuthedWarmPageURL)
-	jfPage, jfJS, jerr := mgr.FetchKeyMaterial(ctx, guest, xtid.LoggedOutPageURL)
+func buildVariants(ctx context.Context, acct, guest bundle.Fetcher, pace time.Duration, redact *strings.Replacer) []variant {
+	acctPage, acctJS, aerr := xtidprobe.FetchMaterial(ctx, acct, xtid.AuthedWarmPageURL)
+	time.Sleep(pace) // same floor as the request loop
+	jfPage, jfJS, jerr := xtidprobe.FetchMaterial(ctx, guest, xtid.LoggedOutPageURL)
+	time.Sleep(pace)
 
 	mk := func(name, desc string, page, js string, ferr error, legacy bool) variant {
 		v := variant{name: name, desc: desc}
@@ -180,7 +183,7 @@ func buildVariants(ctx context.Context, acct, guest bundle.Fetcher, redact *stri
 			v.key = ct.AnimationKey()
 			return v
 		}
-		ct, err := xtid.NewClientTransaction(page, js)
+		ct, err := xtidprobe.NewTransaction(page, js)
 		if err != nil {
 			v.err = short(err.Error())
 			return v
@@ -222,7 +225,7 @@ func buildURL(qid, userID string) string {
 		"userId": userID, "count": 20, "includePromotedContent": true,
 		"withCommunity": true, "withVoice": true,
 	})
-	feats, _ := json.Marshal(twitter.GraphQLFeatures())
+	feats, _ := json.Marshal(xtidprobe.GraphQLFeatures())
 	toggles, _ := json.Marshal(map[string]any{"withArticlePlainText": false})
 	q := url.Values{}
 	q.Set("variables", string(vars))
@@ -288,6 +291,19 @@ func keyReport(vs []variant) string {
 		out += fmt.Sprintf("; hex fraction digits dropped by the old path: %d", len(b.key)-len(a.key))
 	}
 	return out
+}
+
+// stopReason says why a status ends the run ("" = keep going). Any 401/403/429
+// stops it: continuing against a rejecting account or a rate limit only burns
+// the account.
+func stopReason(status int) string {
+	switch status {
+	case 429:
+		return "rate limited"
+	case 401, 403:
+		return "credentials or session rejected; check the account before retrying"
+	}
+	return ""
 }
 
 func formatCounts(m map[int]int) string {
