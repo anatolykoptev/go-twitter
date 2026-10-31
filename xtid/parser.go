@@ -93,6 +93,34 @@ type svgFrame struct {
 	data [][]int
 }
 
+// structuralPathRe locates the animation path the way the reference
+// implementation does: svg -> first child (<g>) -> that child's second child
+// (<path>). The first path is the X logo outline; the second carries the cubic
+// keyframe data in its d attribute.
+var structuralPathRe = regexp.MustCompile(
+	`^<svg[^>]*>\s*<g[^>]*>\s*<path\b[^>]*?(?:/>|>\s*</path>)\s*<path\b[^>]*?\sd=["']([^"']+)["']`)
+
+// fillPathRes are the legacy lookups by the literal animation fill colour. They
+// stay as a fallback for markup without the <svg><g><path><path> shape.
+var fillPathRes = []*regexp.Regexp{
+	regexp.MustCompile(`<path[^>]*d=["']([^"']+)["'][^>]*fill=["']#1d9bf008["']`),
+	regexp.MustCompile(`<path[^>]*fill=["']#1d9bf008["'][^>]*d=["']([^"']+)["']`),
+}
+
+// animationPathData returns the animation path's d attribute from one
+// loading-x-anim <svg> element: structural position first, fill colour second.
+func animationPathData(svg string) string {
+	if m := structuralPathRe.FindStringSubmatch(svg); len(m) > 1 {
+		return m[1]
+	}
+	for _, re := range fillPathRes {
+		if m := re.FindStringSubmatch(svg); len(m) > 1 {
+			return m[1]
+		}
+	}
+	return ""
+}
+
 func getSVGFrames(html string) []svgFrame {
 	frames := make([]svgFrame, 4)
 	for i := 0; i < 4; i++ {
@@ -102,18 +130,12 @@ func getSVGFrames(html string) []svgFrame {
 			continue
 		}
 
-		// Match path with fill="#1d9bf008" — the animation path
-		pathPattern := regexp.MustCompile(`<path[^>]*d=["']([^"']+)["'][^>]*fill=["']#1d9bf008["']`)
-		pathMatch := pathPattern.FindStringSubmatch(svgMatch)
-		if len(pathMatch) < 2 {
-			pathPattern2 := regexp.MustCompile(`<path[^>]*fill=["']#1d9bf008["'][^>]*d=["']([^"']+)["']`)
-			pathMatch = pathPattern2.FindStringSubmatch(svgMatch)
-			if len(pathMatch) < 2 {
-				continue
-			}
+		pathData := animationPathData(svgMatch)
+		if pathData == "" {
+			continue
 		}
 
-		frames[i] = svgFrame{id: i, data: parsePathData(pathMatch[1])}
+		frames[i] = svgFrame{id: i, data: parsePathData(pathData)}
 	}
 	return frames
 }

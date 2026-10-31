@@ -334,14 +334,20 @@ func (m *Manager) GenerateID(method, path string) (string, error) {
 // cookies through that account's client) used when an init/refresh is needed.
 // Concurrent callers share one init attempt; after a failure no new attempt is
 // made until the backoff expires, and callers get ErrUnavailable (or the stale
-// keys, when a previous init succeeded) immediately.
+// keys, when a previous init succeeded) immediately. Only the very first init
+// blocks callers; a periodic refresh runs in the background while the previous
+// keys keep serving.
 func (m *Manager) GenerateIDWith(ctx context.Context, method, path string, auth bundle.Fetcher) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
 	kind := kindOf(auth)
 	if m.needsInit() {
-		if err := m.awaitInit(ctx, kind, auth); err != nil {
+		if m.hasKeys() {
+			// Stale but usable keys: answer now, refresh in the background so the
+			// request path never waits on a page fetch + chunk scan.
+			m.startInit(kind, auth)
+		} else if err := m.awaitInit(ctx, kind, auth); err != nil {
 			return "", err
 		}
 	}
@@ -372,20 +378,28 @@ func (m *Manager) needsInit() bool {
 	return m.ct == nil || m.now().Sub(m.lastRefresh) > m.refreshInterval
 }
 
+// hasKeys reports whether a ClientTransaction was ever built; it is never reset.
+func (m *Manager) hasKeys() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.ct != nil
+}
+
 func (m *Manager) backoffActive(kind attemptKind) bool {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return m.now().Before(m.fails[kind].until)
 }
 
-// awaitInit runs (or joins) one init attempt of the given kind unless that
-// kind's negative cache forbids it. The leader runs on its own background
-// context; a waiter's ctx only bounds how long it waits.
-func (m *Manager) awaitInit(ctx context.Context, kind attemptKind, auth bundle.Fetcher) error {
+// startInit starts (or joins) one init attempt of the given kind unless that
+// kind's negative cache forbids it, and returns the channel that delivers its
+// result (nil when no attempt was started). The flight runs on its own
+// background context, so no caller's cancellation can abort it.
+func (m *Manager) startInit(kind attemptKind, auth bundle.Fetcher) <-chan singleflight.Result {
 	if m.backoffActive(kind) {
 		return nil
 	}
-	ch := m.sf.DoChan(fmt.Sprintf("init-%d", kind), func() (any, error) {
+	return m.sf.DoChan(fmt.Sprintf("init-%d", kind), func() (any, error) {
 		// Re-check inside the flight: a caller that passed the check above just as
 		// the previous flight finished must not start a second attempt.
 		if !m.needsInit() || m.backoffActive(kind) {
@@ -397,6 +411,15 @@ func (m *Manager) awaitInit(ctx context.Context, kind attemptKind, auth bundle.F
 		m.recordResult(kind, err)
 		return nil, err
 	})
+}
+
+// awaitInit runs (or joins) one init attempt and waits for it. A waiter's ctx
+// only bounds how long it waits.
+func (m *Manager) awaitInit(ctx context.Context, kind attemptKind, auth bundle.Fetcher) error {
+	ch := m.startInit(kind, auth)
+	if ch == nil {
+		return nil
+	}
 	select {
 	case <-ch:
 		return nil

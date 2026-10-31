@@ -47,7 +47,11 @@ func floatToHex(x float64) string {
 
 	result = append(result, ".")
 
-	for i := 0; fraction > 0 && i < 6; i++ { // limit iterations to avoid infinite loop
+	// Multiplying a float64 by 16 is exact, so the fraction reaches zero after at
+	// most ~270 steps (1074 mantissa bits / 4 for the smallest subnormal) and the
+	// loop needs no cap. The reference implementation also runs until zero; a cap
+	// truncates the expansion and corrupts the animation key.
+	for fraction > 0 {
 		fraction *= 16
 		integer := int(fraction)
 		fraction -= float64(integer)
