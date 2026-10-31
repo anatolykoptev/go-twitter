@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 )
 
 // oracleHex is an independent expansion of x >= 0 in the format floatToHex
@@ -113,4 +114,21 @@ func TestFloatToHex_MatchesExactExpansion(t *testing.T) {
 		}
 	}
 	t.Logf("checked %d values", len(vals))
+}
+
+// Non-finite input must return promptly: without the guard +Inf never reaches a
+// zero fraction and the expansion loop does not terminate.
+func TestFloatToHex_NonFinite(t *testing.T) {
+	for _, x := range []float64{math.Inf(1), math.Inf(-1), math.NaN()} {
+		done := make(chan string, 1)
+		go func() { done <- floatToHex(x) }()
+		select {
+		case got := <-done:
+			if got != "" {
+				t.Errorf("floatToHex(%v) = %q, want empty", x, got)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("floatToHex(%v) did not return", x)
+		}
+	}
 }

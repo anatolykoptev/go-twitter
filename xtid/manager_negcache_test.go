@@ -125,6 +125,9 @@ func TestInitFailedHook_OncePerTransition(t *testing.T) {
 		for deadline := time.Now().Add(2 * time.Second); alerts.Load() < n && time.Now().Before(deadline); {
 			time.Sleep(time.Millisecond)
 		}
+		// Re-assert the exact count after a grace period so a late extra alert
+		// (a duplicate per-attempt alert) is caught.
+		time.Sleep(100 * time.Millisecond)
 		if got := alerts.Load(); got != n {
 			t.Fatalf("%s: alert fired %d times, want %d", when, got, n)
 		}

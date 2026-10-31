@@ -27,6 +27,11 @@ func isOdd(num int) float64 {
 }
 
 func floatToHex(x float64) string {
+	// Inf never reaches a zero fraction (and int(Inf) is undefined), NaN has no
+	// expansion: neither is a value the matrix rounding can produce.
+	if math.IsInf(x, 0) || math.IsNaN(x) {
+		return ""
+	}
 	var result []string
 	quotient := int(x)
 	fraction := x - float64(quotient)
