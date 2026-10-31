@@ -98,7 +98,7 @@ func CrawlXWeb(ctx context.Context, f Fetcher, start []string,
 			}
 			st.Fetched++
 			visit(batch[i], body)
-			queue = enqueueXWebRefs(queue, seen, roots, batch[i], body)
+			queue = enqueueXWebRefs(queue, seen, roots, batch[i], body, opts.MaxFetch*seenPerFetch)
 		}
 		if opts.Done != nil && opts.Done() {
 			st.Stopped = true
@@ -142,11 +142,22 @@ func fetchBatch(ctx context.Context, f Fetcher, urls []string, opts CrawlOptions
 	return out
 }
 
-// enqueueXWebRefs appends every unseen chunk reference in body to queue. A
-// child inherits its parent's root directory, so "assets/…" literals resolve
-// against the entry script's directory even from deep chunks.
-func enqueueXWebRefs(queue []string, seen map[string]bool, roots map[string]string, parent string, body []byte) []string {
+// seenPerFetch bounds the discovered-but-unfetched set to this many entries per
+// allowed fetch. A crawl fetches at most MaxFetch chunks, so references beyond a
+// few multiples of that can never be visited; without a cap one hostile chunk
+// listing millions of distinct literals grows queue, seen and roots without
+// limit.
+const seenPerFetch = 4
+
+// enqueueXWebRefs appends every unseen chunk reference in body to queue, until
+// seen holds maxSeen entries. A child inherits its parent's root directory, so
+// "assets/…" literals resolve against the entry script's directory even from
+// deep chunks.
+func enqueueXWebRefs(queue []string, seen map[string]bool, roots map[string]string, parent string, body []byte, maxSeen int) []string {
 	for _, m := range xwebRefRe.FindAllSubmatch(body, -1) {
+		if len(seen) >= maxSeen {
+			break
+		}
 		child, ok := resolveXWebRef(parent, roots[parent], string(m[1]))
 		if !ok || seen[child] {
 			continue

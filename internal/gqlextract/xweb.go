@@ -1,6 +1,7 @@
 package gqlextract
 
 import (
+	"context"
 	"log/slog"
 	"regexp"
 	"sort"
@@ -57,9 +58,31 @@ type Op struct {
 	ResponseRoot string
 }
 
+// Parse limits. They bound the work a hostile or malformed chunk can cost; each
+// guards one distinct quadratic path and is pinned by its own test.
+const (
+	// MaxChunkBytes is the largest body ParseRelayArtifacts looks at. The largest
+	// real x-web chunk measured (2026-10-30, 2014 chunks) was 1.3 MB.
+	MaxChunkBytes = 8 << 20
+	// maxFailedCloses bounds `params:{` openers whose brace never closes. Each such
+	// scan runs to EOF, so without a cap n openers cost O(n·N).
+	maxFailedCloses = 8
+	// maxArtifactCandidates bounds the `{fragment:{argumentDefinitions:` openers
+	// tried when looking for the artifact that encloses a params object.
+	maxArtifactCandidates = 16
+	// maxArtifactIdents bounds the identifier lookups per artifact (each may scan
+	// the declaration it names). Real artifacts use a few dozen.
+	maxArtifactIdents = 96
+)
+
 var (
-	paramsOpenRe  = regexp.MustCompile(`\bparams:\{`)
-	artifactOpen  = regexp.MustCompile(`\{fragment:\{`)
+	paramsOpenRe = regexp.MustCompile(`\bparams:\{`)
+	// The Request's fragment starts with argumentDefinitions; the aliased and
+	// resolver fragments nested inside selections (`{fragment:{kind:…`,
+	// `{fragment:{args:…`) do not, so this skips them without scanning each.
+	artifactOpen = regexp.MustCompile(`\{fragment:\{argumentDefinitions:`)
+	// declRe finds `ident=[` / `ident={` declarations in one pass.
+	declRe        = regexp.MustCompile(`(?:^|[^\w$.])([A-Za-z_$][\w$]*)=([\[{])`)
 	maxChainDepth = 24
 )
 
@@ -67,16 +90,32 @@ var (
 // A body without one (the vast majority of chunks) returns nil. The returned
 // ops carry the format-validated id only: an id failing QueryIDRe is skipped.
 func ParseRelayArtifacts(source string, body []byte) []Op {
+	return ParseRelayArtifactsContext(context.Background(), source, body)
+}
+
+// ParseRelayArtifactsContext is ParseRelayArtifacts that stops between artifacts
+// once ctx is done, and refuses bodies above MaxChunkBytes.
+func ParseRelayArtifactsContext(ctx context.Context, source string, body []byte) []Op {
+	if len(body) > MaxChunkBytes {
+		return nil
+	}
 	text := string(body)
 	var ops []Op
-	prevEnd := 0
+	prevEnd, failed := 0, 0
 	for _, loc := range paramsOpenRe.FindAllStringIndex(text, -1) {
+		if ctx.Err() != nil {
+			return ops
+		}
 		open := loc[1] - 1
 		if open < prevEnd {
 			continue // inside an artifact already consumed
 		}
 		end := matchClose(text, open)
 		if end < 0 {
+			// Unbalanced to EOF: every later opener would rescan the same tail.
+			if failed++; failed >= maxFailedCloses {
+				return ops
+			}
 			continue
 		}
 		op, ok := buildOp(source, text, prevEnd, open, end)
@@ -138,9 +177,8 @@ func buildOp(source, text string, lo, open, end int) (Op, bool) {
 // object whose params open at `open`, searching back no further than lo.
 func enclosingArtifact(text string, lo, open int) (string, int) {
 	locs := artifactOpen.FindAllStringIndex(text[lo:open], -1)
-	// Aliased inline fragments inside the selections also read `{fragment:{`, so
-	// take the nearest candidate that actually encloses the params object.
-	for i := len(locs) - 1; i >= 0; i-- {
+	// Take the nearest candidate that actually encloses the params object.
+	for i, tried := len(locs)-1, 0; i >= 0 && tried < maxArtifactCandidates; i, tried = i-1, tried+1 {
 		start := lo + locs[i][0]
 		end := matchClose(text, start)
 		if end >= open {
@@ -152,31 +190,39 @@ func enclosingArtifact(text string, lo, open int) (string, int) {
 
 // resolver looks up the minifier-assigned variables an artifact declares in the
 // span before its return (`var s={…},n=[…];`), so identifier references inside
-// argumentDefinitions and selections can be followed to their literal.
+// argumentDefinitions and selections can be followed to their literal. The span
+// is indexed once; a literal is matched only when its identifier is asked for.
 type resolver struct {
-	span  string
-	cache map[string]string
+	span    string
+	decls   map[string]int // ident -> index of the opening bracket of its LAST declaration
+	cache   map[string]string
+	lookups int
 }
 
-func newResolver(span string) *resolver { return &resolver{span: span, cache: map[string]string{}} }
+func newResolver(span string) *resolver {
+	r := &resolver{span: span, decls: map[string]int{}, cache: map[string]string{}}
+	// The nearest preceding declaration is the artifact's own: short minified
+	// names are reused across scopes earlier in the chunk, so later matches win.
+	for _, m := range declRe.FindAllStringSubmatchIndex(span, -1) {
+		r.decls[span[m[2]:m[3]]] = m[5] - 1
+	}
+	return r
+}
 
 // lookup returns the raw object/array literal ident is assigned in the span, or
-// "" when it is not declared there.
+// "" when it is not declared there (or the per-artifact lookup budget is spent).
 func (r *resolver) lookup(ident string) string {
 	if v, ok := r.cache[ident]; ok {
 		return v
 	}
+	if r.lookups >= maxArtifactIdents {
+		return ""
+	}
+	r.lookups++
 	out := ""
-	if validIdent(ident) {
-		re := regexp.MustCompile(`(?:^|[^\w$.])` + regexp.QuoteMeta(ident) + `=([\[{])`)
-		// The nearest preceding declaration is the artifact's own: short minified
-		// names are reused across scopes earlier in the chunk.
-		if locs := re.FindAllStringSubmatchIndex(r.span, -1); len(locs) > 0 {
-			loc := locs[len(locs)-1]
-			open := loc[3] - 1
-			if end := matchClose(r.span, open); end >= 0 {
-				out = r.span[open : end+1]
-			}
+	if open, ok := r.decls[ident]; ok {
+		if end := matchClose(r.span, open); end >= 0 {
+			out = r.span[open : end+1]
 		}
 	}
 	r.cache[ident] = out
@@ -311,7 +357,12 @@ func NewXWebExtractor(logger *slog.Logger) *XWebExtractor {
 
 // Consume parses one chunk body and records every Relay artifact in it.
 func (x *XWebExtractor) Consume(source string, body []byte) {
-	for _, op := range ParseRelayArtifacts(source, body) {
+	x.ConsumeContext(context.Background(), source, body)
+}
+
+// ConsumeContext is Consume that stops parsing once ctx is done.
+func (x *XWebExtractor) ConsumeContext(ctx context.Context, source string, body []byte) {
+	for _, op := range ParseRelayArtifactsContext(ctx, source, body) {
 		prev, seen := x.ops[op.Name]
 		if !seen {
 			x.ops[op.Name] = op

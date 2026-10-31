@@ -9,6 +9,7 @@ import (
 	twitter "github.com/anatolykoptev/go-twitter"
 	"github.com/anatolykoptev/go-twitter/internal/bundle"
 	"github.com/anatolykoptev/go-twitter/internal/gqlextract"
+	"github.com/anatolykoptev/go-twitter/internal/xwebnative"
 )
 
 func fixtureReport(t *testing.T) string {
@@ -137,8 +138,55 @@ func TestCachePath(t *testing.T) {
 func TestRefusesInheritedQIDOverride(t *testing.T) {
 	t.Setenv("TWITTER_QID_USER_TWEETS", "pinned")
 	err := run([]string{"-cache", "testdata/site", "-offline"})
-	if err == nil || !strings.Contains(err.Error(), "TWITTER_QID_USER_TWEETS") {
+	if err == nil || !strings.Contains(err.Error(), "TWITTER_QID_USER_TWEETS") || !strings.Contains(err.Error(), "pins") {
 		t.Errorf("err = %v, want a refusal naming the variable", err)
+	}
+}
+
+// The refresh and x-web switches share the TWITTER_QID_ prefix but pin no id:
+// they must not block a run, and the refusal must say what it is refusing.
+func TestIDOverrideInEnv(t *testing.T) {
+	tests := []struct {
+		env  []string
+		want string
+	}{
+		{[]string{"TWITTER_QID_REFRESH=off", "TWITTER_QID_XWEB=on", "HOME=/x"}, ""},
+		{[]string{"TWITTER_QID_USER_TWEETS=abc"}, "TWITTER_QID_USER_TWEETS"},
+		{[]string{"TWITTER_QID_XWEB=on", "TWITTER_QID_BOOKMARKS=abc"}, "TWITTER_QID_BOOKMARKS"},
+		{nil, ""},
+	}
+	for _, tt := range tests {
+		if got := idOverrideInEnv(tt.env); got != tt.want {
+			t.Errorf("idOverrideInEnv(%v) = %q, want %q", tt.env, got, tt.want)
+		}
+	}
+	t.Setenv("TWITTER_QID_XWEB", "on")
+	t.Setenv("TWITTER_QID_REFRESH", "off")
+	if err := run([]string{"-cache", "testdata/site", "-offline", "-out", t.TempDir() + "/r.md"}); err != nil {
+		t.Errorf("switch variables must not block a run: %v", err)
+	}
+}
+
+// Every operation the refresher treats as x-web native must be one the report
+// compares under that same Relay name, first: a legacy op added to the shared
+// list (SearchTimeline's x-web artifact is SearchByRawQuery) has no artifact of
+// its own name.
+//
+// Mutation: add "SearchTimeline" to internal/xwebnative Ops() => RED.
+func TestNativeOpsAreComparedUnderTheirOwnName(t *testing.T) {
+	for op := range xwebnative.Ops() {
+		var found bool
+		for _, s := range specs {
+			if s.Legacy == op {
+				found = true
+				if s.XWeb[0] != op {
+					t.Errorf("native op %q is compared against %q, not itself", op, s.XWeb[0])
+				}
+			}
+		}
+		if !found {
+			t.Errorf("native op %q has no spec", op)
+		}
 	}
 }
 

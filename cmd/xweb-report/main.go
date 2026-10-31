@@ -4,7 +4,7 @@
 // (docs/xweb-migration.md). It sends no cookies and makes no API call: only
 // static JavaScript from x.com and abs.twimg.com is read.
 //
-//	go run ./cmd/xweb-report -cache ~/tmp/xweb-cache -out docs/xweb-migration.md
+//	go run ./cmd/xweb-report -cache ./xweb-cache -out docs/xweb-migration.md
 //	go run ./cmd/xweb-report -cache testdata/site -offline      # no network
 package main
 
@@ -65,11 +65,8 @@ func run(args []string) error {
 	}
 	// The committed ids in the report must be the compiled ones, not whatever an
 	// operator's environment pins.
-	for _, kv := range os.Environ() {
-		if strings.HasPrefix(kv, "TWITTER_QID_") {
-			return fmt.Errorf("refusing to run with %s set: it would change the committed ids in the report",
-				strings.SplitN(kv, "=", 2)[0])
-		}
+	if name := idOverrideInEnv(os.Environ()); name != "" {
+		return fmt.Errorf("refusing to run with %s set: it pins an operation's queryId and would change the ids in the report; unset it", name)
 	}
 	var inner bundle.Fetcher
 	if !cfg.offline {
@@ -128,6 +125,22 @@ func generate(ctx context.Context, f bundle.Fetcher, cfg config) (string, error)
 		}
 	}
 	return render(build(ids, ops), m), nil
+}
+
+// nonOverrideQIDVars are TWITTER_QID_* variables that are switches, not queryId
+// pins (queryid_refresh.go): they cannot change the ids the report prints.
+var nonOverrideQIDVars = map[string]bool{"TWITTER_QID_REFRESH": true, "TWITTER_QID_XWEB": true}
+
+// idOverrideInEnv returns the first TWITTER_QID_<OP> per-operation override in
+// env, or "".
+func idOverrideInEnv(env []string) string {
+	for _, kv := range env {
+		name, _, _ := strings.Cut(kv, "=")
+		if strings.HasPrefix(name, "TWITTER_QID_") && !nonOverrideQIDVars[name] {
+			return name
+		}
+	}
+	return ""
 }
 
 func baseName(u string) string {

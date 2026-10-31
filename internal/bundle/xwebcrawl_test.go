@@ -2,7 +2,9 @@ package bundle
 
 import (
 	"context"
+	"fmt"
 	"sort"
+	"strings"
 	"sync/atomic"
 	"testing"
 )
@@ -109,5 +111,32 @@ func TestCrawlXWeb_ContextCancel(t *testing.T) {
 	_, err := CrawlXWeb(ctx, xwGraph(), []string{xwBase + "entry-client-logged-out-AAA.js"}, func(string, []byte) {}, CrawlOptions{})
 	if err == nil {
 		t.Error("cancelled context must surface")
+	}
+}
+
+// One chunk listing far more distinct literals than the crawl can ever fetch
+// must not grow the discovery state without bound.
+func TestEnqueueXWebRefs_SeenIsCapped(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < 5000; i++ {
+		fmt.Fprintf(&b, `"./c%d.js",`, i)
+	}
+	seen := map[string]bool{xwBase + "assets/p.js": true}
+	roots := map[string]string{xwBase + "assets/p.js": xwBase}
+	queue := enqueueXWebRefs(nil, seen, roots, xwBase+"assets/p.js", []byte(b.String()), 40)
+	if len(seen) > 40 || len(queue) > 40 || len(roots) > 41 {
+		t.Errorf("unbounded growth: seen=%d queue=%d roots=%d, cap 40", len(seen), len(queue), len(roots))
+	}
+}
+
+func TestCrawlXWeb_HostileFanOutStaysWithinMaxFetch(t *testing.T) {
+	var b strings.Builder
+	for i := 0; i < 20000; i++ {
+		fmt.Fprintf(&b, `"./c%d.js",`, i)
+	}
+	g := &mapFetcher{routes: map[string][]byte{xwBase + "entry.js": []byte(b.String())}}
+	st, err := CrawlXWeb(context.Background(), g, []string{xwBase + "entry.js"}, func(string, []byte) {}, CrawlOptions{MaxFetch: 10})
+	if err != nil || !st.Capped || st.Fetched+st.Failed != 10 {
+		t.Errorf("st=%+v err=%v", st, err)
 	}
 }

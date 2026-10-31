@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/anatolykoptev/go-twitter/internal/gqlextract"
+	"github.com/anatolykoptev/go-twitter/internal/xwebnative"
 )
 
 // Verdicts.
@@ -226,7 +227,7 @@ func findings(rows []row) string {
 		if r.x == nil || r.x.Name != r.spec.Legacy || r.legacyID == r.x.ID {
 			continue
 		}
-		if r.spec.XWebNative {
+		if _, native := xwebnative.Ops()[r.spec.Legacy]; native {
 			fmt.Fprintf(&b, "- `%s` already runs on x-web, but the committed id `%s` differs from the artifact id `%s`: "+
 				"the persisted query changed since it was hand-extracted, or the audiences differ. A live probe must decide which one answers.\n",
 				r.spec.Legacy, r.legacyID, r.x.ID)

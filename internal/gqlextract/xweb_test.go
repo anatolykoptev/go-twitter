@@ -200,7 +200,7 @@ func TestXWebExtractor_DedupeMergeConflict(t *testing.T) {
 // queryids_gen.go.
 func TestLegacyExtractorIgnoresRelayArtifacts(t *testing.T) {
 	e := NewExtractor(nil)
-	for _, f := range []string{"tweet-notifications.js", "user-tweets.js", "like-mutation.js"} {
+	for _, f := range []string{"tweet-notifications.js", "user-tweets.js", "like-mutation.js", "followers.js", "home-latest.js"} {
 		e.Consume("https://abs.twimg.com/x-web/x-web/assets/"+f, readXWebFixture(t, f))
 	}
 	if got := e.Result(); len(got) != 0 {

@@ -16,6 +16,7 @@ import (
 	stealth "github.com/anatolykoptev/go-stealth"
 	"github.com/anatolykoptev/go-twitter/internal/bundle"
 	"github.com/anatolykoptev/go-twitter/internal/gqlextract"
+	"github.com/anatolykoptev/go-twitter/internal/xwebnative"
 	"github.com/anatolykoptev/go-twitter/xtid"
 	"golang.org/x/sync/singleflight"
 )
@@ -80,6 +81,12 @@ const (
 	// extract from the same coverage.
 	qidMaxBundles = 512
 
+	// qidXWebGap is the pause each crawl worker takes between two chunk requests,
+	// the same as cmd/xweb-report. The chunk map is NOT cached across refreshes:
+	// each opt-in refresh re-walks the graph (the MemoFetcher only keeps bodies
+	// for qidObservedPageMaxAge), bounded by qidMinInterval and the failure backoff.
+	qidXWebGap = 100 * time.Millisecond
+
 	// qidObservedPageMaxAge is how long the page and the chunks xtid fetched stay
 	// reusable by the refresh: long enough to cover the background walk that
 	// starts right after xtid's init, short enough that nothing stale is served.
@@ -100,14 +107,12 @@ const (
 )
 
 // xwebNativeOps are the operations go-twitter issues against the x-web stack,
-// mapped to the Relay operation kind their artifact must declare. Only these
-// take an id from the x-web crawl; every other operation keeps its legacy id
-// because an x-web persisted id is a different call (other variables, other
-// response shape; see docs/xweb-migration.md). A later phase adds an operation
-// here when it switches the request over.
-var xwebNativeOps = map[string]string{
-	tweetNotificationsOp: "query",
-}
+// mapped to the Relay operation kind their artifact must declare (the shared
+// list in internal/xwebnative, also read by cmd/xweb-report). Only these take an
+// id from the x-web crawl; every other operation keeps its legacy id because an
+// x-web persisted id is a different call (other variables, other response
+// shape; see docs/xweb-migration.md).
+var xwebNativeOps = xwebnative.Ops()
 
 // Refresh triggers (twitter.trigger) and results (twitter.result). Bounded.
 const (
@@ -116,6 +121,7 @@ const (
 	qidTriggerFault = "fault" // K endpoint faults on one operation
 
 	qidResultOK          = "ok"
+	qidResultOKXWebOnly  = "ok_xweb_only" // applied from an x-web-only page: the legacy walk was clean and saw no legacy operation at all
 	qidResultFetchFailed = "fetch_failed" // page/bundle could not be read
 	qidResultRejected    = "rejected"     // read, but failed validation; nothing applied
 	qidResultPanic       = "panic"        // the walk panicked on a network-supplied body; recovered
@@ -480,7 +486,7 @@ func (r *qidRefresher) run(trig string, f bundle.Fetcher, m *clientMetrics) {
 	r.mu.Lock()
 	r.streak = 0
 	r.mu.Unlock()
-	m.recordQIDRefresh(trig, qidResultOK)
+	m.recordQIDRefresh(trig, result)
 	m.recordQIDChanged(snap.changed)
 	r.noteSuccess(trig, snap, carried)
 }
@@ -496,6 +502,8 @@ func (r *qidRefresher) attempt(ctx context.Context, f bundle.Fetcher, seen *page
 	}()
 	snap, err = r.build(ctx, f, seen)
 	switch {
+	case err == nil && seen.xwebOnly:
+		return snap, qidResultOKXWebOnly, nil
 	case err == nil:
 		return snap, qidResultOK, nil
 	case errors.Is(err, errQIDRejected):
@@ -576,13 +584,32 @@ var qidConsume = func(ext *gqlextract.Extractor, u string, body []byte) { ext.Co
 
 // qidConsumeXWeb feeds one fetched chunk to the x-web extractor. A var only so a
 // test can make it panic.
-var qidConsumeXWeb = func(ext *gqlextract.XWebExtractor, u string, body []byte) { ext.Consume(u, body) }
+var qidConsumeXWeb = func(ctx context.Context, ext *gqlextract.XWebExtractor, u string, body []byte) {
+	ext.ConsumeContext(ctx, u, body)
+}
 
 // pageSeen is what a refresh learned about the warm page, for the finish log
 // (never page contents).
 type pageSeen struct {
 	layout  string
 	scripts int
+	// xwebOnly: the refresh was applied from x-web ids alone (see build).
+	xwebOnly bool
+}
+
+// failureCounter counts the fetch errors of a walk, so a partial walk can be
+// told apart from a clean one that simply found nothing.
+type failureCounter struct {
+	bundle.Fetcher
+	failures atomic.Int64
+}
+
+func (c *failureCounter) Fetch(ctx context.Context, u string) ([]byte, error) {
+	b, err := c.Fetcher.Fetch(ctx, u)
+	if err != nil {
+		c.failures.Add(1)
+	}
+	return b, err
 }
 
 // build reads the bundle and returns a validated snapshot, or an error that
@@ -611,7 +638,8 @@ func (r *qidRefresher) build(ctx context.Context, f bundle.Fetcher, seen *pageSe
 		feat.Consume(u, body)
 	}
 	walk := &bundle.Map{}
-	if err := walk.WalkImports(ctx, f, page.scripts, visit, bundle.Options{MaxBundles: qidMaxBundles}); err != nil {
+	counted := &failureCounter{Fetcher: f}
+	if err := walk.WalkImports(ctx, counted, page.scripts, visit, bundle.Options{MaxBundles: qidMaxBundles}); err != nil {
 		return nil, fmt.Errorf("queryid refresh: walk bundles: %w", err)
 	}
 	if walked == 0 {
@@ -624,11 +652,18 @@ func (r *qidRefresher) build(ctx context.Context, f bundle.Fetcher, seen *pageSe
 	}
 	ids, err := validateQIDs(knownOperations(), ext.Result(), ext.Invalid)
 	if err != nil {
-		// A bundle that is x-web only teaches the legacy walk nothing; the x-web
-		// ids then stand alone. Any other rejection (malformed id) stays fatal.
-		if len(xids) == 0 || !errors.Is(err, errQIDTooFew) {
+		// The x-web ids may stand alone ONLY on positive evidence of an x-web-only
+		// page: a Vite-only layout whose legacy chunks were all fetched and yet
+		// declared no legacy operation. "Too few operations" alone is also what a
+		// flaky or partial legacy walk looks like, and that must stay a failure
+		// (streak, backoff, alert) even when an x-web id happens to be in hand.
+		xwebOnly := len(ext.Result()) == 0 && counted.failures.Load() == 0 && walked > 0 && page.layout == qidLayoutVite
+		if len(xids) == 0 || !errors.Is(err, errQIDTooFew) || !xwebOnly {
 			return nil, err
 		}
+		seen.xwebOnly = true
+		slog.Info("queryid refresh: x-web-only page; applying x-web ids alone",
+			slog.Int("legacy_chunks", walked), slog.Int("xweb_ids", len(xids)))
 		ids = map[string]string{}
 	}
 	maps.Copy(ids, xids) // x-web wins for its native ops: the legacy shape never carries them
@@ -672,14 +707,23 @@ func (r *qidRefresher) walkXWeb(ctx context.Context, f bundle.Fetcher, page *war
 		}
 		return true
 	}
-	stats, err := bundle.CrawlXWeb(ctx, f, page.vite, func(u string, body []byte) { qidConsumeXWeb(ext, u, body) },
-		bundle.CrawlOptions{Done: done})
+	stats, err := bundle.CrawlXWeb(ctx, f, page.vite, func(u string, body []byte) { qidConsumeXWeb(ctx, ext, u, body) },
+		bundle.CrawlOptions{Done: done, Gap: qidXWebGap})
 	byName := map[string]gqlextract.Op{}
 	for _, op := range ext.Ops() {
 		byName[op.Name] = op
 	}
+	conflicts := ext.Conflicts()
 	for op, kind := range xwebNativeOps {
-		if x, ok := byName[op]; ok && x.Kind == kind {
+		x, ok := byName[op]
+		switch {
+		case !ok || x.Kind != kind:
+		case len(conflicts[op]) > 0:
+			// Two chunks declared different ids for one operation: neither is
+			// trusted, and the committed/legacy id stays in force.
+			slog.Warn("queryid refresh: x-web id conflict; operation left unchanged",
+				slog.String("op", op), slog.Int("ids", 1+len(conflicts[op])))
+		default:
 			out[op] = x.ID
 		}
 	}

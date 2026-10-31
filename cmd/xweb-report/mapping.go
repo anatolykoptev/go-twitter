@@ -22,9 +22,6 @@ type opSpec struct {
 	LegacyRoot string
 	// Note is a free-form caveat shown in the details.
 	Note string
-	// XWebNative marks an operation go-twitter already issues against the x-web
-	// stack (its committed id came from a Relay artifact).
-	XWebNative bool
 }
 
 // legacyUserList / legacyTweetTimeline keep the table readable.
@@ -50,7 +47,7 @@ var specs = []opSpec{
 		LegacyVars: []string{"userId", "count", "includePromotedContent", "withQuickPromoteEligibilityTweetFields", "withVoice", "withV2Timeline", "cursor"},
 		LegacyRoot: "user.result.timeline.timeline",
 		Note:       "The x-web artifact is the replies tab (profile_with_replies_timeline_v2) and takes screenName; sibling UserOriginalsTimeline / UserRepliesTimeline / UserPhotoTimeline / UserVideoTimeline exist."},
-	{Legacy: "SearchTimeline", XWeb: []string{"SearchTimeline", "SearchByRawQuery"}, Parser: "parseSearchTimeline",
+	{Legacy: "SearchTimeline", XWeb: []string{"SearchByRawQuery"}, Parser: "parseSearchTimeline",
 		LegacyVars: []string{"rawQuery", "count", "querySource", "product", "cursor"}, LegacyRoot: "search_by_raw_query.search_timeline.timeline",
 		Note: "No operation literally named SearchTimeline; SearchByRawQuery is the same root field name."},
 	{Legacy: "TweetDetail", XWeb: []string{"TweetDetail"}, Parser: "parseTweetDetail",
@@ -75,8 +72,7 @@ var specs = []opSpec{
 		LegacyVars: userListVars, LegacyRoot: userListRoot},
 	{Legacy: "tweetNotificationsQuery", XWeb: []string{"tweetNotificationsQuery"}, Parser: "parseTweetNotifications",
 		LegacyVars: []string{"count"}, LegacyRoot: "viewer_v2.user_results.result.tweet_notification_timeline.timeline",
-		XWebNative: true,
-		Note:       "Already an x-web operation in v0.7.0 (hand-extracted id, x-web parser); the request also sends six __relay_internal__pv__ provided variables."},
+		Note: "Already an x-web operation in v0.7.0 (hand-extracted id, x-web parser); the request also sends six __relay_internal__pv__ provided variables."},
 	{Legacy: "FavoriteTweet", XWeb: []string{"likeButtonFavoriteMutation", "FavoriteTweet"}, Parser: "parseAck(favorite_tweet)",
 		LegacyVars: []string{"tweet_id"}, LegacyRoot: "favorite_tweet"},
 	{Legacy: "UnfavoriteTweet", XWeb: []string{"likeButtonUnfavoriteMutation", "UnfavoriteTweet"}, Parser: "parseAck(unfavorite_tweet)",
