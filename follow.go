@@ -26,7 +26,7 @@ func (c *Client) FollowUser(ctx context.Context, acc *Account, userID string) er
 	headers := twitterHeaders(authTok, ct0, ua)
 	headers["content-type"] = "application/x-www-form-urlencoded"
 	form := url.Values{"user_id": {userID}, "skip_status": {"1"}}.Encode()
-	body, respHdrs, status, err := c.observedRequestWithBody(ctx, "FollowUser", bc, "POST", followURL, headers, strings.NewReader(form))
+	body, respHdrs, status, err := c.observedRequestWithBody(ctx, acc, "FollowUser", bc, "POST", followURL, headers, strings.NewReader(form))
 	if err != nil {
 		return fmt.Errorf("FollowUser: %w", err)
 	}
@@ -68,7 +68,7 @@ func (c *Client) FriendshipState(ctx context.Context, acc *Account, userID strin
 	authTok, ct0, ua := acc.Credentials()
 	headers := twitterHeaders(authTok, ct0, ua)
 	u := friendshipsShowURL + "?target_id=" + url.QueryEscape(userID)
-	body, respHdrs, status, err := c.observedRequest(ctx, "FriendshipState", bc, "GET", u, headers)
+	body, respHdrs, status, err := c.observedRequest(ctx, acc, "FriendshipState", bc, "GET", u, headers)
 	if err != nil {
 		return false, false, fmt.Errorf("FriendshipState: %w", err)
 	}
@@ -97,7 +97,7 @@ func (c *Client) SetDeviceNotifications(ctx context.Context, acc *Account, userI
 		device = "true"
 	}
 	form := url.Values{"id": {userID}, "device": {device}}.Encode()
-	body, respHdrs, status, err := c.observedRequestWithBody(ctx, "SetDeviceNotifications", bc, "POST", friendshipsUpdateURL, headers, strings.NewReader(form))
+	body, respHdrs, status, err := c.observedRequestWithBody(ctx, acc, "SetDeviceNotifications", bc, "POST", friendshipsUpdateURL, headers, strings.NewReader(form))
 	if err != nil {
 		return false, fmt.Errorf("SetDeviceNotifications: %w", err)
 	}

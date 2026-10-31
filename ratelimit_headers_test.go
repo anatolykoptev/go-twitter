@@ -22,7 +22,7 @@ import (
 	"github.com/anatolykoptev/go-twitter/xtid"
 )
 
-const rlEndpoint = "SearchTimeline" // requiresAuth, POST, not in endpointDefaultLimit
+const rlEndpoint = "TweetDetail" // requiresAuth, not in endpointDefaultLimit
 
 // rlFakeClock is a deterministic clock for Account.clock.
 type rlFakeClock struct {
@@ -118,8 +118,9 @@ func newRLClient(t *testing.T, n, perEndpointCap int, clk *rlFakeClock) (*Client
 		accs[i] = newRateTestAccount(name, ratelimit.Config{RequestsPerWindow: perEndpointCap, WindowDuration: 15 * time.Minute})
 		if clk != nil {
 			accs[i].clock = clk.Now
-			accs[i].rateLimiter = ratelimit.NewLimiter(
+			accs[i].installRateLimiter(
 				ratelimit.Config{RequestsPerWindow: perEndpointCap, WindowDuration: 15 * time.Minute}, ratelimit.WithClock(clk.Now))
+			seedRateLimits(accs[i]) // re-prime the measured caps on the clock-driven limiter
 		}
 		accs[i].AuthToken, accs[i].CT0 = "tok"+name, "ct0"
 	}
@@ -512,6 +513,6 @@ func TestRateLimitHeaders_ConcurrentPicksSpendTheEstimate(t *testing.T) {
 	}
 	wg.Wait()
 
-	assert.EqualValues(t, 10-rateLimitHeadroom, allowed.Load(), "only remaining-headroom picks may pass before a response lands")
+	assert.EqualValues(t, 10-RateLimitHeadroom, allowed.Load(), "only remaining-headroom picks may pass before a response lands")
 	assert.True(t, acc.IsEndpointRateLimited(rlEndpoint), "the spent estimate holds the endpoint until reset")
 }

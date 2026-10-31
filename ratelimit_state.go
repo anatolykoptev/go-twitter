@@ -5,9 +5,11 @@ import (
 	"time"
 )
 
-// rateLimitHeadroom is the number of requests X must still report as remaining
+// RateLimitHeadroom is the number of requests X must still report as remaining
 // for an endpoint to stay eligible. An endpoint whose window shows
-// remaining <= rateLimitHeadroom is held back until the window resets.
+// remaining <= RateLimitHeadroom is held back until the window resets. It is
+// exported so consumers do not have to duplicate the constant to compute an
+// account's effective budget (see Account.SetBudgetPct).
 //
 // Why 2 and not 0: a response's remaining counts requests X had served when it
 // answered, not requests already in flight. With the 50-per-window caps X gives
@@ -15,7 +17,7 @@ import (
 // calls that share an account (4% of the window) so those calls do not land on
 // a 429, which is what draws X's attention to an account. Why not nitter's 10:
 // on a 50-request window that would waste a fifth of the budget.
-const rateLimitHeadroom = 2
+const RateLimitHeadroom = 2
 
 // maxRateLimitReset is the furthest into the future an x-rate-limit-reset is
 // believed. X's windows are 15 minutes; 1h leaves 4x slack for clock skew and
@@ -144,7 +146,8 @@ func (a *Account) latestRateLimit(preferred string) (endpoint string, st rateLim
 }
 
 // holdIfExhausted (reporting whether it held) blocks the endpoint on this account until its window resets
-// when the last known state shows remaining <= rateLimitHeadroom. The response
+// when the last known state shows remaining <= RateLimitHeadroom + the account's
+// withheld budget share. The response
 // that reported it still succeeded; the NEXT pick for the endpoint rotates to
 // another account.
 //
@@ -165,11 +168,13 @@ func (a *Account) holdIfExhausted(endpoint string) bool {
 }
 
 // holdLocked records the hold in blockedUntil when the endpoint's state shows
-// the window spent; the caller mirrors it into the local limiter after
-// unlocking. a.mu must be held.
+// the window spent — spent meaning the remaining estimate is at or below
+// RateLimitHeadroom plus the budget share this account may not touch
+// (SetBudgetPct; see budgetShareLocked). The caller mirrors the hold into the
+// local limiter after unlocking. a.mu must be held.
 func (a *Account) holdLocked(endpoint string, now time.Time) (until time.Time, held bool) {
 	st, ok := a.rlState[endpoint]
-	if !ok || st.remaining > rateLimitHeadroom || !st.resetAt.After(now) || !a.blockedUntil[endpoint].Before(st.resetAt) {
+	if !ok || st.remaining > RateLimitHeadroom+a.budgetShareLocked(endpoint, st.limit) || !st.resetAt.After(now) || !a.blockedUntil[endpoint].Before(st.resetAt) {
 		return time.Time{}, false
 	}
 	if a.blockedUntil == nil {

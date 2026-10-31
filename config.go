@@ -27,6 +27,26 @@ const (
 	defaultMaxInFlightPerAccount = 2
 )
 
+// RequestEvent describes one HTTP attempt served by a pooled account, emitted
+// to ClientConfig.OnRequest. Status is the HTTP status code (0 when the
+// transport failed before a response). Outcome is the same bounded
+// classification the client records to its metrics (e.g. "ok",
+// "rate_limited", "transport") — see the twitter.outcome values in
+// docs/metrics.md. RateLimit mirrors the response's x-rate-limit-* headers:
+// Limit 0, Remaining -1 and a zero Reset each mean "header absent or
+// unparseable".
+type RequestEvent struct {
+	Username  string
+	Endpoint  string
+	Status    int
+	Outcome   string
+	RateLimit struct {
+		Limit     int
+		Remaining int
+		Reset     time.Time
+	}
+}
+
 // ClientConfig holds all configuration for the Twitter client.
 type ClientConfig struct {
 	// Accounts is the list of Twitter accounts to use.
@@ -68,6 +88,15 @@ type ClientConfig struct {
 	// Deprecated: use MeterProvider. MetricsHook carries no latency or error
 	// class; it keeps working unchanged for existing consumers.
 	MetricsHook func(endpoint string, success, rateLimited bool)
+
+	// OnRequest, when set, is called once per HTTP attempt that was served by a
+	// pooled account — on success AND on every error path — at the same
+	// observation point that feeds the request-duration metric, after the
+	// response is classified. Guest-token fallback requests carry no account
+	// and emit no event. It is called synchronously on the request path: it
+	// must not block (offload heavy work to a channel or queue). nil = no-op,
+	// zero cost.
+	OnRequest func(RequestEvent)
 
 	// MeterProvider supplies the OpenTelemetry meter provider for the client's
 	// metrics (see docs/metrics.md). nil = otel.GetMeterProvider(), which is a

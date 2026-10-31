@@ -201,10 +201,21 @@ Limits are per account and per endpoint (operation name such as `Followers`), in
 | `Following` | 187 |
 | `Retweeters` | 500 |
 | `UserTweets` | 50 |
+| `SearchTimeline` | 187 |
+| `HomeLatestTimeline` | 500 |
+| `DeviceFollow` | 180 |
+
+The table is exported as `EndpointLimits()`, which returns a copy — mutating the result changes nothing. Only measured operations are listed; `RateLimitHeadroom` (2) exports the headroom the eligibility rule subtracts, so a consumer can compute an account's effective budget without duplicating either constant.
 
 Endpoints without a seed use `ClientConfig.RateLimit` (default 50 per 15 minutes). On every response from a pool request, an account-pinned POST or a media upload that carries a positive `x-rate-limit-limit`, the account's cap for that endpoint is updated to it, so the limiter follows what x.com currently grants. The pool skips accounts whose limiter denies the endpoint.
 
-**x.com's headers are the authority.** Every response (200 and non-200) that carries both `x-rate-limit-remaining` and `x-rate-limit-reset` updates that account's window for the endpoint. An older response never raises `remaining` inside one window (windows are ordered by their reset timestamp; within a window `remaining` only falls). When `remaining` is at most 2 (`rateLimitHeadroom`, spare slots for in-flight calls) and the reset is still ahead, the endpoint is held back on that account until the reset: the current call still succeeds, and the next pick rotates to another account, so a 429 that the headers announced never happens. While an endpoint's window is live (before its reset) the local request counter is ignored; the counter decides before the first header is seen (cold start), when responses carry no headers, and again once a window has expired without a renewing response. Writes and media uploads record the window but do not rotate. Observed values are exported as the `twitter.client.ratelimit.*` metrics (see `docs/metrics.md`).
+**x.com's headers are the authority.** Every response (200 and non-200) that carries both `x-rate-limit-remaining` and `x-rate-limit-reset` updates that account's window for the endpoint. An older response never raises `remaining` inside one window (windows are ordered by their reset timestamp; within a window `remaining` only falls). When `remaining` is at most `RateLimitHeadroom` (2, spare slots for in-flight calls) plus the account's withheld budget share and the reset is still ahead, the endpoint is held back on that account until the reset: the current call still succeeds, and the next pick rotates to another account, so a 429 that the headers announced never happens. While an endpoint's window is live (before its reset) the local request counter is ignored; the counter decides before the first header is seen (cold start), when responses carry no headers, and again once a window has expired without a renewing response. Writes and media uploads record the window but do not rotate. Observed values are exported as the `twitter.client.ratelimit.*` metrics (see `docs/metrics.md`).
+
+**Per-account spend share.** `Account.SetBudgetPct(pct)` restricts the account to `pct` percent of each endpoint's window (1-100; out of range = 100 = the whole window, which is also the never-set default). It applies to both gates: under header authority the endpoint is held once `remaining` reaches `RateLimitHeadroom + limit*(100-pct)/100`, and in the local-counter path the cap itself is scaled to `max(1, limit*pct/100)`. `Account.BudgetPct()` reads it back. It is safe to call at runtime on a live pooled account — the next pick already sees the new share.
+
+**Account hold.** `Client.HoldAccount(username, until)` benches a pooled account for every endpoint until the given time — the pool skips it and any waiting call wakes when the hold ends. It is not a failure: no health penalty, no failure counters, no relogin. Returns false when no pool account matches; when every account is held the caller gets the same pool-exhausted error as an empty pool.
+
+**Request observer.** `ClientConfig.OnRequest func(RequestEvent)`, when set, is called once per HTTP attempt a pooled account served — after the response is classified, on success and on every error path — at the same observation point that feeds `twitter.client.request.duration`. `RequestEvent` carries the username, endpoint, HTTP status, the shared-classifier `Outcome` (the `twitter.outcome` values in `docs/metrics.md`), and the response's `x-rate-limit-*` headers (`Limit` 0, `Remaining` -1 and a zero `Reset` mean unknown). It runs synchronously on the request path and must not block.
 
 The `*WithSocial` helpers lease a fresh single-account client per attempt, so that state would die with the lease. They therefore pass the operation to go-social as `?endpoint=<operation>` on acquire and send the last observed window back with the usage report as `rate_limit` (`endpoint`, `limit`, `remaining`, `reset`); see `social.Client.AcquireAccountFor` and `ReportUsageWithRateLimit`. A go-social that predates these fields ignores them.
 
@@ -255,6 +266,7 @@ trailing argument, e.g. `twitter.GetUserWithSocial(ctx, sc, "handle", twitter.Wi
 | `OpenAccountCount` | 0 | Anonymous guest sessions to create at startup. |
 | `DisableGuestFallback` | false | Refuse the guest-token fallback on endpoints that allow it. |
 | `PoolAlertHook` | log a warning | `func(topic string, payload any)` called on pool events. This repo emits `proxy.down` (user, masked proxy, consecutive failures, backoff) and `xtid.init_failed`; the go-stealth pool emits its own topics, such as account deactivation. `account.proxy_client_failed` (a per-account proxy client failed to build; payload keys `user`, `proxy` (masked label), `error` (fixed text)). |
+| `OnRequest` | nil (no-op) | `func(RequestEvent)` called once per pooled-account HTTP attempt after classification — the request observer; see [Rate Limiting](#rate-limiting). Must not block. |
 
 ## Session storage
 
