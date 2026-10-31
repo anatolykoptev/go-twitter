@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.7.1](https://github.com/anatolykoptev/go-twitter/compare/v0.7.0...v0.7.1) (2026-10-31)
+
+
+### Features
+
+* **xweb:** x-web Relay extractor, migration report, opt-in refresher source ([#119](https://github.com/anatolykoptev/go-twitter/issues/119) phase 1) ([#124](https://github.com/anatolykoptev/go-twitter/issues/124)) ([4fe9e36](https://github.com/anatolykoptev/go-twitter/commit/4fe9e36000134104a222b6190c6a93f47281be47))
+
+
+### Bug Fixes
+
+* **xtid:** match the reference on hex precision, SVG lookup and refresh; surface auth rejection ([#128](https://github.com/anatolykoptev/go-twitter/issues/128)) ([8b093d2](https://github.com/anatolykoptev/go-twitter/commit/8b093d22e5192a433e311468530e2eb32d7585bc))
+
 ## [0.7.0](https://github.com/anatolykoptev/go-twitter/compare/v0.6.27...v0.7.0) (2026-10-30)
 
 
