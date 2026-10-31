@@ -270,6 +270,10 @@ func (m *Manager) FetchKeyMaterial(ctx context.Context, f bundle.Fetcher, pageUR
 	return m.fetchMaterial(ctx, retryFetcher{f}, pageURL)
 }
 
+// AnimationKey returns the derived animation key. It is key material: for
+// diagnostics (cmd/xtid-probe, which compares keys without printing them).
+func (ct *ClientTransaction) AnimationKey() string { return ct.animationKey }
+
 // NewClientTransaction builds a ClientTransaction from a warm page and the
 // indices file, for diagnostics (cmd/xtid-probe). GenerateID is its output.
 func NewClientTransaction(homeHTML, indicesJS string) (*ClientTransaction, error) {

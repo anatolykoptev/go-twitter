@@ -14,3 +14,14 @@ func TestBuildURLAndCounts(t *testing.T) {
 		t.Fatalf("formatCounts = %q", got)
 	}
 }
+
+func TestKeyReport(t *testing.T) {
+	vs := []variant{{name: "a", key: "ab"}, {name: "b", key: "abcde"}, {name: "c", key: "abcde"}, {name: "d"}}
+	if got, want := keyReport(vs), "anim keys: a!=b yes, b!=c no; hex fraction digits dropped by the old path: 3"; got != want {
+		t.Fatalf("keyReport = %q, want %q", got, want)
+	}
+	vs[2].err = "unavailable"
+	if got := keyReport(vs); !strings.HasPrefix(got, "anim keys: a!=b yes, b!=c n/a") {
+		t.Fatalf("keyReport with unavailable c = %q", got)
+	}
+}

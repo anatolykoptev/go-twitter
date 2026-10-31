@@ -53,6 +53,7 @@ type variant struct {
 	name string
 	desc string
 	gen  func(path string) (string, bool) // id, ok; ok=false means send no header
+	key  string                           // animation key; compared, never printed
 	err  string                           // non-empty: variant unavailable
 }
 
@@ -144,6 +145,7 @@ loop:
 		}
 	}
 
+	fmt.Println(keyReport(variants))
 	fmt.Printf("%s, up to %d requests per variant, status code -> count (-1 = transport error)\n", operation, *n)
 	for _, v := range variants {
 		if v.err != "" {
@@ -175,6 +177,7 @@ func buildVariants(ctx context.Context, acct, guest bundle.Fetcher, redact *stri
 				return v
 			}
 			v.gen = func(p string) (string, bool) { return ct.GenerateID("GET", p), true }
+			v.key = ct.AnimationKey()
 			return v
 		}
 		ct, err := xtid.NewClientTransaction(page, js)
@@ -183,6 +186,7 @@ func buildVariants(ctx context.Context, acct, guest bundle.Fetcher, redact *stri
 			return v
 		}
 		v.gen = func(p string) (string, bool) { return ct.GenerateID("GET", p), true }
+		v.key = ct.AnimationKey()
 		return v
 	}
 	return []variant{
@@ -257,6 +261,31 @@ func cloneHeaders(h map[string]string) map[string]string {
 	out := make(map[string]string, len(h)+1)
 	for k, v := range h {
 		out[k] = v
+	}
+	return out
+}
+
+// keyReport compares the animation keys of the variants without printing them.
+// The old algorithm only ever drops hex fraction digits (the rest of the key is
+// identical), so the length difference b-a is the number of digits it dropped.
+func keyReport(vs []variant) string {
+	by := map[string]variant{}
+	for _, v := range vs {
+		by[v.name] = v
+	}
+	a, b, c := by["a"], by["b"], by["c"]
+	cmp := func(x, y variant) string {
+		if x.err != "" || y.err != "" {
+			return "n/a"
+		}
+		if x.key != y.key {
+			return "yes"
+		}
+		return "no"
+	}
+	out := fmt.Sprintf("anim keys: a!=b %s, b!=c %s", cmp(a, b), cmp(b, c))
+	if a.err == "" && b.err == "" {
+		out += fmt.Sprintf("; hex fraction digits dropped by the old path: %d", len(b.key)-len(a.key))
 	}
 	return out
 }
