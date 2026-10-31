@@ -729,7 +729,7 @@ func (r *qidRefresher) walkXWeb(ctx context.Context, f bundle.Fetcher, page *war
 	}
 	slog.Info("queryid refresh: x-web crawl",
 		slog.Int("chunks", stats.Fetched), slog.Int("failed", stats.Failed), slog.Bool("capped", stats.Capped),
-		slog.Int("native_ops_found", len(out)), slog.Int("native_ops_wanted", len(xwebNativeOps)), slog.Any("error", err))
+		slog.Int("truncated_chunks", ext.Truncated()), slog.Int("native_ops_found", len(out)), slog.Int("native_ops_wanted", len(xwebNativeOps)), slog.Any("error", err))
 	return out
 }
 

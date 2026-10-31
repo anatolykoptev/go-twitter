@@ -8,12 +8,57 @@ import "strings"
 // fields, which is what makes the x-web extraction independent of key order and
 // of nested values (metadata:{}, providedVariables:{...}).
 
+// scan carries the per-body work budget. Every scan over a body (bracket
+// matching and the re-splitting of literals) is charged to it, and once the
+// budget is spent every further scan fails. That makes the whole parse of one
+// body cost O(len(body)) whatever the shape: individual caps (failed closes,
+// candidates, identifiers) bound the shapes anticipated, this bounds the rest.
+type scan struct {
+	left int
+	over bool
+}
+
+const (
+	// scanFactor is how many times the body length may be scanned in total. A
+	// real artifact is re-split once per nesting level on its way down the
+	// response chain (<= maxChainDepth), so 32 leaves room; the real-corpus
+	// check in the tests pins that no real chunk comes near it.
+	scanFactor = 32
+	scanSlack  = 256 << 10
+)
+
+func newScan(bodyLen int) *scan { return &scan{left: scanFactor*bodyLen + scanSlack} }
+
+// spend charges n bytes of scanning and reports whether the budget still holds.
+func (sc *scan) spend(n int) bool {
+	if sc.over {
+		return false
+	}
+	if sc.left -= n; sc.left < 0 {
+		sc.over = true
+		return false
+	}
+	return true
+}
+
 // matchClose returns the index of the bracket that closes the one opening at
 // s[open] ('{' or '['), skipping string literals, or -1 when unbalanced.
-func matchClose(s string, open int) int {
-	if open < 0 || open >= len(s) || (s[open] != '{' && s[open] != '[') {
+func (sc *scan) matchClose(s string, open int) int {
+	if sc.over || open < 0 || open >= len(s) || (s[open] != '{' && s[open] != '[') {
 		return -1
 	}
+	end := sc.matchCloseRaw(s, open)
+	scanned := len(s) - open // an unbalanced scan ran to EOF
+	if end >= 0 {
+		scanned = end - open + 1
+	}
+	if !sc.spend(scanned) {
+		return -1
+	}
+	return end
+}
+
+func (sc *scan) matchCloseRaw(s string, open int) int {
 	depth := 0
 	for i := open; i < len(s); i++ {
 		switch c := s[i]; c {
@@ -57,8 +102,8 @@ type field struct{ key, val string }
 // objectFields splits the object literal s (including its braces) into its
 // top-level fields in source order. Computed or quoted keys are returned with
 // their quotes stripped; malformed input yields whatever was parsed so far.
-func objectFields(s string) []field {
-	if len(s) < 2 || s[0] != '{' {
+func (sc *scan) objectFields(s string) []field {
+	if len(s) < 2 || s[0] != '{' || !sc.spend(len(s)) {
 		return nil
 	}
 	body := s[1 : len(s)-1]
@@ -82,7 +127,7 @@ func objectFields(s string) []field {
 			continue
 		}
 		key := strings.Trim(strings.TrimSpace(body[i:keyEnd]), "\"'`")
-		valEnd := valueEnd(body, keyEnd+1)
+		valEnd := sc.valueEnd(body, keyEnd+1)
 		if valEnd < 0 {
 			return out
 		}
@@ -101,13 +146,13 @@ func skipSpaceComma(s string, i int) int {
 
 // valueEnd returns the index just past the value starting at from (the next
 // top-level comma or end of s), or -1 when a nested literal is unbalanced.
-func valueEnd(s string, from int) int {
+func (sc *scan) valueEnd(s string, from int) int {
 	for i := from; i < len(s); i++ {
 		switch s[i] {
 		case ',':
 			return i
 		case '{', '[', '(':
-			end := matchClose(s, i)
+			end := sc.matchClose(s, i)
 			if end < 0 {
 				return -1
 			}
@@ -149,8 +194,8 @@ func stringLit(raw string) (string, bool) {
 
 // arrayElems splits an array literal (including brackets) into its raw
 // top-level elements.
-func arrayElems(s string) []string {
-	if len(s) < 2 || s[0] != '[' {
+func (sc *scan) arrayElems(s string) []string {
+	if len(s) < 2 || s[0] != '[' || !sc.spend(len(s)) {
 		return nil
 	}
 	body := s[1 : len(s)-1]
@@ -160,7 +205,7 @@ func arrayElems(s string) []string {
 		if i >= len(body) {
 			break
 		}
-		end := valueEnd(body, i)
+		end := sc.valueEnd(body, i)
 		if end < 0 {
 			return out
 		}

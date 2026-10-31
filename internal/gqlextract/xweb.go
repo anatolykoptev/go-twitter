@@ -61,9 +61,9 @@ type Op struct {
 // Parse limits. They bound the work a hostile or malformed chunk can cost; each
 // guards one distinct quadratic path and is pinned by its own test.
 const (
-	// MaxChunkBytes is the largest body ParseRelayArtifacts looks at. The largest
-	// real x-web chunk measured (2026-10-30, 2014 chunks) was 1.3 MB.
-	MaxChunkBytes = 8 << 20
+	// MaxChunkBytes is the largest body ParseRelayArtifacts looks at: about 3x the
+	// largest real x-web chunk measured (2026-10-30, 2014 chunks: 1.32 MB).
+	MaxChunkBytes = 4 << 20
 	// maxFailedCloses bounds `params:{` openers whose brace never closes. Each such
 	// scan runs to EOF, so without a cap n openers cost O(n·N).
 	maxFailedCloses = 8
@@ -73,6 +73,10 @@ const (
 	// maxArtifactIdents bounds the identifier lookups per artifact (each may scan
 	// the declaration it names). Real artifacts use a few dozen.
 	maxArtifactIdents = 96
+	// maxArtifactNames bounds the variables and provided variables kept per
+	// operation (real ones declare <= 15); it also keeps their de-duplication
+	// from going quadratic on a hostile list.
+	maxArtifactNames = 256
 )
 
 var (
@@ -96,41 +100,55 @@ func ParseRelayArtifacts(source string, body []byte) []Op {
 // ParseRelayArtifactsContext is ParseRelayArtifacts that stops between artifacts
 // once ctx is done, and refuses bodies above MaxChunkBytes.
 func ParseRelayArtifactsContext(ctx context.Context, source string, body []byte) []Op {
+	ops, _ := parseRelay(ctx, source, body)
+	return ops
+}
+
+// parseRelay is the parse. exhausted reports that the per-body work budget (see
+// scan) ran out: parsing stopped there, and the artifact being built at that
+// moment is discarded rather than emitted half-resolved.
+func parseRelay(ctx context.Context, source string, body []byte) (ops []Op, exhausted bool) {
 	if len(body) > MaxChunkBytes {
-		return nil
+		return nil, false
 	}
 	text := string(body)
-	var ops []Op
+	sc := newScan(len(text))
 	prevEnd, failed := 0, 0
 	for _, loc := range paramsOpenRe.FindAllStringIndex(text, -1) {
 		if ctx.Err() != nil {
-			return ops
+			return ops, false
 		}
 		open := loc[1] - 1
 		if open < prevEnd {
 			continue // inside an artifact already consumed
 		}
-		end := matchClose(text, open)
+		end := sc.matchClose(text, open)
 		if end < 0 {
+			if sc.over {
+				return ops, true
+			}
 			// Unbalanced to EOF: every later opener would rescan the same tail.
 			if failed++; failed >= maxFailedCloses {
-				return ops
+				return ops, false
 			}
 			continue
 		}
-		op, ok := buildOp(source, text, prevEnd, open, end)
+		op, ok := buildOp(sc, source, text, prevEnd, open, end)
 		prevEnd = end + 1
+		if sc.over {
+			return ops, true
+		}
 		if ok {
 			ops = append(ops, op)
 		}
 	}
-	return ops
+	return ops, false
 }
 
 // buildOp builds the Op for the params object text[open:end+1], using text from
 // lo for the enclosing artifact and its argument declarations.
-func buildOp(source, text string, lo, open, end int) (Op, bool) {
-	params := objectFields(text[open : end+1])
+func buildOp(sc *scan, source, text string, lo, open, end int) (Op, bool) {
+	params := sc.objectFields(text[open : end+1])
 	id, okID := stringField(params, "id")
 	name, okName := stringField(params, "name")
 	kind, okKind := stringField(params, "operationKind")
@@ -139,34 +157,34 @@ func buildOp(source, text string, lo, open, end int) (Op, bool) {
 	}
 	op := Op{Name: name, ID: id, Kind: kind, Stack: StackXWeb, Source: source}
 	if pv, ok := fieldVal(params, "providedVariables"); ok && strings.HasPrefix(pv, "{") {
-		for _, f := range objectFields(pv) {
-			op.Providers = appendUnique(op.Providers, f.key)
+		for _, f := range sc.objectFields(pv) {
+			op.Providers = appendCapped(op.Providers, f.key)
 		}
 	}
 
-	art, start := enclosingArtifact(text, lo, open)
+	art, start := enclosingArtifact(sc, text, lo, open)
 	if art == "" {
 		return op, true
 	}
-	artFields := objectFields(art)
-	res := newResolver(text[lo:start])
+	artFields := sc.objectFields(art)
+	res := newResolver(sc, text[lo:start])
 	if opRaw, ok := fieldVal(artFields, "operation"); ok {
-		opFields := objectFields(opRaw)
+		opFields := sc.objectFields(opRaw)
 		if defs, ok := fieldVal(opFields, "argumentDefinitions"); ok {
-			for _, el := range arrayElems(res.literal(defs)) {
+			for _, el := range sc.arrayElems(res.literal(defs)) {
 				n := res.argName(el)
 				switch {
 				case n == "":
 				case strings.HasPrefix(n, providerPrefix):
-					op.Providers = appendUnique(op.Providers, n)
+					op.Providers = appendCapped(op.Providers, n)
 				default:
-					op.Variables = appendUnique(op.Variables, n)
+					op.Variables = appendCapped(op.Variables, n)
 				}
 			}
 		}
 	}
 	if frag, ok := fieldVal(artFields, "fragment"); ok {
-		if sel, ok := fieldVal(objectFields(frag), "selections"); ok {
+		if sel, ok := fieldVal(sc.objectFields(frag), "selections"); ok {
 			op.ResponseRoot = responseRoot(res, sel)
 		}
 	}
@@ -175,12 +193,12 @@ func buildOp(source, text string, lo, open, end int) (Op, bool) {
 
 // enclosingArtifact returns the `{fragment:{…},kind:…,operation:{…},params:{…}}`
 // object whose params open at `open`, searching back no further than lo.
-func enclosingArtifact(text string, lo, open int) (string, int) {
+func enclosingArtifact(sc *scan, text string, lo, open int) (string, int) {
 	locs := artifactOpen.FindAllStringIndex(text[lo:open], -1)
 	// Take the nearest candidate that actually encloses the params object.
 	for i, tried := len(locs)-1, 0; i >= 0 && tried < maxArtifactCandidates; i, tried = i-1, tried+1 {
 		start := lo + locs[i][0]
-		end := matchClose(text, start)
+		end := sc.matchClose(text, start)
 		if end >= open {
 			return text[start : end+1], start
 		}
@@ -193,14 +211,15 @@ func enclosingArtifact(text string, lo, open int) (string, int) {
 // argumentDefinitions and selections can be followed to their literal. The span
 // is indexed once; a literal is matched only when its identifier is asked for.
 type resolver struct {
+	sc      *scan
 	span    string
 	decls   map[string]int // ident -> index of the opening bracket of its LAST declaration
 	cache   map[string]string
 	lookups int
 }
 
-func newResolver(span string) *resolver {
-	r := &resolver{span: span, decls: map[string]int{}, cache: map[string]string{}}
+func newResolver(sc *scan, span string) *resolver {
+	r := &resolver{sc: sc, span: span, decls: map[string]int{}, cache: map[string]string{}}
 	// The nearest preceding declaration is the artifact's own: short minified
 	// names are reused across scopes earlier in the chunk, so later matches win.
 	for _, m := range declRe.FindAllStringSubmatchIndex(span, -1) {
@@ -221,7 +240,7 @@ func (r *resolver) lookup(ident string) string {
 	r.lookups++
 	out := ""
 	if open, ok := r.decls[ident]; ok {
-		if end := matchClose(r.span, open); end >= 0 {
+		if end := r.sc.matchClose(r.span, open); end >= 0 {
 			out = r.span[open : end+1]
 		}
 	}
@@ -255,7 +274,7 @@ func (r *resolver) literal(el string) string {
 
 // argName resolves one argumentDefinitions element to its argument name.
 func (r *resolver) argName(el string) string {
-	n, _ := stringField(objectFields(r.literal(el)), "name")
+	n, _ := stringField(r.sc.objectFields(r.literal(el)), "name")
 	return n
 }
 
@@ -294,12 +313,12 @@ type linkedField struct{ name, selections string }
 // levelFields lists the LinkedFields of a selections array (looking through
 // inline fragments) and the names of its non-linked members (scalars).
 func levelFields(res *resolver, selections string) (linked []linkedField, others []string) {
-	for _, el := range arrayElems(res.literal(selections)) {
+	for _, el := range res.sc.arrayElems(res.literal(selections)) {
 		el = res.literal(el)
 		if !strings.HasPrefix(el, "{") {
 			continue
 		}
-		fs := objectFields(el)
+		fs := res.sc.objectFields(el)
 		kind, _ := stringField(fs, "kind")
 		switch kind {
 		case "InlineFragment":
@@ -328,6 +347,15 @@ func stringField(fs []field, key string) (string, bool) {
 	return stringLit(raw)
 }
 
+// appendCapped is appendUnique for operation name lists: it stops growing at
+// maxArtifactNames so a hostile list cannot make the de-duplication quadratic.
+func appendCapped(s []string, v string) []string {
+	if len(s) >= maxArtifactNames {
+		return s
+	}
+	return appendUnique(s, v)
+}
+
 func appendUnique(s []string, v string) []string {
 	for _, e := range s {
 		if e == v {
@@ -341,6 +369,7 @@ func appendUnique(s []string, v string) []string {
 // seen for an operation name wins; a differing later id is logged and kept in
 // Conflicts so a surprising second artifact is never silent.
 type XWebExtractor struct {
+	truncated int // bodies whose parse stopped at the work budget
 	ops       map[string]Op
 	conflicts map[string][]string
 	log       *slog.Logger
@@ -362,7 +391,13 @@ func (x *XWebExtractor) Consume(source string, body []byte) {
 
 // ConsumeContext is Consume that stops parsing once ctx is done.
 func (x *XWebExtractor) ConsumeContext(ctx context.Context, source string, body []byte) {
-	for _, op := range ParseRelayArtifactsContext(ctx, source, body) {
+	parsed, exhausted := parseRelay(ctx, source, body)
+	if exhausted {
+		x.truncated++
+		x.log.Warn("x-web chunk parse stopped at the per-body work budget",
+			slog.String("source", source), slog.Int("bytes", len(body)), slog.Int("artifacts_kept", len(parsed)))
+	}
+	for _, op := range parsed {
 		prev, seen := x.ops[op.Name]
 		if !seen {
 			x.ops[op.Name] = op
@@ -407,6 +442,9 @@ func (x *XWebExtractor) Result() map[string]string {
 	}
 	return out
 }
+
+// Truncated returns how many consumed bodies stopped at the per-body work budget.
+func (x *XWebExtractor) Truncated() int { return x.truncated }
 
 // Conflicts returns, per operation name, the extra ids seen beyond the kept one.
 func (x *XWebExtractor) Conflicts() map[string][]string { return x.conflicts }
