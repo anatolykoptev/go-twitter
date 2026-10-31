@@ -17,7 +17,7 @@ import (
 // via the same calls request.go's filter and adaptive-sync make.
 func newRateTestAccount(username string, cfg ratelimit.Config) *Account {
 	a := &Account{Username: username, active: true}
-	a.rateLimiter = ratelimit.NewLimiter(cfg)
+	a.installRateLimiter(cfg)
 	seedRateLimits(a)
 	a.HealthTracker = pool.DefaultHealthTracker()
 	return a
@@ -96,11 +96,14 @@ func TestSeedRateLimits_AppliesMeasuredCaps(t *testing.T) {
 	acc := newRateTestAccount("u", ratelimit.Config{RequestsPerWindow: 50, WindowDuration: 15 * time.Minute})
 
 	want := map[string]int{
-		"Followers":        187,
-		"Following":        187,
-		"Retweeters":       500,
-		"UserByScreenName": 150,
-		"UserTweets":       50,
+		"Followers":          187,
+		"Following":          187,
+		"Retweeters":         500,
+		"UserByScreenName":   150,
+		"UserTweets":         50,
+		"SearchTimeline":     187,
+		"HomeLatestTimeline": 500,
+		deviceFollowEndpoint: 180,
 	}
 	for ep, cap := range want {
 		allowed := 0
@@ -115,20 +118,23 @@ func TestSeedRateLimits_AppliesMeasuredCaps(t *testing.T) {
 	}
 }
 
-// TestSeedRateLimits_UnmeasuredEndpointFallsBack proves an endpoint not in the
-// measured map uses the generic static cap (conservative), refined later by the
-// adaptive header sync.
+// TestSeedRateLimits_UnmeasuredEndpointFallsBack pins the fallback decision:
+// an endpoint absent from the measured map gets the account's configured
+// limiter cap (ClientConfig.RateLimit.RequestsPerWindow), NOT a baked-in
+// constant — 37 is chosen to differ from every seeded cap so a "fixed 50"
+// implementation fails this test.
 func TestSeedRateLimits_UnmeasuredEndpointFallsBack(t *testing.T) {
-	acc := newRateTestAccount("u", ratelimit.Config{RequestsPerWindow: defaultEndpointLimit, WindowDuration: 15 * time.Minute})
+	const configuredCap = 37
+	acc := newRateTestAccount("u", ratelimit.Config{RequestsPerWindow: configuredCap, WindowDuration: 15 * time.Minute})
 
 	allowed := 0
-	for i := 0; i < defaultEndpointLimit+20; i++ {
+	for i := 0; i < configuredCap+20; i++ {
 		if acc.AllowRequest("BrandNewOp") {
 			allowed++
 		}
 	}
-	if allowed != defaultEndpointLimit {
-		t.Fatalf("unmeasured endpoint should fall back to %d, got %d", defaultEndpointLimit, allowed)
+	if allowed != configuredCap {
+		t.Fatalf("unmeasured endpoint should fall back to the configured cap %d, got %d", configuredCap, allowed)
 	}
 }
 

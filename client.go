@@ -66,7 +66,7 @@ func NewClient(cfg ClientConfig, clientOpts ...ClientOption) (*Client, error) {
 
 	for _, acc := range cfg.Accounts {
 		acc.active = true
-		acc.rateLimiter = ratelimit.NewLimiter(cfg.RateLimit)
+		acc.installRateLimiter(cfg.RateLimit)
 		seedRateLimits(acc) // prime per-endpoint caps with X's measured real limits
 		acc.HealthTracker = pool.DefaultHealthTracker()
 	}
@@ -244,7 +244,7 @@ func NewClient(cfg ClientConfig, clientOpts ...ClientOption) (*Client, error) {
 				slog.Warn("open account failed", slog.Int("attempt", i+1), slog.Any("error", err))
 				continue
 			}
-			acc.rateLimiter = ratelimit.NewLimiter(cfg.RateLimit)
+			acc.installRateLimiter(cfg.RateLimit)
 			seedRateLimits(acc) // prime per-endpoint caps with X's measured real limits
 			acc.HealthTracker = pool.DefaultHealthTracker()
 			p.Add(acc)
@@ -357,25 +357,65 @@ func (c *Client) doPoolReq(ctx context.Context, bc *stealth.BrowserClient, metho
 // observedPoolReq is doPoolReq plus one twitter.client.request.duration record
 // for the attempt. Every HTTP attempt in the pool/POST/guest request paths goes
 // through an observed* wrapper, including ct0-recovery and relogin retries.
-func (c *Client) observedPoolReq(ctx context.Context, endpoint string, bc *stealth.BrowserClient, method, urlStr string, payload []byte, headers map[string]string) ([]byte, map[string]string, int, error) {
+// acc is the pooled account that served the attempt; it feeds the OnRequest
+// hook (nil = the request carried no account).
+func (c *Client) observedPoolReq(ctx context.Context, acc *Account, endpoint string, bc *stealth.BrowserClient, method, urlStr string, payload []byte, headers map[string]string) ([]byte, map[string]string, int, error) {
 	start := time.Now()
 	body, hdrs, status, err := c.doPoolReq(ctx, bc, method, urlStr, payload, headers)
 	currentCall(ctx).done(status, len(body))
-	c.metrics.recordRequest(endpoint, time.Since(start), attemptOutcome(status, body, hdrs, err, bc != c.client))
+	outcome := attemptOutcome(status, body, hdrs, err, bc != c.client)
+	c.metrics.recordRequest(endpoint, time.Since(start), outcome)
+	c.emitRequestEvent(acc, endpoint, status, outcome, hdrs)
 	return body, hdrs, status, err
 }
 
 // observedRequestWithBody is doRequestWithBody plus a duration record.
-func (c *Client) observedRequestWithBody(ctx context.Context, endpoint string, bc *stealth.BrowserClient, method, urlStr string, headers map[string]string, body io.Reader) ([]byte, map[string]string, int, error) {
+// acc semantics match observedPoolReq.
+func (c *Client) observedRequestWithBody(ctx context.Context, acc *Account, endpoint string, bc *stealth.BrowserClient, method, urlStr string, headers map[string]string, body io.Reader) ([]byte, map[string]string, int, error) {
 	start := time.Now()
 	respBody, hdrs, status, err := c.doRequestWithBody(ctx, bc, method, urlStr, headers, body)
-	c.metrics.recordRequest(endpoint, time.Since(start), attemptOutcome(status, respBody, hdrs, err, bc != c.client))
+	outcome := attemptOutcome(status, respBody, hdrs, err, bc != c.client)
+	c.metrics.recordRequest(endpoint, time.Since(start), outcome)
+	c.emitRequestEvent(acc, endpoint, status, outcome, hdrs)
 	return respBody, hdrs, status, err
 }
 
-// observedRequest is doRequest plus a duration record.
-func (c *Client) observedRequest(ctx context.Context, endpoint string, bc *stealth.BrowserClient, method, urlStr string, headers map[string]string) ([]byte, map[string]string, int, error) {
-	return c.observedRequestWithBody(ctx, endpoint, bc, method, urlStr, headers, nil)
+// observedRequest is doRequest plus a duration record. acc semantics match
+// observedPoolReq.
+func (c *Client) observedRequest(ctx context.Context, acc *Account, endpoint string, bc *stealth.BrowserClient, method, urlStr string, headers map[string]string) ([]byte, map[string]string, int, error) {
+	return c.observedRequestWithBody(ctx, acc, endpoint, bc, method, urlStr, headers, nil)
+}
+
+// observedMediaReq is doPoolReq plus the request-duration record and the
+// OnRequest event — the media-upload twin of observedPoolReq under the fixed
+// epUploadMedia endpoint label. The call site stays doPoolReq-shaped so the
+// payload handling is byte-for-byte what it was unobserved.
+func (c *Client) observedMediaReq(ctx context.Context, acc *Account, bc *stealth.BrowserClient, method, urlStr string, payload []byte, headers map[string]string) ([]byte, map[string]string, int, error) {
+	start := time.Now()
+	body, hdrs, status, err := c.doPoolReq(ctx, bc, method, urlStr, payload, headers)
+	outcome := attemptOutcome(status, body, hdrs, err, bc != c.client)
+	c.metrics.recordRequest(epUploadMedia, time.Since(start), outcome)
+	c.emitRequestEvent(acc, epUploadMedia, status, outcome, hdrs)
+	return body, hdrs, status, err
+}
+
+// emitRequestEvent fires ClientConfig.OnRequest for one attempt a pooled
+// account served. acc nil means the attempt carried no account (guest-token
+// fallback) and emits nothing — the hook only ever observes pooled accounts.
+// The outcome is the same classification recordRequest just wrote, and the
+// rate-limit fields mirror the response headers (unknowns stay at their
+// zero/-1 sentinels). Synchronous by design; the hook must not block.
+func (c *Client) emitRequestEvent(acc *Account, endpoint string, status int, outcome string, hdrs map[string]string) {
+	hook := c.cfg.OnRequest
+	if hook == nil || acc == nil {
+		return
+	}
+	obs := parseRateLimitHeaders(hdrs)
+	ev := RequestEvent{Username: acc.Username, Endpoint: endpoint, Status: status, Outcome: outcome}
+	ev.RateLimit.Limit = obs.limit
+	ev.RateLimit.Remaining = obs.remaining
+	ev.RateLimit.Reset = obs.resetAt
+	hook(ev)
 }
 
 // authTokenCookieRe matches a non-empty auth_token cookie pair.
@@ -465,6 +505,40 @@ func (c *Client) AccountByUsername(username string) *Account {
 		}
 	}
 	return nil
+}
+
+// HoldAccount benches a pooled account until the given time: the pool pick
+// skips it for every endpoint while the account clock is before until, and it
+// becomes eligible again afterwards. Returns false when no pool account
+// matches username (the match is case-insensitive, like AccountByUsername).
+// Re-holding is max-wins: a later call with an earlier until never shortens
+// an existing hold — a deliberate early lift goes through ReleaseAccount. The
+// hold gates only the pool pick: account-pinned write paths that take the
+// account directly (doPOST-backed writes, FollowUser, UploadMedia) do not
+// consult it. A hold is not a failure — it applies no health penalty, no
+// failure counters and no relogin, so it deliberately bypasses the
+// SetActive/reactivateAt cooldown machinery. When every account is held the
+// caller gets the same error a fully-spent pool returns today:
+// "pool exhausted for <endpoint> (requires auth): all N items are unavailable".
+func (c *Client) HoldAccount(username string, until time.Time) bool {
+	acc := c.AccountByUsername(username)
+	if acc == nil {
+		return false
+	}
+	acc.setHeldUntil(until)
+	return true
+}
+
+// ReleaseAccount lifts a HoldAccount hold early: the account becomes eligible
+// for the next pool pick at once. Returns false when no pool account matches
+// username. Releasing an account that was not held is a no-op.
+func (c *Client) ReleaseAccount(username string) bool {
+	acc := c.AccountByUsername(username)
+	if acc == nil {
+		return false
+	}
+	acc.releaseHold()
+	return true
 }
 
 // AccountHealth describes the health state of a single pool account.

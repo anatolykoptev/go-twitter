@@ -22,7 +22,7 @@ import (
 	"github.com/anatolykoptev/go-twitter/xtid"
 )
 
-const rlEndpoint = "SearchTimeline" // requiresAuth, POST, not in endpointDefaultLimit
+const rlEndpoint = "TweetDetail" // requiresAuth, not in endpointDefaultLimit
 
 // rlFakeClock is a deterministic clock for Account.clock.
 type rlFakeClock struct {
@@ -118,8 +118,9 @@ func newRLClient(t *testing.T, n, perEndpointCap int, clk *rlFakeClock) (*Client
 		accs[i] = newRateTestAccount(name, ratelimit.Config{RequestsPerWindow: perEndpointCap, WindowDuration: 15 * time.Minute})
 		if clk != nil {
 			accs[i].clock = clk.Now
-			accs[i].rateLimiter = ratelimit.NewLimiter(
+			accs[i].installRateLimiter(
 				ratelimit.Config{RequestsPerWindow: perEndpointCap, WindowDuration: 15 * time.Minute}, ratelimit.WithClock(clk.Now))
+			seedRateLimits(accs[i]) // re-prime the measured caps on the clock-driven limiter
 		}
 		accs[i].AuthToken, accs[i].CT0 = "tok"+name, "ct0"
 	}
@@ -176,7 +177,7 @@ func TestRateLimitHeaders_ExhaustedWindowRotatesWithout429(t *testing.T) {
 // resetAt, not a local 15 minutes later. One account, fake clock.
 //
 // Mutation: ratelimit_state.go holdIfExhausted, pass now.Add(15*time.Minute)
-// instead of st.resetAt to MarkEndpointRateLimited => RED (still blocked 61s on).
+// instead of until to rl.MarkRateLimited => RED (still blocked 61s on).
 func TestRateLimitHeaders_ResetLiftsTheHoldAtResetAt(t *testing.T) {
 	clk := &rlFakeClock{t: time.Now()}
 	reset := clk.Now().Add(60 * time.Second)
@@ -285,7 +286,7 @@ func TestRateLimitHeaders_NoHeadersKeepsLocalCounter(t *testing.T) {
 // headers for the operation, the local counter applies again instead of the
 // account being unlimited until a 429.
 //
-// Mutation: account.go endpointGate, return `ok` instead of
+// Mutation: account.go gateBlockedLocked, return `ok` instead of
 // `ok && now.Before(st.resetAt)` => RED (the third header-less call is served).
 func TestRateLimitHeaders_ExpiredWindowFallsBackToLocalCounter(t *testing.T) {
 	clk := &rlFakeClock{t: time.Now()}
@@ -491,7 +492,8 @@ func TestRateLimitHeaders_HoldIsCounted(t *testing.T) {
 
 // In-flight accounting: with header state remaining=10 and headroom 2, a burst of
 // 20 concurrent picks admits at most 8 before any response lands, instead of all
-// 20 on the strength of one stale response.
+// 20 on the strength of one stale response. The headroom applies at every budget
+// share — at the never-set pct the floor IS the headroom.
 //
 // Mutation: account.go AllowRequest, drop the `st.remaining--` decrement => RED.
 func TestRateLimitHeaders_ConcurrentPicksSpendTheEstimate(t *testing.T) {
@@ -512,6 +514,6 @@ func TestRateLimitHeaders_ConcurrentPicksSpendTheEstimate(t *testing.T) {
 	}
 	wg.Wait()
 
-	assert.EqualValues(t, 10-rateLimitHeadroom, allowed.Load(), "only remaining-headroom picks may pass before a response lands")
+	assert.EqualValues(t, 10-RateLimitHeadroom, allowed.Load(), "only remaining-headroom picks may pass before a response lands")
 	assert.True(t, acc.IsEndpointRateLimited(rlEndpoint), "the spent estimate holds the endpoint until reset")
 }

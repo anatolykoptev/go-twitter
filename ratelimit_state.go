@@ -5,9 +5,11 @@ import (
 	"time"
 )
 
-// rateLimitHeadroom is the number of requests X must still report as remaining
+// RateLimitHeadroom is the number of requests X must still report as remaining
 // for an endpoint to stay eligible. An endpoint whose window shows
-// remaining <= rateLimitHeadroom is held back until the window resets.
+// remaining <= RateLimitHeadroom is held back until the window resets. It is
+// exported so consumers do not have to duplicate the constant to compute an
+// account's effective budget (see Account.SetBudgetPct).
 //
 // Why 2 and not 0: a response's remaining counts requests X had served when it
 // answered, not requests already in flight. With the 50-per-window caps X gives
@@ -15,7 +17,7 @@ import (
 // calls that share an account (4% of the window) so those calls do not land on
 // a 429, which is what draws X's attention to an account. Why not nitter's 10:
 // on a 50-request window that would waste a fifth of the budget.
-const rateLimitHeadroom = 2
+const RateLimitHeadroom = 2
 
 // maxRateLimitReset is the furthest into the future an x-rate-limit-reset is
 // believed. X's windows are 15 minutes; 1h leaves 4x slack for clock skew and
@@ -143,33 +145,52 @@ func (a *Account) latestRateLimit(preferred string) (endpoint string, st rateLim
 	return endpoint, st, ok
 }
 
-// holdIfExhausted (reporting whether it held) blocks the endpoint on this account until its window resets
-// when the last known state shows remaining <= rateLimitHeadroom. The response
-// that reported it still succeeded; the NEXT pick for the endpoint rotates to
+// holdIfExhausted reports whether the endpoint is now held on this account,
+// persisting the hold when the response showed X's own exhaustion (the merged
+// remaining estimate at or below RateLimitHeadroom). The response that
+// reported it still succeeded; the NEXT pick for the endpoint rotates to
 // another account.
 //
+// Two different bands share the gate and they persist differently:
+//   - X's own exhaustion — a response showing remaining <= RateLimitHeadroom,
+//     or an explicit mark on a 429 / code 88 — is written to blockedUntil and
+//     stands until the window resets. It is a fact about X; no client-side
+//     change releases it early.
+//   - the wider budget-share band is DERIVED at read time (see
+//     budgetFloorLocked/gateBlockedLocked) and never persisted, so a runtime
+//     SetBudgetPct that raises the share releases a budget-only hold on the
+//     next pick.
+//
 // Together with the block's expiry this is the eligibility rule "remaining >
-// headroom || now >= resetAt": a window with budget never blocks, and the block
-// ends at resetAt on its own. While a window is live the endpoint also bypasses
-// the local request counter (see AllowRequest): the headers are the authority
-// and the counter is only the cold-start / no-headers estimate.
+// spent-floor || now >= resetAt": a window with budget left never blocks, and
+// the block ends at resetAt on its own. While a window is live the endpoint
+// also bypasses the local request counter (see AllowRequest): the headers are
+// the authority and the counter is only the cold-start / no-headers estimate.
 func (a *Account) holdIfExhausted(endpoint string) bool {
 	a.mu.Lock()
-	until, held := a.holdLocked(endpoint, a.nowLocked())
+	now := a.nowLocked()
+	st, ok := a.rlState[endpoint]
+	until, exhausted := a.holdLocked(endpoint, now)
+	_, blocked := a.gateBlockedLocked(endpoint, st, ok, now)
 	rl := a.rateLimiter
 	a.mu.Unlock()
-	if held && rl != nil {
+	if exhausted && rl != nil {
 		rl.MarkRateLimited(endpoint, until)
 	}
-	return held
+	return now.Before(blocked)
 }
 
 // holdLocked records the hold in blockedUntil when the endpoint's state shows
-// the window spent; the caller mirrors it into the local limiter after
-// unlocking. a.mu must be held.
+// X's own exhaustion — the remaining estimate at or below RateLimitHeadroom.
+// Only X's word is persisted (this check, fed by responses, or an explicit
+// MarkEndpointRateLimited on a 429 / code 88): the wider budget-share band is
+// derived at read time by gateBlockedLocked, never persisted, so raising
+// SetBudgetPct releases a budget-only hold while real exhaustion stands until
+// the reset. The caller mirrors the persisted hold into the local limiter
+// after unlocking. a.mu must be held.
 func (a *Account) holdLocked(endpoint string, now time.Time) (until time.Time, held bool) {
 	st, ok := a.rlState[endpoint]
-	if !ok || st.remaining > rateLimitHeadroom || !st.resetAt.After(now) || !a.blockedUntil[endpoint].Before(st.resetAt) {
+	if !ok || st.remaining > RateLimitHeadroom || !st.resetAt.After(now) || !a.blockedUntil[endpoint].Before(st.resetAt) {
 		return time.Time{}, false
 	}
 	if a.blockedUntil == nil {

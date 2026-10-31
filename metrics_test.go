@@ -77,7 +77,7 @@ func newMetricsFixture(t *testing.T, handler http.HandlerFunc, username string) 
 
 	acc := &Account{Username: username, AuthToken: "auth", CT0: "ct0", UserAgent: defaultUserAgent}
 	acc.active = true
-	acc.rateLimiter = ratelimit.NewLimiter(ratelimit.DefaultConfig)
+	acc.installRateLimiter(ratelimit.DefaultConfig)
 	acc.HealthTracker = pool.DefaultHealthTracker()
 
 	reader := sdkmetric.NewManualReader()

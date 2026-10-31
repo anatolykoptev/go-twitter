@@ -134,6 +134,14 @@ func (c *Client) nextAccountWithWait(ctx context.Context, endpoint string, filte
 		capWait := c.anyCapWaitable(capWaitable)
 		if !timed {
 			if !capWait {
+				// The failed pick can be microseconds stale: a hold or limit
+				// that lifted between it and now leaves no future wake to
+				// honour, so before giving up take one fresh pick — nearly
+				// free on the give-up path and current by definition. Keep the
+				// original error when it finds nothing either.
+				if fresh, ferr := c.pool.Next(filter); ferr == nil {
+					return fresh, nil
+				}
 				return nil, err
 			}
 			wait = flightCapPoll
@@ -388,7 +396,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 		}
 
 		authTok, ct0, ua := acc.Credentials()
-		body, respHdrs, status, err := c.observedPoolReq(ctx, endpoint, bc, method, url, payload, twitterHeaders(authTok, ct0, ua))
+		body, respHdrs, status, err := c.observedPoolReq(ctx, acc, endpoint, bc, method, url, payload, twitterHeaders(authTok, ct0, ua))
 		if err != nil {
 			// A caller-side cancel/deadline is not evidence about the account
 			// or its proxy: the caller revoked the work mid-flight, so nothing
@@ -451,7 +459,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 					continue
 				}
 				authTok2, ct02, ua2 := acc.Credentials()
-				body2, respHdrs2, status2, err2 := c.observedPoolReq(ctx, endpoint, bc, method, url, payload, twitterHeaders(authTok2, ct02, ua2))
+				body2, respHdrs2, status2, err2 := c.observedPoolReq(ctx, acc, endpoint, bc, method, url, payload, twitterHeaders(authTok2, ct02, ua2))
 				if err2 == nil && status2 == 200 {
 					c.recordAPICall(endpoint, true, false)
 					acc.RecordSuccess()
@@ -587,7 +595,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 				continue
 			}
 			authTok2, ct02, ua2 := acc.Credentials()
-			body2, respHdrs2, status2, err2 := c.observedPoolReq(ctx, endpoint, bc, method, url, payload, twitterHeaders(authTok2, ct02, ua2))
+			body2, respHdrs2, status2, err2 := c.observedPoolReq(ctx, acc, endpoint, bc, method, url, payload, twitterHeaders(authTok2, ct02, ua2))
 			if err2 == nil && status2 == 200 {
 				c.recordAPICall(endpoint, true, false)
 				acc.RecordSuccess()
@@ -656,7 +664,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 				slog.Info("attempting CAPTCHA unlock via relogin", slog.String("user", acc.Username))
 				if reErr := c.relogin(acc); reErr == nil {
 					authTok2, ct02, ua2 := acc.Credentials()
-					body2, respHdrs2, status2, err2 := c.observedPoolReq(ctx, endpoint, bc, method, url, payload, twitterHeaders(authTok2, ct02, ua2))
+					body2, respHdrs2, status2, err2 := c.observedPoolReq(ctx, acc, endpoint, bc, method, url, payload, twitterHeaders(authTok2, ct02, ua2))
 					if err2 == nil && status2 == 200 {
 						c.recordAPICall(endpoint, true, false)
 						acc.RecordSuccess()
@@ -724,7 +732,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 		slog.Info("guest token acquired as fallback", slog.String("endpoint", endpoint))
 	}
 
-	body, respHdrs, status, err := c.observedRequest(ctx, endpoint, c.client, "GET", url, guestHeaders(gt))
+	body, respHdrs, status, err := c.observedRequest(ctx, nil, endpoint, c.client, "GET", url, guestHeaders(gt))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -742,7 +750,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 			return nil, nil, fmt.Errorf("guest token reacquisition failed for %s: %w", endpoint, gtErr)
 		}
 		c.setGuestToken(newGT)
-		body, respHdrs, status, err = c.observedRequest(ctx, endpoint, c.client, "GET", url, guestHeaders(newGT))
+		body, respHdrs, status, err = c.observedRequest(ctx, nil, endpoint, c.client, "GET", url, guestHeaders(newGT))
 		if err != nil {
 			return nil, nil, err
 		}
@@ -792,7 +800,7 @@ func (c *Client) recoverCSRF(ctx context.Context, acc *Account, bc *stealth.Brow
 		acc.SetCT0(serverCT0)
 		authTok2, ct02, ua2 := acc.Credentials()
 		c.saveSession(acc, authTok2, ct02)
-		body2, respHdrs2, status2, err2 := c.observedPoolReq(ctx, endpoint, bc, method, url, payload, twitterHeaders(authTok2, ct02, ua2))
+		body2, respHdrs2, status2, err2 := c.observedPoolReq(ctx, acc, endpoint, bc, method, url, payload, twitterHeaders(authTok2, ct02, ua2))
 		if err2 == nil && status2 == 200 && classifyError(body2, respHdrs2) == errNone {
 			if newCT0 := extractCT0FromHeaders(respHdrs2); newCT0 != "" {
 				acc.SetCT0(newCT0)
@@ -827,7 +835,7 @@ func (c *Client) recoverCSRF(ctx context.Context, acc *Account, bc *stealth.Brow
 		return nil, nil, false
 	}
 	authTok3, ct03, ua3 := acc.Credentials()
-	body3, respHdrs3, status3, err3 := c.observedPoolReq(ctx, endpoint, bc, method, url, payload, twitterHeaders(authTok3, ct03, ua3))
+	body3, respHdrs3, status3, err3 := c.observedPoolReq(ctx, acc, endpoint, bc, method, url, payload, twitterHeaders(authTok3, ct03, ua3))
 	if err3 == nil && status3 == 200 {
 		c.recordAPICall(endpoint, true, false)
 		acc.RecordSuccess()
@@ -852,7 +860,7 @@ func (c *Client) recoverCSRFPost(ctx context.Context, acc *Account, bc *stealth.
 		acc.SetCT0(serverCT0)
 		authTok2, ct02, ua2 := acc.Credentials()
 		c.saveSession(acc, authTok2, ct02)
-		body2, respHdrs2, status2, err2 := c.observedRequestWithBody(ctx, endpoint, bc, "POST", url, twitterHeaders(authTok2, ct02, ua2), bytes.NewReader(payload))
+		body2, respHdrs2, status2, err2 := c.observedRequestWithBody(ctx, acc, endpoint, bc, "POST", url, twitterHeaders(authTok2, ct02, ua2), bytes.NewReader(payload))
 		if err2 == nil && (status2 == 200 || status2 == 201) && classifyError(body2, respHdrs2) == errNone {
 			if newCT0 := extractCT0FromHeaders(respHdrs2); newCT0 != "" {
 				acc.SetCT0(newCT0)
@@ -884,7 +892,7 @@ func (c *Client) recoverCSRFPost(ctx context.Context, acc *Account, bc *stealth.
 		return nil, false
 	}
 	authTok3, ct03, ua3 := acc.Credentials()
-	body3, respHdrs3, status3, err3 := c.observedRequestWithBody(ctx, endpoint, bc, "POST", url, twitterHeaders(authTok3, ct03, ua3), bytes.NewReader(payload))
+	body3, respHdrs3, status3, err3 := c.observedRequestWithBody(ctx, acc, endpoint, bc, "POST", url, twitterHeaders(authTok3, ct03, ua3), bytes.NewReader(payload))
 	if err3 == nil && (status3 == 200 || status3 == 201) && classifyError(body3, respHdrs3) == errNone {
 		c.recordAPICall(endpoint, true, false)
 		acc.RecordSuccess()
@@ -931,7 +939,7 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 			return nil, err // pinned account: nothing to rotate to, fail closed
 		}
 		authTok, ct0, ua := acc.Credentials()
-		body, respHdrs, status, err := c.observedRequestWithBody(ctx, endpoint, bc, "POST", url, twitterHeaders(authTok, ct0, ua), bytes.NewReader(payload))
+		body, respHdrs, status, err := c.observedRequestWithBody(ctx, acc, endpoint, bc, "POST", url, twitterHeaders(authTok, ct0, ua), bytes.NewReader(payload))
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return nil, ctxErr // caller cancel: not evidence about the account
@@ -977,7 +985,7 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 					continue
 				}
 				authTok2, ct02, ua2 := acc.Credentials()
-				body2, _, status2, err2 := c.observedRequestWithBody(ctx, endpoint, bc, "POST", url, twitterHeaders(authTok2, ct02, ua2), bytes.NewReader(payload))
+				body2, _, status2, err2 := c.observedRequestWithBody(ctx, acc, endpoint, bc, "POST", url, twitterHeaders(authTok2, ct02, ua2), bytes.NewReader(payload))
 				if err2 == nil && (status2 == 200 || status2 == 201) {
 					c.recordAPICall(endpoint, true, false)
 					acc.RecordSuccess()

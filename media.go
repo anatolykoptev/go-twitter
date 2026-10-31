@@ -382,7 +382,9 @@ func createTweetVariables(text string, mediaIDs []string) map[string]any {
 // doMediaRequest executes an authenticated request to the media upload host
 // using the given account's stealth client, mirroring doPOST's CSRF rotation,
 // relogin, and error-classification handling but for multipart/query uploads.
-// Accepts 200/201/204 as success.
+// Every attempt goes through observedMediaReq, so uploads emit the same
+// request-duration record and OnRequest event (endpoint "UploadMedia") as the
+// pooled paths. Accepts 200/201/204 as success.
 func (c *Client) doMediaRequest(ctx context.Context, acc *Account, method, urlStr string, payload []byte, contentType string) ([]byte, error) {
 	// NOTE: media uploads are a low-frequency POST path, NOT the scrape burst
 	// source, so they are intentionally NOT routed through the per-account human
@@ -418,7 +420,7 @@ func (c *Client) doMediaRequest(ctx context.Context, acc *Account, method, urlSt
 			return nil, err // pinned account: fail closed, never send direct
 		}
 		authTok, ct0, ua := acc.Credentials()
-		body, respHdrs, status, err := c.doPoolReq(ctx, bc, method, urlStr, payload, mediaHeaders(authTok, ct0, ua, contentType))
+		body, respHdrs, status, err := c.observedMediaReq(ctx, acc, bc, method, urlStr, payload, mediaHeaders(authTok, ct0, ua, contentType))
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return nil, ctxErr // caller cancel: not evidence about the account
@@ -461,7 +463,7 @@ func (c *Client) doMediaRequest(ctx context.Context, acc *Account, method, urlSt
 					continue
 				}
 				authTok2, ct02, ua2 := acc.Credentials()
-				body2, respHdrs2, status2, err2 := c.doPoolReq(ctx, bc, method, urlStr, payload, mediaHeaders(authTok2, ct02, ua2, contentType))
+				body2, respHdrs2, status2, err2 := c.observedMediaReq(ctx, acc, bc, method, urlStr, payload, mediaHeaders(authTok2, ct02, ua2, contentType))
 				if err2 == nil && isUploadOK(status2) {
 					c.recordAPICall(epUploadMedia, true, false)
 					acc.RecordSuccess()
@@ -557,7 +559,7 @@ func (c *Client) recoverCSRFMedia(ctx context.Context, acc *Account, bc *stealth
 		acc.SetCT0(serverCT0)
 		authTok2, ct02, ua2 := acc.Credentials()
 		c.saveSession(acc, authTok2, ct02)
-		body2, respHdrs2, status2, err2 := c.doPoolReq(ctx, bc, method, urlStr, payload, mediaHeaders(authTok2, ct02, ua2, contentType))
+		body2, respHdrs2, status2, err2 := c.observedMediaReq(ctx, acc, bc, method, urlStr, payload, mediaHeaders(authTok2, ct02, ua2, contentType))
 		if err2 == nil && isUploadOK(status2) && classifyError(body2, respHdrs2) == errNone {
 			if newCT0 := extractCT0FromHeaders(respHdrs2); newCT0 != "" {
 				acc.SetCT0(newCT0)
@@ -589,7 +591,7 @@ func (c *Client) recoverCSRFMedia(ctx context.Context, acc *Account, bc *stealth
 		return nil, false
 	}
 	authTok3, ct03, ua3 := acc.Credentials()
-	body3, respHdrs3, status3, err3 := c.doPoolReq(ctx, bc, method, urlStr, payload, mediaHeaders(authTok3, ct03, ua3, contentType))
+	body3, respHdrs3, status3, err3 := c.observedMediaReq(ctx, acc, bc, method, urlStr, payload, mediaHeaders(authTok3, ct03, ua3, contentType))
 	if err3 == nil && isUploadOK(status3) && classifyError(body3, respHdrs3) == errNone {
 		c.recordAPICall(epUploadMedia, true, false)
 		acc.RecordSuccess()

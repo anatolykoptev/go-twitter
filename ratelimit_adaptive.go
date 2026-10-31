@@ -9,25 +9,39 @@ import (
 // 2026-06-20 (4 accounts, independent per-account `remaining` counters ⇒ the
 // limits are per-account-per-endpoint, not pool-wide). These seed each
 // account's per-endpoint limiter so the very first burst is sized correctly;
-// every response then refines the cap via Account.SyncRateLimit. Unlisted
-// endpoints fall back to defaultEndpointLimit (conservative).
+// every response then refines the cap via Account.SyncRateLimit. Only measured
+// operations are listed — endpoints stay unlisted until X reports a real
+// ceiling, and an unlisted endpoint's cap is the account's rate-limiter config
+// (ClientConfig.RateLimit.RequestsPerWindow).
 //
 // The previous static 50/15m cap was 3.7x too low for Followers/Following and
 // 10x too low for Retweeters, which starved the scrapers and tripped
 // "all accounts unavailable" storms. These are the real ceilings.
 var endpointDefaultLimit = map[string]int{
-	"UserByScreenName": 150,
-	"Followers":        187,
-	"Following":        187,
-	"Retweeters":       500,
-	"UserTweets":       50,
+	"UserByScreenName":   150,
+	"Followers":          187,
+	"Following":          187,
+	"Retweeters":         500,
+	"UserTweets":         50,
+	"SearchTimeline":     187,
+	"HomeLatestTimeline": 500,
+	deviceFollowEndpoint: 180,
 }
 
-// defaultEndpointLimit is the conservative fallback cap for any endpoint not in
-// endpointDefaultLimit (unmeasured). It is intentionally low — the adaptive
-// SyncRateLimit raises it the moment x.com reports the real limit, so a
-// too-low seed only delays the first few requests, never exceeds the cap.
-const defaultEndpointLimit = 50
+// EndpointLimits returns the measured per-account-per-15-min request caps the
+// client seeds every account's per-endpoint limiter with (see
+// endpointDefaultLimit). It returns a COPY: mutating the result does not change
+// the table or what new accounts are seeded with. The map holds only measured
+// ceilings; an endpoint absent from it falls back to the account's configured
+// limiter cap (ClientConfig.RateLimit.RequestsPerWindow), not to a fixed
+// constant.
+func EndpointLimits() map[string]int {
+	out := make(map[string]int, len(endpointDefaultLimit))
+	for endpoint, limit := range endpointDefaultLimit {
+		out[endpoint] = limit
+	}
+	return out
+}
 
 // seedRateLimits primes an account's per-endpoint limiter with the measured
 // per-endpoint defaults so the first window is sized to X's real ceilings
