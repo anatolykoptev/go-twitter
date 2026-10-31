@@ -32,19 +32,22 @@ const (
 // transport failed before a response). Outcome is the same bounded
 // classification the client records to its metrics (e.g. "ok",
 // "rate_limited", "transport") — see the twitter.outcome values in
-// docs/metrics.md. RateLimit mirrors the response's x-rate-limit-* headers:
-// Limit 0, Remaining -1 and a zero Reset each mean "header absent or
-// unparseable".
+// docs/metrics.md.
 type RequestEvent struct {
 	Username  string
 	Endpoint  string
 	Status    int
 	Outcome   string
-	RateLimit struct {
-		Limit     int
-		Remaining int
-		Reset     time.Time
-	}
+	RateLimit RequestRateLimit
+}
+
+// RequestRateLimit mirrors one response's x-rate-limit-* headers inside a
+// RequestEvent: Limit 0, Remaining -1 and a zero Reset each mean "header
+// absent or unparseable".
+type RequestRateLimit struct {
+	Limit     int
+	Remaining int
+	Reset     time.Time
 }
 
 // ClientConfig holds all configuration for the Twitter client.
@@ -93,9 +96,11 @@ type ClientConfig struct {
 	// pooled account — on success AND on every error path — at the same
 	// observation point that feeds the request-duration metric, after the
 	// response is classified. Guest-token fallback requests carry no account
-	// and emit no event. It is called synchronously on the request path: it
-	// must not block (offload heavy work to a channel or queue). nil = no-op,
-	// zero cost.
+	// and emit no event; media-upload attempts emit under the "UploadMedia"
+	// endpoint label. It is called synchronously on the request path and
+	// without a recover, so it must not block (offload heavy work to a channel
+	// or queue) and must not panic — a panic propagates to the request's
+	// caller. nil = no-op, zero cost.
 	OnRequest func(RequestEvent)
 
 	// MeterProvider supplies the OpenTelemetry meter provider for the client's

@@ -52,10 +52,12 @@ type Account struct {
 	// seedRateLimits, refined by SyncRateLimit, or the configured fallback for
 	// unlisted endpoints) so a runtime pct change can re-scale every key;
 	// rlFallback is the cap unlisted endpoints use (the limiter keeps its own
-	// config private).
+	// config private); rlScaled is the scaled cap last pushed to the limiter
+	// per key, so a per-pick no-op re-derivation costs a map read only.
 	budgetPct  int
 	rlCaps     map[string]int
 	rlFallback int
+	rlScaled   map[string]int
 
 	// heldUntil benches the account pool-wide — not a failure, so deliberately
 	// separate from active/reactivateAt (a fault cooldown ending early must
@@ -64,9 +66,11 @@ type Account struct {
 	heldUntil time.Time
 
 	// Header-derived rate-limit state (see ratelimit_state.go), per endpoint.
-	// rlState is the last known X window; blockedUntil is every explicit block
-	// (429, code 88, an exhausted window). Both are consulted instead of the
-	// local request counter once an endpoint has header state.
+	// rlState is the last known X window; blockedUntil is every PERSISTED
+	// block (a response at or below RateLimitHeadroom, a 429, code 88) — X's
+	// own exhaustion, which no client-side change releases. The budget-share
+	// hold is NOT in it: endpointGate derives that band from rlState and the
+	// current pct at read time, so SetBudgetPct re-gates the next pick.
 	rlState      map[string]rateLimitState
 	blockedUntil map[string]time.Time
 	clock        func() time.Time // nil = time.Now; tests inject a fake
@@ -117,13 +121,23 @@ func (a *Account) SetReactivateAt(t time.Time) {
 }
 
 // setHeldUntil sets the pool-wide operator hold: until that time every
-// endpoint gate reports the account unavailable. A past or zero time clears
-// the hold. Not a fault: nothing here touches health, failure counters or
+// endpoint gate reports the account unavailable. Max-wins: an earlier `until`
+// never shortens an existing hold — a deliberate early lift goes through
+// releaseHold. Not a fault: nothing here touches health, failure counters or
 // reactivation.
 func (a *Account) setHeldUntil(t time.Time) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.heldUntil = t
+	if t.After(a.heldUntil) {
+		a.heldUntil = t
+	}
+}
+
+// releaseHold lifts the operator hold before its time (Client.ReleaseAccount).
+func (a *Account) releaseHold() {
+	a.mu.Lock()
+	a.heldUntil = time.Time{}
+	a.mu.Unlock()
 }
 
 // CT0Age returns the time since the ct0 token was last refreshed.
@@ -253,14 +267,19 @@ func (a *Account) InFlight() int {
 func (a *Account) installRateLimiter(cfg ratelimit.Config, opts ...ratelimit.LimiterOption) {
 	a.rateLimiter = ratelimit.NewLimiter(cfg, opts...)
 	a.rlFallback = cfg.RequestsPerWindow
+	a.rlScaled = nil // nothing is installed on the fresh limiter
 }
 
 // SetBudgetPct sets the percentage of each endpoint's per-account X window
-// this account may spend (1-100). Values outside that range — including the
-// never-set zero value — mean 100 (the full window, today's behaviour). It is
-// safe to call at runtime on a live pooled account: endpointGate re-derives
-// each endpoint's scaled cap under the account lock on every eligibility
-// check, so the next pick sees the new share.
+// this account may spend (1-100). Every out-of-range value — zero, negative,
+// above 100, including the never-set zero value — means 100: the FULL window
+// (today's behaviour). A share of zero cannot be expressed here on purpose;
+// benching an account entirely is Client.HoldAccount's job. It is safe to
+// call at runtime on a live pooled account: endpointGate re-derives each
+// endpoint's gate under the account lock on every eligibility check — and
+// never persists the budget band — so the next pick sees the new share,
+// including the release of a budget-only hold (X's own exhaustion still
+// stands until the window resets).
 func (a *Account) SetBudgetPct(pct int) {
 	if pct < 1 || pct > 100 {
 		pct = 100
@@ -299,11 +318,16 @@ func scaledByPct(raw, pct int) int {
 	return 1
 }
 
-// budgetShareLocked returns how much of the endpoint's window the account must
-// NOT spend under its budget: limit*(100-pct)/100, integer math. The basis is
-// the window's reported limit, else the seeded/registered cap, else the
-// measured table, else the configured fallback. a.mu must be held.
-func (a *Account) budgetShareLocked(endpoint string, reportedLimit int) int {
+// budgetFloorLocked returns the remaining-estimate level at or below which the
+// endpoint counts as spent FOR THIS ACCOUNT: basis - max(1, basis*pct/100) —
+// the exact complement of the scaled cap the cold path enforces, so the header
+// gate and the local counter admit the same count from a fresh window. The
+// basis is the window's reported limit, else the seeded/registered cap, else
+// the measured table, else the configured fallback; <= 0 (no cap known) means
+// the budget cannot gate and only X's own exhaustion holds the endpoint.
+// Derived at read time, never persisted: a SetBudgetPct that raises the share
+// releases a budget-only hold on the next pick. a.mu must be held.
+func (a *Account) budgetFloorLocked(endpoint string, reportedLimit int) int {
 	limit := reportedLimit
 	if limit <= 0 {
 		limit = a.rlCaps[endpoint]
@@ -317,7 +341,7 @@ func (a *Account) budgetShareLocked(endpoint string, reportedLimit int) int {
 	if limit <= 0 {
 		return 0
 	}
-	return limit * (100 - normalizedBudgetPct(a.budgetPct)) / 100
+	return limit - scaledByPct(limit, a.budgetPct)
 }
 
 // scaledCapLocked returns the cold-path cap the local limiter must enforce for
@@ -339,6 +363,25 @@ func (a *Account) scaledCapLocked(endpoint string) (scaled int, ok bool) {
 		raw = a.rlFallback
 	}
 	return scaledByPct(raw, a.budgetPct), true
+}
+
+// writeScaledCapLocked installs the endpoint's budget-scaled cap on the local
+// limiter, skipping the UpdateLimit — and its write lock — when the effective
+// value is already in place, so a per-pick no-op re-derivation costs a map
+// read only. a.mu must be held.
+func (a *Account) writeScaledCapLocked(rl *ratelimit.Limiter, endpoint string) {
+	scaled, ok := a.scaledCapLocked(endpoint)
+	if !ok {
+		return
+	}
+	if a.rlScaled == nil {
+		a.rlScaled = make(map[string]int)
+	}
+	if a.rlScaled[endpoint] == scaled {
+		return
+	}
+	a.rlScaled[endpoint] = scaled
+	rl.UpdateLimit(endpoint, scaled)
 }
 
 // AllowRequest checks if this account can make a request to the given endpoint.
@@ -365,33 +408,46 @@ func (a *Account) AllowRequest(endpoint string) bool {
 	if now.Before(blocked) {
 		return false
 	}
-	// Spend a slot and, if that exhausts the estimate, hold the endpoint, all
-	// under one lock: a check-then-act split would let a burst of callers pass
-	// before the first of them blocks the endpoint.
+	// Spend a slot of the window's remaining estimate under one lock, re-checking
+	// the gate first: a concurrent pick's spend or a response's persisted hold
+	// may have gated the endpoint since the snapshot above. Check-then-act in
+	// one critical section is what keeps a burst from passing on one stale value.
 	a.mu.Lock()
-	if now.Before(a.blockedUntil[endpoint]) { // re-check: a concurrent pick may have just held it
+	st, ok := a.rlState[endpoint]
+	if _, blocked = a.gateBlockedLocked(endpoint, st, ok, now); now.Before(blocked) {
 		a.mu.Unlock()
 		return false
 	}
-	if st, ok := a.rlState[endpoint]; ok && st.remaining > 0 {
+	if ok && st.remaining > 0 {
 		st.remaining--
 		a.rlState[endpoint] = st
 	}
-	until, held := a.holdLocked(endpoint, now)
-	rl := a.rateLimiter
 	a.mu.Unlock()
-	if held && rl != nil {
-		rl.MarkRateLimited(endpoint, until)
-	}
 	return true
+}
+
+// gateBlockedLocked derives the endpoint's effective hold under one snapshot:
+// the persisted block (X's own exhaustion — a response at or below
+// RateLimitHeadroom, a 429, code 88 — via holdLocked/MarkEndpointRateLimited)
+// unioned with the budget-share floor, which is computed from rlState under
+// the CURRENT budgetPct and never persisted: raising SetBudgetPct releases a
+// budget-only hold on the very next pick, while an X-side hold stands until
+// its reset. a.mu must be held.
+func (a *Account) gateBlockedLocked(endpoint string, st rateLimitState, ok bool, now time.Time) (authority bool, blocked time.Time) {
+	authority = ok && now.Before(st.resetAt)
+	blocked = a.blockedUntil[endpoint]
+	if authority && st.remaining <= a.budgetFloorLocked(endpoint, st.limit) && st.resetAt.After(blocked) {
+		blocked = st.resetAt
+	}
+	return authority, blocked
 }
 
 // endpointGate snapshots, under one lock, everything the eligibility methods
 // need: whether the header window is authoritative for the endpoint, its
-// explicit block, the account clock, the local limiter, and the account hold.
+// effective block, the account clock, the local limiter, and the account hold.
 // It also keeps the limiter's per-key cap in step with the budget share
-// (scaledCapLocked): every reader of the local counter then sees the same
-// scaled cap with no second decision site.
+// (scaledCapLocked via writeScaledCapLocked): every reader of the local
+// counter then sees the same scaled cap with no second decision site.
 //
 // The window is authoritative only until its resetAt. After that the state
 // proves nothing (X may have stopped sending headers for the operation), so the
@@ -402,11 +458,10 @@ func (a *Account) endpointGate(endpoint string) (authority bool, blocked, now ti
 	now = a.nowLocked()
 	st, ok := a.rlState[endpoint]
 	if rl = a.rateLimiter; rl != nil {
-		if cap, ok := a.scaledCapLocked(endpoint); ok {
-			rl.UpdateLimit(endpoint, cap)
-		}
+		a.writeScaledCapLocked(rl, endpoint)
 	}
-	return ok && now.Before(st.resetAt), a.blockedUntil[endpoint], now, rl, a.heldUntil
+	authority, blocked = a.gateBlockedLocked(endpoint, st, ok, now)
+	return authority, blocked, now, rl, a.heldUntil
 }
 
 // UpdateEndpointLimit sets this account's per-window request cap for the given
@@ -427,7 +482,7 @@ func (a *Account) UpdateEndpointLimit(endpoint string, limit int) {
 		a.rlCaps = make(map[string]int)
 	}
 	a.rlCaps[endpoint] = limit
-	a.rateLimiter.UpdateLimit(endpoint, scaledByPct(limit, a.budgetPct))
+	a.writeScaledCapLocked(a.rateLimiter, endpoint)
 }
 
 // SyncRateLimit reads the x-rate-limit-limit header from a response and updates

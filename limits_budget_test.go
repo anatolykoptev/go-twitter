@@ -2,6 +2,7 @@ package twitter
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -14,13 +15,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// T1 — header-authority gate honors the budget share: with limit 50 and pct 80
-// the account may spend down to remaining == RateLimitHeadroom + 50*20/100 ==
-// 12, so a window reporting 12 is held and one reporting 13 is allowed. The
-// never-set pct keeps today's behaviour (held only at <= headroom).
+// T1 — header-authority gate honours the budget share: with limit 50 and
+// pct 80 the account may spend max(1, 50*80/100) == 40 requests, so the gate
+// holds the endpoint once the window's remaining estimate reaches
+// 50-40 == 10 — the exact complement of the scaled cap the cold path enforces
+// (see TestBudgetPct_GateParity). The never-set pct keeps today's behaviour:
+// only a response at or below RateLimitHeadroom persists a hold.
 //
-// Mutation: account.go holdLocked — drop "+a.budgetShareLocked(endpoint,
-// st.limit)" from the hold comparison => RED (remaining=12 is not held).
+// Mutation: account.go gateBlockedLocked — drop the budget-floor union
+// (return a.blockedUntil[endpoint] unchanged) => RED (a budget-spent window
+// is allowed).
 func TestBudgetPct_HeaderGateThreshold(t *testing.T) {
 	cfg := ratelimit.Config{RequestsPerWindow: 50, WindowDuration: 15 * time.Minute}
 	reset := time.Now().Add(15 * time.Minute)
@@ -30,35 +34,135 @@ func TestBudgetPct_HeaderGateThreshold(t *testing.T) {
 		acc.holdIfExhausted("UserTweets") // mirrors observeRateLimit's post-response hold
 	}
 
-	t.Run("pct80/remaining12 held", func(t *testing.T) {
+	t.Run("pct80/remaining10 held", func(t *testing.T) {
 		acc := newRateTestAccount("u", cfg)
 		acc.SetBudgetPct(80)
-		report(acc, 12)
+		report(acc, 10)
 		assert.False(t, acc.AllowRequest("UserTweets"),
-			"remaining 12 <= headroom 2 + withheld 10 must hold the endpoint")
+			"remaining 10 <= withheld floor 10 (limit 50 − spend 40) must hold the endpoint")
 	})
 
-	t.Run("pct80/remaining13 allowed", func(t *testing.T) {
+	t.Run("pct80/remaining11 allowed once", func(t *testing.T) {
 		acc := newRateTestAccount("u", cfg)
 		acc.SetBudgetPct(80)
-		report(acc, 13)
+		report(acc, 11)
 		assert.True(t, acc.AllowRequest("UserTweets"),
-			"remaining 13 > 12 must allow exactly one more request")
+			"remaining 11 > 10 must allow exactly one more request")
 		assert.False(t, acc.AllowRequest("UserTweets"),
-			"the spend took the estimate to 12: the next pick must be refused")
+			"the spend took the estimate to 10: the next pick must be refused")
 	})
 
-	t.Run("unset pct keeps headroom-only rule", func(t *testing.T) {
+	t.Run("unset pct keeps reported-exhaustion rule", func(t *testing.T) {
 		held := newRateTestAccount("u", cfg)
 		report(held, RateLimitHeadroom)
 		assert.False(t, held.AllowRequest("UserTweets"),
-			"remaining %d <= headroom must hold (today's behaviour)", RateLimitHeadroom)
+			"a response at remaining %d <= headroom persists the hold", RateLimitHeadroom)
 
 		allowed := newRateTestAccount("u", cfg)
 		report(allowed, RateLimitHeadroom+1)
 		assert.True(t, allowed.AllowRequest("UserTweets"),
 			"remaining %d > headroom must be allowed (today's behaviour)", RateLimitHeadroom+1)
 	})
+}
+
+// A runtime SetBudgetPct re-gates the NEXT pick: a hold owed only to the
+// budget share is derived from rlState under the CURRENT pct and never
+// persisted, so raising the share releases it at once — while X's own
+// exhaustion (a response at or below RateLimitHeadroom, or a real 429) keeps
+// the endpoint held until the window resets.
+//
+// Mutation: account.go gateBlockedLocked — persist the derived band again
+// (a.blockedUntil[endpoint] = st.resetAt inside the budget-floor branch) =>
+// RED (the raise no longer releases the account).
+func TestBudgetPct_SetBudgetPctReleasesBudgetHold(t *testing.T) {
+	cfg := ratelimit.Config{RequestsPerWindow: 50, WindowDuration: 15 * time.Minute}
+	reset := time.Now().Add(15 * time.Minute)
+
+	report := func(acc *Account, remaining int) {
+		acc.recordWindow("UserTweets", rateLimitObs{limit: 50, remaining: remaining, resetAt: reset})
+		acc.holdIfExhausted("UserTweets")
+	}
+
+	t.Run("raise releases a budget-only hold", func(t *testing.T) {
+		acc := newRateTestAccount("u", cfg)
+		acc.SetBudgetPct(80)
+		report(acc, 8) // floor = 50-40 = 10: 8 <= 10 => budget-held
+		require.False(t, acc.AllowRequest("UserTweets"),
+			"remaining 8 <= floor 10 must hold at pct 80")
+		acc.SetBudgetPct(100)
+		assert.True(t, acc.AllowRequest("UserTweets"),
+			"raising the share must release a budget-only hold on the next pick")
+	})
+
+	t.Run("lower holds on the next pick", func(t *testing.T) {
+		acc := newRateTestAccount("u", cfg)
+		report(acc, 8) // pct 100: floor 0 => allowed
+		require.True(t, acc.AllowRequest("UserTweets"),
+			"pct 100 admits while the window has remaining")
+		acc.SetBudgetPct(80)
+		assert.False(t, acc.AllowRequest("UserTweets"),
+			"lowering to 80 must hold the next pick (estimate 7 <= floor 10)")
+	})
+
+	t.Run("reported exhaustion is not released", func(t *testing.T) {
+		acc := newRateTestAccount("u", cfg)
+		report(acc, RateLimitHeadroom) // X's own exhaustion: persisted
+		require.False(t, acc.AllowRequest("UserTweets"))
+		acc.SetBudgetPct(100)
+		assert.False(t, acc.AllowRequest("UserTweets"),
+			"a response at <= headroom is X's word, not the budget: raising pct must not release it")
+	})
+
+	t.Run("a real 429 hold is not released", func(t *testing.T) {
+		acc := newRateTestAccount("u", cfg)
+		acc.SetBudgetPct(50)
+		report(acc, 30)                                  // floor = 50-25 = 25: 30 > 25 => not budget-held
+		acc.MarkEndpointRateLimited("UserTweets", reset) // the 429 arm's persist
+		acc.SetBudgetPct(100)
+		assert.False(t, acc.AllowRequest("UserTweets"),
+			"an explicit 429 mark survives a budget raise until the reset")
+		assert.True(t, acc.IsEndpointRateLimited("UserTweets"))
+	})
+}
+
+// The header gate and the cold-path counter enforce ONE budget formula: an
+// account may spend max(1, limit*pct/100) requests of a window on either
+// path, so from a fresh window (remaining == limit) both gates must admit the
+// same count at every pct — before the fix the header gate's
+// headroom+withheld threshold diverged from the scaled cap and, at
+// limit*pct/100 <= RateLimitHeadroom, held the endpoint after the first
+// response.
+//
+// Mutation: account.go budgetFloorLocked — return
+// RateLimitHeadroom+limit-scaledByPct(limit, a.budgetPct) (the old
+// headroom+withheld threshold) => RED (the header column comes up short).
+func TestBudgetPct_GateParity(t *testing.T) {
+	cfg := ratelimit.Config{RequestsPerWindow: 500, WindowDuration: 15 * time.Minute}
+	for _, pct := range []int{1, 5, 50, 80, 99, 100} {
+		t.Run(fmt.Sprintf("pct%d", pct), func(t *testing.T) {
+			want := scaledByPct(50, pct) // max(1, 50*pct/100) — the one formula
+
+			cold := newRateTestAccount("u", cfg)
+			cold.SetBudgetPct(pct)
+			coldN := 0
+			for i := 0; i < 60 && cold.AllowRequest("UserTweets"); i++ {
+				coldN++ // seeded 50, no header window => the local counter gates
+			}
+
+			header := newRateTestAccount("u", cfg)
+			header.SetBudgetPct(pct)
+			header.recordWindow("UserTweets", rateLimitObs{
+				limit: 50, remaining: 50, resetAt: time.Now().Add(15 * time.Minute)})
+			headerN := 0
+			for i := 0; i < 60 && header.AllowRequest("UserTweets"); i++ {
+				headerN++
+			}
+
+			assert.Equal(t, want, coldN, "cold path must admit the scaled cap")
+			assert.Equal(t, coldN, headerN,
+				"header gate must admit the same count as the local counter")
+		})
+	}
 }
 
 // T2 — cold/local path scales the limiter cap by the budget: a seeded 50 at
@@ -85,8 +189,9 @@ func TestBudgetPct_ColdPathScaledCap(t *testing.T) {
 // spent-over-the-new-share account unpickable on the next pick, raising it
 // back re-admits it — without rebuilding the pool or the limiter.
 //
-// Mutation: account.go SetBudgetPct — drop the rlCaps re-scale loop => RED
-// (the post-update pick is still allowed by the stale scaled cap).
+// Mutation: account.go endpointGate — drop the writeScaledCapLocked call (or
+// its rl.UpdateLimit) => RED (the post-update pick is still allowed by the
+// stale scaled cap).
 func TestBudgetPct_RuntimeUpdateChangesNextPick(t *testing.T) {
 	acc := newRateTestAccount("u", ratelimit.Config{RequestsPerWindow: 500, WindowDuration: 15 * time.Minute})
 	p := pool.New([]*Account{acc}, pool.DefaultConfig())
@@ -177,6 +282,38 @@ func TestHoldAccount_GatesPoolPick(t *testing.T) {
 	assert.Equal(t, 1, f.hitsFor("tokA"))
 }
 
+// HoldAccount is max-wins — a second call with an earlier `until` must not
+// shorten a hold already in place — and ReleaseAccount is the explicit early
+// lift.
+//
+// Mutation: account.go setHeldUntil — assign unconditionally
+// (a.heldUntil = t) => RED (the earlier `until` shortens the hold).
+func TestHoldAccount_MaxWinsAndRelease(t *testing.T) {
+	clk := &rlFakeClock{t: time.Now()}
+	f := newRLFakeX(t, func(string, int) rlWindow {
+		return rlWindow{limit: 50, remaining: 40, reset: clk.Now().Add(15 * time.Minute)}
+	})
+	c, accs := newRLClient(t, 1, 50, clk)
+
+	later := clk.Now().Add(60 * time.Second)
+	require.True(t, c.HoldAccount("A", later))
+	require.True(t, c.HoldAccount("A", clk.Now().Add(30*time.Second)),
+		"a shorter re-hold must be accepted but must not shorten the existing one")
+	assert.Equal(t, later.Unix(), accs[0].EndpointAvailableAt(rlEndpoint).Unix(),
+		"the earlier `until` must not shorten the existing hold")
+
+	// A later `until` extends; a re-hold after ReleaseAccount starts fresh.
+	require.True(t, c.HoldAccount("A", clk.Now().Add(90*time.Second)))
+	assert.Equal(t, clk.Now().Add(90*time.Second).Unix(), accs[0].EndpointAvailableAt(rlEndpoint).Unix())
+
+	require.False(t, c.ReleaseAccount("ghost"), "no such account must return false")
+	require.True(t, c.ReleaseAccount("A"), "the held account must release")
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, c.rlCall(ctx, f), "the released account is pickable at once")
+	assert.Equal(t, 1, f.hitsFor("tokA"))
+}
+
 // TestHoldAccount_WaitWakesAtUntil proves the hold participates in the
 // pool's timed wait, not only the pick: a request issued during the hold
 // sleeps until the hold expires and is then served.
@@ -243,6 +380,95 @@ func TestOnRequest_EmitsForSuccessAndError(t *testing.T) {
 	assert.Equal(t, 429, events[1].Status)
 	assert.Equal(t, "rate_limited", events[1].Outcome)
 	assert.Equal(t, 0, events[1].RateLimit.Remaining)
+}
+
+// OnRequest covers the account-pinned write path too: doPOST's attempts go
+// through observedRequestWithBody — same observation point, same classifier.
+//
+// Mutation: client.go observedRequestWithBody — drop the emitRequestEvent
+// call => RED (no event reaches the hook).
+func TestOnRequest_POSTPathEmits(t *testing.T) {
+	f := newRLFakeX(t, func(string, int) rlWindow {
+		return rlWindow{limit: 50, remaining: 7, reset: time.Now().Add(15 * time.Minute)}
+	})
+	c, accs := newRLClient(t, 1, 50, nil)
+
+	var events []RequestEvent
+	c.cfg.OnRequest = func(ev RequestEvent) { events = append(events, ev) }
+
+	_, err := c.doPOST(context.Background(), accs[0], "CreateTweet", f.url(), []byte(`{}`))
+	require.NoError(t, err)
+
+	require.Len(t, events, 1, "one POST attempt must emit exactly one event")
+	assert.Equal(t, "A", events[0].Username)
+	assert.Equal(t, "CreateTweet", events[0].Endpoint)
+	assert.Equal(t, 200, events[0].Status)
+	assert.Equal(t, outcomeOK, events[0].Outcome)
+	assert.Equal(t, 7, events[0].RateLimit.Remaining)
+}
+
+// A transport failure still emits — Status 0, outcome "transport", no
+// headers — once per attempt across the retry loop.
+//
+// Mutation: client.go observedRequestWithBody — return before
+// emitRequestEvent when err != nil => RED (no events).
+func TestOnRequest_TransportErrorEmitsStatus0(t *testing.T) {
+	c, accs := newRLClient(t, 1, 50, nil)
+
+	var events []RequestEvent
+	c.cfg.OnRequest = func(ev RequestEvent) { events = append(events, ev) }
+
+	_, err := c.doPOST(context.Background(), accs[0], "CreateTweet",
+		"http://127.0.0.1:1/x", []byte(`{}`)) // port 1: refused before any response
+	require.Error(t, err)
+
+	require.NotEmpty(t, events, "every failed attempt still emits an event")
+	for i, ev := range events {
+		assert.Equal(t, 0, ev.Status, "event %d: a transport failure carries Status 0", i)
+		assert.Equal(t, outcomeTransport, ev.Outcome, "event %d", i)
+		assert.Equal(t, -1, ev.RateLimit.Remaining, "event %d: no headers on a transport failure", i)
+	}
+}
+
+// The guest-token fallback path calls observedRequest with a nil account: the
+// hook only ever observes pooled accounts.
+//
+// Mutation: client.go emitRequestEvent — drop the `acc == nil` guard => RED.
+func TestOnRequest_GuestAttemptEmitsNothing(t *testing.T) {
+	f := newRLFakeX(t, func(string, int) rlWindow { return rlWindow{} })
+	c, _ := newRLClient(t, 1, 50, nil)
+
+	var events []RequestEvent
+	c.cfg.OnRequest = func(ev RequestEvent) { events = append(events, ev) }
+
+	_, _, _, err := c.observedRequest(context.Background(), nil, rlEndpoint, c.client, "GET", f.url(), map[string]string{})
+	require.NoError(t, err)
+	assert.Empty(t, events, "an attempt with no pooled account must emit no event")
+}
+
+// Media-upload attempts run through the same observed wrapper: an upload
+// attempt emits an event under the "UploadMedia" endpoint label.
+//
+// Mutation: media.go doMediaRequest — call c.doPoolReq directly instead of
+// c.observedMediaReq => RED (no event).
+func TestOnRequest_MediaAttemptEmits(t *testing.T) {
+	f := newRLFakeX(t, func(string, int) rlWindow {
+		return rlWindow{limit: 50, remaining: 9, reset: time.Now().Add(15 * time.Minute)}
+	})
+	c, accs := newRLClient(t, 1, 50, nil)
+
+	var events []RequestEvent
+	c.cfg.OnRequest = func(ev RequestEvent) { events = append(events, ev) }
+
+	_, err := c.doMediaRequest(context.Background(), accs[0], "POST",
+		f.srv.URL+"/i/media/upload.json", []byte(`x`), "application/octet-stream")
+	require.NoError(t, err)
+
+	require.Len(t, events, 1, "one upload attempt must emit exactly one event")
+	assert.Equal(t, "A", events[0].Username)
+	assert.Equal(t, epUploadMedia, events[0].Endpoint)
+	assert.Equal(t, 200, events[0].Status)
+	assert.Equal(t, outcomeOK, events[0].Outcome)
 }
 
 // T6 — EndpointLimits returns a copy: mutating the result cannot change what

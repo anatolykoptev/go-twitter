@@ -134,6 +134,14 @@ func (c *Client) nextAccountWithWait(ctx context.Context, endpoint string, filte
 		capWait := c.anyCapWaitable(capWaitable)
 		if !timed {
 			if !capWait {
+				// The failed pick can be microseconds stale: a hold or limit
+				// that lifted between it and now leaves no future wake to
+				// honour, so before giving up take one fresh pick — nearly
+				// free on the give-up path and current by definition. Keep the
+				// original error when it finds nothing either.
+				if fresh, ferr := c.pool.Next(filter); ferr == nil {
+					return fresh, nil
+				}
 				return nil, err
 			}
 			wait = flightCapPoll

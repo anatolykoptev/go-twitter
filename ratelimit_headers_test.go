@@ -177,7 +177,7 @@ func TestRateLimitHeaders_ExhaustedWindowRotatesWithout429(t *testing.T) {
 // resetAt, not a local 15 minutes later. One account, fake clock.
 //
 // Mutation: ratelimit_state.go holdIfExhausted, pass now.Add(15*time.Minute)
-// instead of st.resetAt to MarkEndpointRateLimited => RED (still blocked 61s on).
+// instead of until to rl.MarkRateLimited => RED (still blocked 61s on).
 func TestRateLimitHeaders_ResetLiftsTheHoldAtResetAt(t *testing.T) {
 	clk := &rlFakeClock{t: time.Now()}
 	reset := clk.Now().Add(60 * time.Second)
@@ -286,7 +286,7 @@ func TestRateLimitHeaders_NoHeadersKeepsLocalCounter(t *testing.T) {
 // headers for the operation, the local counter applies again instead of the
 // account being unlimited until a 429.
 //
-// Mutation: account.go endpointGate, return `ok` instead of
+// Mutation: account.go gateBlockedLocked, return `ok` instead of
 // `ok && now.Before(st.resetAt)` => RED (the third header-less call is served).
 func TestRateLimitHeaders_ExpiredWindowFallsBackToLocalCounter(t *testing.T) {
 	clk := &rlFakeClock{t: time.Now()}
@@ -490,9 +490,12 @@ func TestRateLimitHeaders_HoldIsCounted(t *testing.T) {
 	assert.Equal(t, map[string]string{attrOperation: "UserTweets"}, attrMap(sum.DataPoints[0].Attributes))
 }
 
-// In-flight accounting: with header state remaining=10 and headroom 2, a burst of
-// 20 concurrent picks admits at most 8 before any response lands, instead of all
-// 20 on the strength of one stale response.
+// In-flight accounting: with header state remaining=10, a burst of 20
+// concurrent picks admits at most 10 before any response lands — every pick
+// the estimate still covers, and no more — instead of all 20 on the strength
+// of one stale response. At the never-set pct the budget floor is 0, so the
+// whole reported window is spendable; RateLimitHeadroom applies to what X
+// reported, not to pick decrements.
 //
 // Mutation: account.go AllowRequest, drop the `st.remaining--` decrement => RED.
 func TestRateLimitHeaders_ConcurrentPicksSpendTheEstimate(t *testing.T) {
@@ -513,6 +516,6 @@ func TestRateLimitHeaders_ConcurrentPicksSpendTheEstimate(t *testing.T) {
 	}
 	wg.Wait()
 
-	assert.EqualValues(t, 10-RateLimitHeadroom, allowed.Load(), "only remaining-headroom picks may pass before a response lands")
+	assert.EqualValues(t, 10, allowed.Load(), "every pick the remaining estimate covers may pass before a response lands")
 	assert.True(t, acc.IsEndpointRateLimited(rlEndpoint), "the spent estimate holds the endpoint until reset")
 }

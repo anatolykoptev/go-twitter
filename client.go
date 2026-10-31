@@ -383,6 +383,19 @@ func (c *Client) observedRequest(ctx context.Context, acc *Account, endpoint str
 	return c.observedRequestWithBody(ctx, acc, endpoint, bc, method, urlStr, headers, nil)
 }
 
+// observedMediaReq is doPoolReq plus the request-duration record and the
+// OnRequest event — the media-upload twin of observedPoolReq under the fixed
+// epUploadMedia endpoint label. The call site stays doPoolReq-shaped so the
+// payload handling is byte-for-byte what it was unobserved.
+func (c *Client) observedMediaReq(ctx context.Context, acc *Account, bc *stealth.BrowserClient, method, urlStr string, payload []byte, headers map[string]string) ([]byte, map[string]string, int, error) {
+	start := time.Now()
+	body, hdrs, status, err := c.doPoolReq(ctx, bc, method, urlStr, payload, headers)
+	outcome := attemptOutcome(status, body, hdrs, err, bc != c.client)
+	c.metrics.recordRequest(epUploadMedia, time.Since(start), outcome)
+	c.emitRequestEvent(acc, epUploadMedia, status, outcome, hdrs)
+	return body, hdrs, status, err
+}
+
 // emitRequestEvent fires ClientConfig.OnRequest for one attempt a pooled
 // account served. acc nil means the attempt carried no account (guest-token
 // fallback) and emits nothing — the hook only ever observes pooled accounts.
@@ -492,20 +505,36 @@ func (c *Client) AccountByUsername(username string) *Account {
 }
 
 // HoldAccount benches a pooled account until the given time: the pool pick
-// skips it for every endpoint while time.Now is before until, and it becomes
-// eligible again afterwards. Returns false when no pool account matches
-// username (the match is case-insensitive, like AccountByUsername). A hold is
-// not a failure — it applies no health penalty, no failure counters and no
-// relogin, so it deliberately bypasses the SetActive/reactivateAt cooldown
-// machinery; when every account is held the caller gets the same "requires
-// authenticated account" / "pool exhausted" error the pool returns today.
-// Passing a past or zero time releases the hold early.
+// skips it for every endpoint while the account clock is before until, and it
+// becomes eligible again afterwards. Returns false when no pool account
+// matches username (the match is case-insensitive, like AccountByUsername).
+// Re-holding is max-wins: a later call with an earlier until never shortens
+// an existing hold — a deliberate early lift goes through ReleaseAccount. The
+// hold gates only the pool pick: account-pinned write paths that take the
+// account directly (doPOST-backed writes, FollowUser, UploadMedia) do not
+// consult it. A hold is not a failure — it applies no health penalty, no
+// failure counters and no relogin, so it deliberately bypasses the
+// SetActive/reactivateAt cooldown machinery. When every account is held the
+// caller gets the same error a fully-spent pool returns today:
+// "pool exhausted for <endpoint> (requires auth): all N items are unavailable".
 func (c *Client) HoldAccount(username string, until time.Time) bool {
 	acc := c.AccountByUsername(username)
 	if acc == nil {
 		return false
 	}
 	acc.setHeldUntil(until)
+	return true
+}
+
+// ReleaseAccount lifts a HoldAccount hold early: the account becomes eligible
+// for the next pool pick at once. Returns false when no pool account matches
+// username. Releasing an account that was not held is a no-op.
+func (c *Client) ReleaseAccount(username string) bool {
+	acc := c.AccountByUsername(username)
+	if acc == nil {
+		return false
+	}
+	acc.releaseHold()
 	return true
 }
 
