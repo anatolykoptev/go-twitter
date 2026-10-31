@@ -1093,10 +1093,6 @@ func requiresAuth(endpoint string) bool {
 	switch endpoint {
 	case "TweetDetail", "SearchTimeline", "Following", "Followers", "Retweeters",
 		"CreateTweet", "UserByScreenName", "UserTweets",
-		// A logged-in account's timeline read: X validates the transaction id and
-		// the account here; a guest-token fallback only masks the real rejection
-		// as "(guest) HTTP 404".
-		"UserTweetsAndReplies",
 		// T5 read cluster: all require a real account — no guest fallback
 		// (the Mar-2026 lesson, plan §T5 / doc §8).
 		"Bookmarks", "HomeTimeline", "HomeLatestTimeline",
