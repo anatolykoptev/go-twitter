@@ -72,3 +72,26 @@ func TestKeySourceEnv(t *testing.T) {
 		t.Fatal("default must stay the account page")
 	}
 }
+
+// The inline-runtime lookup is part of the logged-out source only: on every
+// other page the default order (legacy, Vite scan, chunk map) applies, so a
+// page that merely carries a runtime script must not be resolved through it.
+//
+// Mutation: drop the `pageURL == LoggedOutPageURL` condition in locateIndices
+// (xtid/manager.go) => RED.
+func TestLocateIndices_RuntimeLookupOnlyForLoggedOutSource(t *testing.T) {
+	m := newTestManager(newExactFetcher(nil)) // any fetch fails
+	m.cacheDir = t.TempDir()                  // no cached chunk map from other runs
+	page := string(loggedOutPage(fixtureKey))
+	const want = "https://abs.twimg.com/responsive-web/client-web/ondemand.s.cafe123a.js"
+
+	if got, err := m.locateIndices(context.Background(), newExactFetcher(nil), page, LoggedOutPageURL); err != nil || got != want {
+		t.Fatalf("logged-out page: %q, %v; want %q", got, err, want)
+	}
+	for _, u := range []string{warmPageURL, authedWarmPageURL} {
+		got, err := m.locateIndices(context.Background(), newExactFetcher(nil), page, u)
+		if got == want || err == nil {
+			t.Fatalf("%s consulted the runtime lookup on the default path: %q, %v", u, got, err)
+		}
+	}
+}

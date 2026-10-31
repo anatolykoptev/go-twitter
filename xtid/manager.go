@@ -283,8 +283,8 @@ func NewClientTransaction(homeHTML, indicesJS string) (*ClientTransaction, error
 // locateIndices resolves the URL of the file holding the key-byte indices
 // (ondemand.s in the legacy webpack build, sign.o-* in the Vite build).
 //
-// Order: the legacy direct-embed fast-path (`"ondemand.s":"<hash>"`); the
-// reference's inline webpack-runtime chunk map; then, for a
+// Order: the legacy direct-embed fast-path (`"ondemand.s":"<hash>"`); for the
+// logged-out source only, the reference's inline webpack-runtime chunk map; then, for a
 // Vite page (x-web script links), a bounded scan of those chunks; otherwise the
 // bundle core's webpack chunk-map lookup. A Vite page never falls through to the
 // chunk-map path — it has none, and that path refetches more warm pages.
@@ -292,8 +292,12 @@ func (m *Manager) locateIndices(ctx context.Context, f bundle.Fetcher, homeHTML,
 	if legacy := onDemandLegacyURL(homeHTML); legacy != "" {
 		return legacy, nil
 	}
-	if u := onDemandURLFromRuntime(homeHTML); u != "" {
-		return u, nil
+	// The inline-runtime lookup belongs to the logged-out key source only; the
+	// default order (legacy, Vite scan, chunk map) is unchanged.
+	if pageURL == LoggedOutPageURL {
+		if u := onDemandURLFromRuntime(homeHTML); u != "" {
+			return u, nil
+		}
 	}
 	if scripts := bundle.ViteScripts(homeHTML, pageURL); len(scripts) > 0 {
 		// The logged-out page IS the logged-out shell; only an account page that
