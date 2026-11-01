@@ -27,6 +27,7 @@ type Client struct {
 	client               *stealth.BrowserClient
 	pool                 *pool.Pool[*Account]
 	xtidMgr              *xtid.Manager
+	xtidFail             xtidFailureStreak // failure-streak state for the missing-header warning
 	xpffGen              *xpff.Generator
 	cfg                  ClientConfig
 	reloginGate          AutoReloginGate                                  // nil = always allow
@@ -474,8 +475,11 @@ func (c *Client) doRequestWithBody(ctx context.Context, bc *stealth.BrowserClien
 	wf := qid.shared(warmFetcher(c.warmClient(bc), headers))
 	if txID, txErr := c.xtidMgr.GenerateIDWith(context.Background(), method, urlPath, wf); txErr == nil {
 		headers["x-client-transaction-id"] = txID
+		c.xtidFail.onSuccess()
 	} else {
-		slog.Debug("xtid: failed to generate transaction id", slog.Any("error", txErr))
+		// The request still goes out, without the header. The failure is counted
+		// and logged once per streak so a broken generator is visible.
+		c.noteXtidFailure(txErr)
 	}
 	// First/TTL queryId refresh rides the same authenticated fetcher (and, after
 	// an xtid init, the page it just fetched); it runs in the background.

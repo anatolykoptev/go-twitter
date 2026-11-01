@@ -1,0 +1,10 @@
+{
+  "name": "xtid-reference-gen",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Generates the golden vectors for xtid from the Lqm1/x-client-transaction-id reference implementation.",
+  "dependencies": {
+    "x-client-transaction-id": "0.3.2"
+  }
+}

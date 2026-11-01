@@ -33,6 +33,7 @@ metrics.
 | `twitter.client.queryid.changed` | gauge | `{id}` | none |
 | `twitter.client.queryid.age` | gauge | `s` | none |
 | `twitter.client.queryid.refresh.duration` | histogram | `s` | `twitter.trigger`, `twitter.result` |
+| `twitter.client.xtid.failures` | counter | `{failure}` | none |
 
 No instrument ever carries an account handle, user ID, list ID, search query or
 URL as an attribute.
@@ -151,6 +152,13 @@ proactive counterpart of a 429: a rising `holds` with a flat
 out of 429s. Pool paths only; writes and media uploads pinned to an account
 never hold. Counted at the response that triggered the hold, not for the
 pick-time estimate hold.
+
+### `twitter.client.xtid.failures`
+Incremented for every request that went out without `x-client-transaction-id`
+because generating it failed (the keys could not be built or the init is in its
+negative-cache backoff). The request is not blocked; a sustained non-zero rate
+means the generator is broken and X will likely answer 404s. The client also logs
+one warning per failure streak, at most once every 5 minutes.
 
 ### `twitter.client.queryid.refreshes` / `.changed` / `.age`
 

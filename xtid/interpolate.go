@@ -3,7 +3,8 @@ package xtid
 func interpolate(from, to []float64, f float64) []float64 {
 	out := make([]float64, len(from))
 	for i := range from {
-		out[i] = from[i]*(1-f) + to[i]*f
+		// Explicit float64 conversions forbid fused multiply-add (see cubicCalc).
+		out[i] = float64(from[i]*(1-f)) + float64(to[i]*f)
 	}
 	return out
 }

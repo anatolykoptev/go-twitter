@@ -9,13 +9,14 @@ import (
 // Chunk-map regexes (twscrape reference). nameRe also matches hash-shaped
 // values because a hex hash is a valid [\w.\-]+; parseChunkMap drops those (via
 // hashOnly) so Names holds module names only. Twitter hashes are NOT fixed
-// length (7 hex until 2026-08-24, 16 hex since) — hashRe and hashOnly accept 6-16 hex and MUST stay in lockstep so the
-// name/hash disambiguation holds.
+// length (7 hex until 2026-08-24, 16 hex since) and the reference accepts any
+// [a-zA-Z0-9_-]+ hash, so hashRe and hashOnly accept hex of any length >= 6 in
+// either case and MUST stay in lockstep so the name/hash disambiguation holds.
 var (
-	nameRe   = regexp.MustCompile(`(\d+):"([\w.\-]+)"`)       // chunkID -> name
-	hashRe   = regexp.MustCompile(`(\d+):"([0-9a-f]{6,16})"`) // chunkID -> hex hash
+	nameRe   = regexp.MustCompile(`(\d+):"([\w.\-]+)"`)        // chunkID -> name
+	hashRe   = regexp.MustCompile(`(\d+):"([0-9a-fA-F]{6,})"`) // chunkID -> hex hash
 	importRe = regexp.MustCompile(`import\(\s*["']\.\/([\w.\-]+\.js)["']`)
-	hashOnly = regexp.MustCompile(`^[0-9a-f]{6,16}$`)
+	hashOnly = regexp.MustCompile(`^[0-9a-fA-F]{6,}$`)
 )
 
 const bundleURLTemplate = "https://abs.twimg.com/responsive-web/client-web/%s.%sa.js"
