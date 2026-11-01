@@ -37,6 +37,7 @@ const (
 	metricQIDChanged          = "twitter.client.queryid.changed"
 	metricQIDAge              = "twitter.client.queryid.age"
 	metricQIDWalk             = "twitter.client.queryid.refresh.duration"
+	metricXtidFailures        = "twitter.client.xtid.failures"
 
 	// Attribute keys.
 	attrOperation    = "twitter.operation"
@@ -123,6 +124,7 @@ type clientMetrics struct {
 	qidChanged      metric.Int64Gauge
 	qidAge          metric.Float64Gauge
 	qidWalk         metric.Float64Histogram
+	xtidFailures    metric.Int64Counter
 	now             func() time.Time // injectable clock for freshness
 }
 
@@ -246,6 +248,12 @@ func newClientMetrics(mp metric.MeterProvider) *clientMetrics {
 		metric.WithExplicitBucketBoundaries(qidWalkBuckets...)); err != nil {
 		fail(metricQIDWalk, err)
 		m.qidWalk = noop.Float64Histogram{}
+	}
+	if m.xtidFailures, err = meter.Int64Counter(metricXtidFailures,
+		metric.WithUnit("{failure}"),
+		metric.WithDescription("Requests sent without x-client-transaction-id because generating it failed.")); err != nil {
+		fail(metricXtidFailures, err)
+		m.xtidFailures = noop.Int64Counter{}
 	}
 	return m
 }
@@ -478,6 +486,14 @@ func (m *clientMetrics) recordProxyClientFailure() {
 		return
 	}
 	m.proxyClientFail.Add(context.Background(), 1)
+}
+
+// recordXtidFailure counts one request sent without x-client-transaction-id.
+func (m *clientMetrics) recordXtidFailure() {
+	if m == nil {
+		return
+	}
+	m.xtidFailures.Add(context.Background(), 1)
 }
 
 func (m *clientMetrics) recordProxyFailure() {

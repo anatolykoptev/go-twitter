@@ -73,7 +73,18 @@ func (ct *ClientTransaction) solve(value float64, minVal, maxVal float64, roundi
 	if rounding {
 		return math.Floor(result)
 	}
-	return math.Round(result*100) / 100
+	return round2(result)
+}
+
+// round2 is the reference's `Math.round(v*100)/100`. JS rounds a tie toward
+// +Inf, math.Round away from zero: they differ for negative ties (-0.125*100 is
+// exactly -12.5). The matrix values are made positive only after this rounding,
+// so the tie direction decides the digit.
+func round2(v float64) float64 {
+	// The explicit conversion keeps v*100 rounded before jsRound subtracts the
+	// floor: a fused multiply-subtract would see the unrounded product and turn
+	// an exact tie (-299.5) into 0.4999... on arm64.
+	return jsRound(float64(v*100)) / 100
 }
 
 func (ct *ClientTransaction) animate(frames []int, targetTime float64) string {
@@ -95,8 +106,14 @@ func (ct *ClientTransaction) animate(frames []int, targetTime float64) string {
 	val := c.getValue(targetTime)
 
 	color := interpolate(fromColor, toColor, val)
+	// Floor at 0 only, as the reference does (`value > 0 ? value : 0`). The
+	// cubic overshoots [0,1] (its y control values lie in [-1,1]), so a channel
+	// can legitimately exceed 255 and print as "100"; clamping it to "ff"
+	// produced a different animation key for ~4% of random verification keys.
 	for i := range color {
-		color[i] = math.Max(0, math.Min(255, color[i]))
+		if color[i] < 0 {
+			color[i] = 0
+		}
 	}
 
 	rotation := interpolate(fromRotation, toRotation, val)
@@ -107,7 +124,7 @@ func (ct *ClientTransaction) animate(frames []int, targetTime float64) string {
 		strArr = append(strArr, fmt.Sprintf("%x", int(math.Round(color[i]))))
 	}
 	for _, value := range matrix {
-		rounded := math.Round(value*100) / 100
+		rounded := round2(value)
 		if rounded < 0 {
 			rounded = -rounded
 		}
@@ -175,7 +192,10 @@ func (ct *ClientTransaction) randByteFn() byte {
 
 // GenerateID computes x-client-transaction-id for a given method+path.
 func (ct *ClientTransaction) GenerateID(method, path string) string {
-	// Strip query string — only path matters
+	// Strip the query string: only the path is signed. The reference signs
+	// whatever string it is given, so the query-free path matches its output for
+	// the same path. A live probe returned 200 for UserTweetsAndReplies with the
+	// variables/features in the query while the id was computed on the bare path.
 	if idx := strings.Index(path, "?"); idx >= 0 {
 		path = path[:idx]
 	}
