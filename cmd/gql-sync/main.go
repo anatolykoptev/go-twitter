@@ -1,5 +1,5 @@
 // Command gql-sync auto-extracts Twitter GraphQL queryIDs from x.com's webpack
-// bundles and regenerates queryids_gen.go — the "generated" layer of the
+// bundles and regenerates internal/operations/queryids_gen.go — the "generated" layer of the
 // endpoints override chain (env > generated > committed).
 //
 // It builds the chunk map via internal/bundle (an HTTPFetcher that honors
@@ -31,6 +31,9 @@ const (
 	cookiesEnv        = "GQL_SYNC_COOKIES"
 	generatedFileName = "queryids_gen.go"
 	featuresFileName  = "features_gen.go"
+	// defaultOutDir is where the generated files live, relative to the repo root
+	// the tool is run from.
+	defaultOutDir = "internal/operations"
 	// maxWalkBundles bounds the BFS over x.com's chunk graph. Set well above the
 	// real top-level chunk count so a normal run never silently caps; WalkImports
 	// logs bundle.bfs_capped if it ever hits this.
@@ -57,7 +60,7 @@ type config struct {
 func parseFlags(args []string) (config, error) {
 	fs := flag.NewFlagSet("gql-sync", flag.ContinueOnError)
 	var c config
-	fs.StringVar(&c.out, "out", ".", "repo root to write queryids_gen.go")
+	fs.StringVar(&c.out, "out", defaultOutDir, "directory to write queryids_gen.go and features_gen.go into")
 	fs.StringVar(&c.proxy, "proxy", "", "proxy URL for the HTTPFetcher (ride Webshare from CI/datacenter)")
 	fs.StringVar(&c.fixtures, "fixtures", "", "read warm pages/bundles from this dir instead of the network")
 	fs.StringVar(&c.date, "date", "", "generation date stamp (e.g. 2026-06-19); omitted from output when empty")

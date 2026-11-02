@@ -31,7 +31,7 @@ import (
 // extraction as a whole, and swaps an immutable snapshot in atomically.
 //
 // Precedence per operation: TWITTER_QID_* env override > runtime-refreshed >
-// generated (queryids_gen.go) > committed literal (endpoints.go). The first
+// generated (internal/operations/queryids_gen.go) > committed literal (internal/operations/endpoints.go). The first
 // failure keeps the last good snapshot; nothing here ever clears it.
 
 const (
@@ -65,7 +65,7 @@ const (
 	// qidMinKnownFraction: a bundle that yields fewer than this share of the
 	// operations this library knows is treated as partial (an unfinished chunk
 	// walk, a bot wall) and rejected whole. The proven-extractable set today is 9
-	// of the 19 known operations (47%, queryids_gen.go; the rest are session-only
+	// of the 19 known operations (47%, internal/operations/queryids_gen.go; the rest are session-only
 	// or Relay-hash mutations), so 40% tolerates losing one and rejects half a
 	// bundle.
 	qidMinKnownFraction = 0.4

@@ -68,7 +68,7 @@ func renderFeatures(extracted map[string]any, committed map[string]bool, removed
 		b.WriteString(date)
 		b.WriteString("\n")
 	}
-	b.WriteString("\npackage twitter\n\n")
+	b.WriteString("\npackage operations\n\n")
 	b.WriteString("// generatedFeatures is the GraphQL feature-flag set: NAMES discovered from\n")
 	b.WriteString("// x.com's bundles ∩ warm-page featureSwitch.defaultConfig, with VALUES taken\n")
 	b.WriteString("// from committedFeatures() for every KNOWN flag (committed values are the\n")

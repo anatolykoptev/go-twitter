@@ -1,7 +1,7 @@
 # gql-sync drift check
 #
 # Weekly drift detection for the generated GraphQL queryIDs + feature-flag
-# defaults (queryids_gen.go, features_gen.go). x.com silently rotates queryIDs
+# defaults (internal/operations/queryids_gen.go, internal/operations/features_gen.go). x.com silently rotates queryIDs
 # and feature-flag defaults inside its JS bundle; when it does, every call this
 # library makes with a stale ID/flag starts returning HTTP 400. This job
 # regenerates the files from the LIVE bundle and, if they changed, opens a PR
@@ -57,8 +57,8 @@ jobs:
             drift
           commit-message: "chore(gql-sync): queryID/feature-flag drift detected"
           add-paths: |
-            queryids_gen.go
-            features_gen.go
+            internal/operations/queryids_gen.go
+            internal/operations/features_gen.go
           body: |
             ## gql-sync drift detected
 
@@ -74,7 +74,7 @@ jobs:
             The drift guard `TestFeatureDrift_CommittedVsGenerated` compares
             `committedFeatures()` (the authed-session authority) against the
             generated baseline. If x.com flipped a flag this PR also touches,
-            update `committedFeatures()` in `features_drift_test.go` to match, or
+            update `committedFeatures()` in `internal/operations/endpoints.go` to match, or
             the test will fail.
 
             ---
