@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -96,7 +97,7 @@ func newMetricsFixture(t *testing.T, handler http.HandlerFunc, username string) 
 	}
 	c.metrics.now = func() time.Time { return now }
 	c.registerPoolGauge(mp)
-	keepOffline(c)
+	c.warmDoerOverride = refusingWarm{} // xtid stays unavailable, offline: failFetcher's counterpart for the authenticated fetch
 
 	return &metricsFixture{c: c, reader: reader, acc: acc, now: now}
 }
@@ -121,17 +122,20 @@ func startFakeX(t *testing.T, handler http.HandlerFunc) *stealth.BrowserClient {
 	return bc
 }
 
-// keepOffline stops c's xtid warm fetches and queryId refreshes from reaching
-// the real x.com through its real transports: they go to a fake warm backend,
-// and the queryId refresher is off. A test that exercises either sets its own
-// afterwards. Without it an authenticated request sends a warm-page fetch (with
-// the test's fake cookies) to x.com and blocks on the answer.
+// refusingWarm is a warm backend that answers every fetch with HTTP 500.
+type refusingWarm struct{}
+
+func (refusingWarm) DoCtx(context.Context, string, string, map[string]string, io.Reader) ([]byte, map[string]string, int, error) {
+	return nil, nil, http.StatusInternalServerError, nil
+}
+
+// keepOffline stops c's xtid warm fetches from reaching the real x.com through
+// its real transports: they go to a fake warm backend unless the test set its
+// own. Without it an authenticated request sends a warm-page fetch (with the
+// test's fake cookies) to x.com and blocks on the answer.
 func keepOffline(c *Client) {
 	if c.warmDoerOverride == nil {
 		c.warmDoerOverride = &fakeWarmBackend{}
-	}
-	if c.qid == nil {
-		c.qid = newQIDRefresher(qidConfig{disabled: true})
 	}
 }
 
