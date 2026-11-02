@@ -10,6 +10,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+
+	"github.com/anatolykoptev/go-twitter/internal/telemetry"
 )
 
 func TestXtidFailureStreak_LogsOncePerStreakAndIntervalAndRecovers(t *testing.T) {
@@ -50,7 +52,7 @@ func TestDoRequest_XtidFailureIsCountedAndRequestContinues(t *testing.T) {
 	}
 	assert.EqualValues(t, 2, served.Load(), "both requests reached the server without the header")
 
-	m, ok := f.collect(t)[metricXtidFailures]
+	m, ok := f.collect(t)[telemetry.MetricXtidFailures]
 	require.True(t, ok, "xtid.failures must be reported")
 	sum, ok := m.Data.(metricdata.Sum[int64])
 	require.True(t, ok)

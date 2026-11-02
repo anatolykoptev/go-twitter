@@ -12,6 +12,7 @@ import (
 
 	"github.com/anatolykoptev/go-stealth/pool"
 	"github.com/anatolykoptev/go-stealth/ratelimit"
+	"github.com/anatolykoptev/go-twitter/internal/telemetry"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -441,7 +442,7 @@ func TestOnRequest_POSTPathEmits(t *testing.T) {
 	assert.Equal(t, "A", events[0].Username)
 	assert.Equal(t, "CreateTweet", events[0].Endpoint)
 	assert.Equal(t, 200, events[0].Status)
-	assert.Equal(t, outcomeOK, events[0].Outcome)
+	assert.Equal(t, telemetry.OutcomeOK, events[0].Outcome)
 	assert.Equal(t, 7, events[0].RateLimit.Remaining)
 }
 
@@ -463,7 +464,7 @@ func TestOnRequest_TransportErrorEmitsStatus0(t *testing.T) {
 	require.NotEmpty(t, events, "every failed attempt still emits an event")
 	for i, ev := range events {
 		assert.Equal(t, 0, ev.Status, "event %d: a transport failure carries Status 0", i)
-		assert.Equal(t, outcomeTransport, ev.Outcome, "event %d", i)
+		assert.Equal(t, telemetry.OutcomeTransport, ev.Outcome, "event %d", i)
 		assert.Equal(t, -1, ev.RateLimit.Remaining, "event %d: no headers on a transport failure", i)
 	}
 }
@@ -506,7 +507,7 @@ func TestOnRequest_MediaAttemptEmits(t *testing.T) {
 	assert.Equal(t, "A", events[0].Username)
 	assert.Equal(t, epUploadMedia, events[0].Endpoint)
 	assert.Equal(t, 200, events[0].Status)
-	assert.Equal(t, outcomeOK, events[0].Outcome)
+	assert.Equal(t, telemetry.OutcomeOK, events[0].Outcome)
 }
 
 // T6 — EndpointLimits returns a copy: mutating the result cannot change what

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	stealth "github.com/anatolykoptev/go-stealth"
+	"github.com/anatolykoptev/go-twitter/internal/telemetry"
 )
 
 const maxRetries = 3
@@ -99,12 +100,12 @@ func (c *Client) nextAccountWithWait(ctx context.Context, endpoint string, filte
 		if waited <= 0 {
 			return
 		}
-		result := waitResultAcquired
+		result := telemetry.WaitResultAcquired
 		if err != nil {
 			if ctx.Err() != nil {
-				result = waitResultCtxDone
+				result = telemetry.WaitResultCtxDone
 			} else {
-				result = waitResultGaveUp
+				result = telemetry.WaitResultGaveUp
 			}
 		}
 		c.metrics.recordPoolWait(endpoint, waited, result)

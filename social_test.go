@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/anatolykoptev/go-stealth/ratelimit"
+	"github.com/anatolykoptev/go-twitter/internal/telemetry"
 	"github.com/anatolykoptev/go-twitter/social"
 	"github.com/anatolykoptev/go-twitter/xtid"
 	"github.com/stretchr/testify/assert"
@@ -416,7 +417,7 @@ func TestSocial_PerCallClientsRegisterNoPoolGauge(t *testing.T) {
 		require.NoError(t, err)
 	}
 	assert.Zero(t, cmp.regs.Load(), "per-call clients must not register callbacks")
-	_, present := r.collect(t)[metricPoolAccounts]
+	_, present := r.collect(t)[telemetry.MetricPoolAccounts]
 	assert.False(t, present, "pool.accounts must not be reported by per-call clients")
 }
 
@@ -451,13 +452,13 @@ func TestSocial_MeterProviderRecordsDurationAndFreshness(t *testing.T) {
 
 	got := r.collect(t)
 	ops := map[string]bool{}
-	for _, p := range histPoints(t, got, metricRequestDuration) {
-		ops[attrMap(p.Attributes)[attrOperation]] = true
+	for _, p := range histPoints(t, got, telemetry.MetricRequestDuration) {
+		ops[attrMap(p.Attributes)[telemetry.AttrOperation]] = true
 	}
 	assert.True(t, ops["UserTweets"], "request.duration must carry operation=UserTweets, got %v", ops)
-	fresh := histPoints(t, got, metricFreshness)
+	fresh := histPoints(t, got, telemetry.MetricFreshness)
 	require.Len(t, fresh, 1)
-	assert.Equal(t, "UserTweets", attrMap(fresh[0].Attributes)[attrOperation])
+	assert.Equal(t, "UserTweets", attrMap(fresh[0].Attributes)[telemetry.AttrOperation])
 }
 
 // F4 — each call's warm fetch carries THAT call's account cookie. The shared

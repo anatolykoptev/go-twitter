@@ -18,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
+	"github.com/anatolykoptev/go-twitter/internal/telemetry"
 	"github.com/anatolykoptev/go-twitter/xpff"
 	"github.com/anatolykoptev/go-twitter/xtid"
 )
@@ -335,7 +336,7 @@ func TestRateLimitHeaders_MetricRecordsRemainingAndLimit(t *testing.T) {
 	require.NoError(t, err)
 
 	got := f.collect(t)
-	for name, want := range map[string]int64{metricRateLimitRemain: 37, metricRateLimitLimit: 50} {
+	for name, want := range map[string]int64{telemetry.MetricRateLimitRemain: 37, telemetry.MetricRateLimitLimit: 50} {
 		m, ok := got[name]
 		require.True(t, ok, "%s recorded nothing", name)
 		h, isHist := m.Data.(metricdata.Histogram[int64])
@@ -344,7 +345,7 @@ func TestRateLimitHeaders_MetricRecordsRemainingAndLimit(t *testing.T) {
 		require.Len(t, pts, 1, name)
 		assert.Equal(t, want, pts[0].Sum, name)
 		assert.Equal(t, uint64(1), pts[0].Count, name)
-		assert.Equal(t, map[string]string{attrOperation: "UserTweets"}, attrMap(pts[0].Attributes), name)
+		assert.Equal(t, map[string]string{telemetry.AttrOperation: "UserTweets"}, attrMap(pts[0].Attributes), name)
 	}
 }
 
@@ -479,19 +480,19 @@ func TestRateLimitHeaders_HoldIsCounted(t *testing.T) {
 	remaining.Store(30)
 	_, err := f.c.GetUserTweets(context.Background(), "999", 20)
 	require.NoError(t, err)
-	_, present := f.collect(t)[metricRateLimitHolds]
+	_, present := f.collect(t)[telemetry.MetricRateLimitHolds]
 	assert.False(t, present, "a response with budget left must not count a hold")
 
 	remaining.Store(0)
 	_, err = f.c.GetUserTweets(context.Background(), "999", 20)
 	require.NoError(t, err)
-	m, ok := f.collect(t)[metricRateLimitHolds]
+	m, ok := f.collect(t)[telemetry.MetricRateLimitHolds]
 	require.True(t, ok, "a spent window must count a hold")
 	sum, isSum := m.Data.(metricdata.Sum[int64])
 	require.True(t, isSum)
 	require.Len(t, sum.DataPoints, 1)
 	assert.EqualValues(t, 1, sum.DataPoints[0].Value)
-	assert.Equal(t, map[string]string{attrOperation: "UserTweets"}, attrMap(sum.DataPoints[0].Attributes))
+	assert.Equal(t, map[string]string{telemetry.AttrOperation: "UserTweets"}, attrMap(sum.DataPoints[0].Attributes))
 }
 
 // In-flight accounting: with header state remaining=10 and headroom 2, a burst of
