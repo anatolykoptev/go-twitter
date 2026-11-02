@@ -79,6 +79,7 @@ func newMetricsFixture(t *testing.T, handler http.HandlerFunc, username string) 
 	acc.active = true
 	acc.installRateLimiter(ratelimit.DefaultConfig)
 	acc.HealthTracker = pool.DefaultHealthTracker()
+	acc.client = bc
 
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))

@@ -78,6 +78,7 @@ func newPoolWaitClient(t *testing.T, n int) (*Client, []*Account) {
 	for i := range accs {
 		accs[i] = newRateTestAccount("acc"+strconv.Itoa(i), ratelimit.Config{RequestsPerWindow: 50, WindowDuration: 15 * time.Minute})
 		accs[i].AuthToken, accs[i].CT0 = "auth", "ct0"
+		accs[i].client = bc // every account owns a client; clientForAccount never lends the shared one
 	}
 	c := &Client{
 		client:  bc,

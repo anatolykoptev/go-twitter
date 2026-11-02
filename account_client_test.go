@@ -10,6 +10,7 @@ import (
 	"time"
 
 	stealth "github.com/anatolykoptev/go-stealth"
+	"github.com/anatolykoptev/go-stealth/pool"
 	"github.com/anatolykoptev/go-twitter/xtid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -138,17 +139,15 @@ func TestNewClient_SingleAccountSecondRequestAfterCt0Rotation(t *testing.T) {
 	t.Logf("request 2 Cookie: %s", reqs[1].cookie)
 }
 
-// C2 — a transport failure on an account with no Proxy is not charged to a
-// proxy: the request outcome stays "transport" (not "proxy") and no proxy
-// backoff starts. With a per-account client for every account, client identity
-// no longer tells whether the attempt used the account's own proxy.
-//
-// Mutation: client.go observedPoolReq — pass `bc != c.client` instead of
-// usesOwnProxy(acc) to attemptOutcome => RED (outcome=proxy).
-func TestTransportFailure_NoProxyAccountIsNotChargedToProxy(t *testing.T) {
+// requestOutcomes drives one failing attempt (connection refused, which
+// isProxyError matches) from a no-proxy account's own client through drive and
+// returns the account, the twitter.outcome label of every request.duration
+// point and the alert topics seen.
+func requestOutcomes(t *testing.T, drive func(ctx context.Context, c *Client, acc *Account, deadURL string)) (*Account, []string, []string) {
+	t.Helper()
 	dead := httptest.NewServer(http.NotFoundHandler())
 	deadURL := dead.URL
-	dead.Close() // connection refused: isProxyError matches this text
+	dead.Close()
 
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
@@ -162,8 +161,7 @@ func TestTransportFailure_NoProxyAccountIsNotChargedToProxy(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	_, _, err := c.doPoolRequest(ctx, "GET", "TestEndpoint", deadURL+"/i/api/graphql/test/TestOp", nil)
-	require.Error(t, err)
+	drive(ctx, c, acc, deadURL)
 
 	var rm metricdata.ResourceMetrics
 	require.NoError(t, reader.Collect(context.Background(), &rm))
@@ -173,18 +171,58 @@ func TestTransportFailure_NoProxyAccountIsNotChargedToProxy(t *testing.T) {
 			all[m.Name] = m
 		}
 	}
-	pts := histPoints(t, all, metricRequestDuration)
-	require.NotEmpty(t, pts)
-	for _, dp := range pts {
-		assert.Equal(t, outcomeTransport, attrMap(dp.Attributes)[attrOutcome], "a no-proxy account's transport failure must not be labelled proxy")
+	var labels []string
+	for _, dp := range histPoints(t, all, metricRequestDuration) {
+		labels = append(labels, attrMap(dp.Attributes)[attrOutcome])
 	}
+	return acc, labels, alerts
+}
 
+func assertNotChargedToProxy(t *testing.T, acc *Account, labels, alerts []string) {
+	t.Helper()
+	require.NotEmpty(t, labels)
+	for _, l := range labels {
+		assert.Equal(t, outcomeTransport, l, "a no-proxy account's transport failure must not be labelled proxy")
+	}
 	acc.mu.Lock()
 	consec, backoff := acc.proxyConsecFails, acc.proxyBackoff
 	acc.mu.Unlock()
 	assert.Zero(t, consec, "no proxy backoff accounting for an account without a Proxy")
 	assert.True(t, backoff.IsZero(), "no proxy backoff for an account without a Proxy")
 	assert.NotContains(t, alerts, "proxy.down")
+}
+
+// C2 — a transport failure on an account with no Proxy is not charged to a
+// proxy: the request outcome stays "transport" (not "proxy") and no proxy
+// backoff starts. With a per-account client for every account, client identity
+// no longer tells whether the attempt used the account's own proxy. One test per
+// attemptOutcome call site.
+//
+// Mutation: client.go observedPoolReq / observedRequestWithBody /
+// observedMediaReq — pass `bc != c.client` instead of usesOwnProxy(acc) to
+// attemptOutcome => RED at that site's test (outcome=proxy).
+func TestTransportFailure_NoProxyAccountIsNotChargedToProxy(t *testing.T) {
+	acc, labels, alerts := requestOutcomes(t, func(ctx context.Context, c *Client, _ *Account, deadURL string) {
+		_, _, err := c.doPoolRequest(ctx, "GET", "TestEndpoint", deadURL+"/i/api/graphql/test/TestOp", nil)
+		require.Error(t, err)
+	})
+	assertNotChargedToProxy(t, acc, labels, alerts)
+}
+
+func TestTransportFailure_NoProxyAccountIsNotChargedToProxy_RequestWithBody(t *testing.T) {
+	acc, labels, alerts := requestOutcomes(t, func(ctx context.Context, c *Client, acc *Account, deadURL string) {
+		_, _, _, err := c.observedRequestWithBody(ctx, acc, "TestEndpoint", acc.client, "POST", deadURL+"/x", map[string]string{}, strings.NewReader("a=b"))
+		require.Error(t, err)
+	})
+	assertNotChargedToProxy(t, acc, labels, alerts)
+}
+
+func TestTransportFailure_NoProxyAccountIsNotChargedToProxy_Media(t *testing.T) {
+	acc, labels, alerts := requestOutcomes(t, func(ctx context.Context, c *Client, acc *Account, deadURL string) {
+		_, _, _, err := c.observedMediaReq(ctx, acc, acc.client, "POST", deadURL+"/x", []byte("a=b"), map[string]string{})
+		require.Error(t, err)
+	})
+	assertNotChargedToProxy(t, acc, labels, alerts)
 }
 
 // C3 — with every account now building a client, a malformed pinned proxy still
@@ -217,4 +255,132 @@ func TestNewClient_BuildFailureDisablesOnlyThatAccount(t *testing.T) {
 	c2, err := NewClient(ClientConfig{Accounts: all, SessionDir: t.TempDir(), skipPoolGauge: true})
 	require.Error(t, err, "no usable account must still fail NewClient")
 	assert.Nil(t, c2)
+}
+
+// addPoolAccount adds an account the way a consumer does after NewClient:
+// through Pool().Add, with the per-account state NewClient sets for its own.
+func addPoolAccount(t *testing.T, c *Client, spec string) *Account {
+	t.Helper()
+	acc := ParseAccounts(spec)[0]
+	acc.active = true
+	acc.installRateLimiter(c.cfg.RateLimit)
+	seedRateLimits(acc)
+	acc.HealthTracker = pool.DefaultHealthTracker()
+	c.pool.Add(acc)
+	return acc
+}
+
+// C4 — journey: accounts added after NewClient (loginOpenAccount, Pool().Add)
+// have no client of their own. They must get one on first use, never the shared
+// client whose jar the guest paths use: neither account sees the other's
+// cookies and a guest request sees neither.
+//
+// Mutation: client.go clientForAccount — return c.client when acc.client is nil
+// instead of building => RED (B's Cookie carries A's values).
+func TestClientForAccount_PoolAddedAccountsDoNotShareJar(t *testing.T) {
+	record := startRotatingCookieX(t)
+	c := newLoopbackClient(t, ClientConfig{})
+	a := addPoolAccount(t, c, "a:pw:tokA:ct0A")
+	b := addPoolAccount(t, c, "b:pw:tokB:ct0B")
+	require.Nil(t, a.client, "precondition: NewClient never built a client for it")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	for i := 0; i < 8 && len(distinctTokens(record())) < 2; i++ {
+		_, err := c.GetUserTweets(ctx, "999", 20)
+		require.NoError(t, err)
+	}
+	require.GreaterOrEqual(t, len(distinctTokens(record())), 2, "the pool must have used both accounts")
+	require.NotNil(t, a.client)
+	require.NotNil(t, b.client)
+	assert.NotSame(t, a.client, b.client)
+	assert.NotSame(t, c.client, a.client)
+
+	// An account-less (guest) request goes through the shared client.
+	_, _, _, err := c.observedRequest(ctx, nil, "Guest", c.client, "GET", twitterBase+"/guest", map[string]string{})
+	require.NoError(t, err)
+
+	reqs := record()
+	for i, r := range reqs {
+		for _, other := range []string{"tokA", "tokB"} {
+			if other == r.token {
+				continue
+			}
+			assert.NotContains(t, r.cookie, "FROM"+other, "request %d from %q carries a cookie set for %s", i, r.token, other)
+			assert.NotContains(t, r.cookie, "u%3D"+other, "request %d from %q carries a cookie set for %s", i, r.token, other)
+		}
+	}
+	guest := reqs[len(reqs)-1]
+	require.Empty(t, guest.token, "the last request is the guest one")
+	assert.NotContains(t, guest.cookie, "FROM", "the guest request must carry no account's cookie")
+	assert.NotContains(t, guest.cookie, "twid")
+}
+
+// Concurrent first use of an account without a client builds exactly one.
+//
+// Mutation: client.go clientForAccount — drop the acc.mu.Lock()/Unlock() pair
+// => RED (several distinct clients returned; -race also flags the field).
+func TestClientForAccount_ConcurrentFirstUseBuildsOneClient(t *testing.T) {
+	c := newLoopbackClient(t, ClientConfig{})
+	acc := addPoolAccount(t, c, "a:pw:tokA:ct0A")
+
+	const n = 64
+	var (
+		wg    sync.WaitGroup
+		start = make(chan struct{})
+		got   = make([]*stealth.BrowserClient, n)
+	)
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			bc, err := c.clientForAccount(acc)
+			assert.NoError(t, err)
+			got[i] = bc
+		}()
+	}
+	close(start)
+	wg.Wait()
+	for _, bc := range got {
+		require.NotNil(t, bc)
+		assert.Same(t, got[0], bc, "every concurrent first use must see the one client")
+	}
+}
+
+// Fail-closed on the lazy path: a build failure marks only this account,
+// returns ErrProxyClientUnavailable, never the shared client, and the alert
+// payload does not talk about a proxy the account does not have.
+//
+// Mutation: client.go clientForAccount — drop `acc.proxyClientFailed = true`
+// => RED (the reactivated account reports IsActive).
+func TestClientForAccount_LazyBuildFailureIsFailClosed(t *testing.T) {
+	c := newLoopbackClient(t, ClientConfig{})
+	good := addPoolAccount(t, c, "good:pw:tokG:ct0G")
+	bad := addPoolAccount(t, c, "bad:pw:tokB:ct0B")
+	var payloads []map[string]any
+	c.alertHook = func(topic string, payload any) {
+		if topic == "account.proxy_client_failed" {
+			payloads = append(payloads, payload.(map[string]any))
+		}
+	}
+
+	c.cfg.stealthOpts = []stealth.ClientOption{stealth.WithProxy("http://%zz")} // makes the build fail
+	bc, err := c.clientForAccount(bad)
+	require.ErrorIs(t, err, ErrProxyClientUnavailable)
+	assert.Nil(t, bc, "the shared client must never be lent to an account")
+	bad.SetActive(true)
+	assert.False(t, bad.IsActive(), "a failed account stays unselectable even when reactivated")
+	_, err = c.clientForAccount(bad)
+	assert.ErrorIs(t, err, ErrProxyClientUnavailable, "a failed account is not rebuilt")
+
+	require.Len(t, payloads, 1)
+	assert.Equal(t, "bad", payloads[0]["user"])
+	assert.Equal(t, "direct", payloads[0]["proxy"], "no proxy was configured: the payload must not claim an unparseable proxy URL")
+	assert.NotContains(t, payloads[0]["error"], "proxy")
+
+	c.cfg.stealthOpts = []stealth.ClientOption{stealth.WithoutSSRFGuard()}
+	_, err = c.clientForAccount(good)
+	assert.NoError(t, err, "the other account is unaffected")
+	assert.True(t, good.IsActive())
 }
