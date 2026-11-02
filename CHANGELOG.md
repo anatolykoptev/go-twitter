@@ -1,5 +1,32 @@
 # Changelog
 
+## [0.8.0](https://github.com/anatolykoptev/go-twitter/compare/v0.7.2...v0.8.0) (2026-11-02)
+
+
+### ⚠ BREAKING CHANGES
+
+* remove dead code and name test files by topic ([#136](https://github.com/anatolykoptev/go-twitter/issues/136))
+
+### Features
+
+* **pool:** per-account random pick pace ([#138](https://github.com/anatolykoptev/go-twitter/issues/138)) ([3ad73af](https://github.com/anatolykoptev/go-twitter/commit/3ad73afa9953c5c550e21e4c627b3de10a4f74c7))
+
+
+### Bug Fixes
+
+* **client:** give every account its own HTTP client ([#137](https://github.com/anatolykoptev/go-twitter/issues/137)) ([38873ba](https://github.com/anatolykoptev/go-twitter/commit/38873ba91ab180e8fd24eebb61d8b742432e292d))
+* **deps:** update to the latest stable releases ([#135](https://github.com/anatolykoptev/go-twitter/issues/135)) ([61b6ed4](https://github.com/anatolykoptev/go-twitter/commit/61b6ed409a2f1aecf4871f82a6fbab2fe846b234))
+
+
+### Refactoring
+
+* remove dead code and name test files by topic ([#136](https://github.com/anatolykoptev/go-twitter/issues/136)) ([4e2049d](https://github.com/anatolykoptev/go-twitter/commit/4e2049d8145a653ad69c4774729f9237cea88cdc))
+
+
+### Documentation
+
+* rewrite the README and move the reference into docs ([#133](https://github.com/anatolykoptev/go-twitter/issues/133)) ([a633f2c](https://github.com/anatolykoptev/go-twitter/commit/a633f2c00ef1cf8c71cd8be13a5ae17443295af8))
+
 ## [0.7.2](https://github.com/anatolykoptev/go-twitter/compare/v0.7.1...v0.7.2) (2026-11-01)
 
 
