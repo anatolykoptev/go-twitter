@@ -143,8 +143,8 @@ var ErrTooFew = errors.New("too few known operations")
 var Active atomic.Pointer[Snapshot]
 
 // Catalog is the root package's view of its endpoint table, which this package
-// cannot import. The root binds it once at load (before any refresh can run);
-// every func reads the live table on each call.
+// cannot import. The root passes it in Config; every func reads the live table
+// on each call. New panics if any func is nil.
 type Catalog struct {
 	// Operations lists the operations the library issues.
 	Operations func() []string
@@ -154,12 +154,6 @@ type Catalog struct {
 	// operations excluded).
 	CountChanged func(ids map[string]string) int
 }
-
-// Bound is the catalog the root bound with Bind.
-var Bound Catalog
-
-// Bind installs the root's endpoint catalog.
-func Bind(c Catalog) { Bound = c }
 
 // Snapshot is one immutable refreshed state. Never mutated after Store.
 type Snapshot struct {
@@ -177,6 +171,8 @@ type Config struct {
 	Disabled                               bool
 	// xweb also reads the x-web chunk graph (see EnvXWeb).
 	XWeb bool
+	// Catalog is the root's endpoint table; required (see New).
+	Catalog Catalog
 }
 
 // DefaultConfig is the production configuration; the env kill switch and the
@@ -198,7 +194,7 @@ type WarmPage struct {
 	at        time.Time
 	Scripts   []string // start bundles: x-web (Vite) scripts first, then webpack ones
 	Vite      []string // the x-web (Vite) subset of scripts: the x-web crawl's start points
-	Layout    string   // qidLayout*
+	Layout    string   // Layout*
 	pageBytes int
 	defaults  map[string]bool
 }
@@ -238,8 +234,12 @@ type Refresher struct {
 	page      *WarmPage
 }
 
-// New returns a refresher with cfg.
+// New returns a refresher with cfg. It panics when cfg.Catalog is incomplete:
+// a missing func is a wiring bug, to be caught at construction, not on a request.
 func New(cfg Config) *Refresher {
+	if cfg.Catalog.Operations == nil || cfg.Catalog.Known == nil || cfg.Catalog.CountChanged == nil {
+		panic("queryid: New requires a complete Catalog (Operations, Known and CountChanged)")
+	}
 	r := &Refresher{Cfg: cfg, Now: time.Now, Faults: make(map[string][]time.Time)}
 	r.Started = r.Now()
 	r.chunks = bundle.NewMemoCache(ObservedPageMaxAge, chunkCacheBytes, func() time.Time { return r.Now() })
@@ -334,7 +334,7 @@ func (r *Refresher) OnEndpointFault(op string, mk func() bundle.Fetcher, m *tele
 	if r == nil || r.Cfg.Disabled {
 		return
 	}
-	if !Bound.Known(op) {
+	if !r.Cfg.Catalog.Known(op) {
 		return // REST names (DMInbox, ...) have no queryId to refresh
 	}
 	if !r.noteFault(op) {
@@ -389,7 +389,7 @@ func (r *Refresher) lazyDue(now time.Time) (string, bool) {
 	return "", false
 }
 
-// IntervalOK is the spacing gate: no attempt before nextAllowedNS, which is the
+// IntervalOK is the spacing gate: no attempt before NextAllowedNS, which is the
 // minimum interval after an attempt and grows by doubling (up to MaxBackoff)
 // over consecutive failures. Every trigger passes it before and inside the
 // singleflight.
@@ -465,7 +465,7 @@ func (r *Refresher) Run(trig string, f bundle.Fetcher, m *telemetry.Metrics) {
 		return
 	}
 	prev := Active.Load()
-	carried := overlaySnapshot(prev, snap)
+	carried := overlaySnapshot(prev, snap, r.Cfg.Catalog)
 	Active.Store(snap)
 	r.LastSuccessNS.Store(snap.at.UnixNano())
 	r.Mu.Lock()
@@ -501,7 +501,7 @@ func (r *Refresher) Attempt(ctx context.Context, f bundle.Fetcher, seen *PageSee
 // healed but this walk did not see are carried forward, so one flaky chunk
 // cannot send a healed operation back to a retired compiled id. It returns how
 // many ids were carried and recomputes next.Changed over the merged set.
-func overlaySnapshot(prev, next *Snapshot) int {
+func overlaySnapshot(prev, next *Snapshot, cat Catalog) int {
 	if prev == nil {
 		return 0
 	}
@@ -522,7 +522,7 @@ func overlaySnapshot(prev, next *Snapshot) int {
 			}
 		}
 	}
-	next.Changed = Bound.CountChanged(next.IDs)
+	next.Changed = cat.CountChanged(next.IDs)
 	return carried
 }
 
@@ -578,7 +578,7 @@ var ConsumeXWeb = func(ctx context.Context, ext *gqlextract.XWebExtractor, u str
 type PageSeen struct {
 	Layout  string
 	Scripts int
-	// xwebOnly: the refresh was applied from x-web ids alone (see build).
+	// xwebOnly: the refresh was applied from x-web ids alone (see Build).
 	xwebOnly bool
 }
 
@@ -635,7 +635,7 @@ func (r *Refresher) Build(ctx context.Context, f bundle.Fetcher, seen *PageSeen)
 	if r.Cfg.XWeb {
 		xids = r.WalkXWeb(ctx, f, page)
 	}
-	ids, err := ValidateIDs(Bound.Operations(), ext.Result(), ext.Invalid)
+	ids, err := ValidateIDs(r.Cfg.Catalog.Operations(), ext.Result(), ext.Invalid)
 	if err != nil {
 		// The x-web ids may stand alone ONLY on positive evidence of an x-web-only
 		// page: a Vite-only layout whose legacy chunks were all fetched and yet
@@ -652,7 +652,7 @@ func (r *Refresher) Build(ctx context.Context, f bundle.Fetcher, seen *PageSeen)
 		ids = map[string]string{}
 	}
 	maps.Copy(ids, xids) // x-web wins for its native ops: the legacy shape never carries them
-	snap := &Snapshot{IDs: ids, at: r.Now(), Changed: Bound.CountChanged(ids)}
+	snap := &Snapshot{IDs: ids, at: r.Now(), Changed: r.Cfg.Catalog.CountChanged(ids)}
 
 	if len(page.defaults) == 0 && r.noDefaultsLogged.CompareAndSwap(false, true) {
 		slog.Info("queryid refresh: no featureSwitch defaults on the warm page; features stay compiled",

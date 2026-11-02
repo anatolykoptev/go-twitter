@@ -16,15 +16,28 @@ import (
 // runtime-refreshed > generated (internal/operations/queryids_gen.go) >
 // committed literal (internal/operations/endpoints.go).
 
-func init() {
-	queryid.Bind(queryid.Catalog{
-		Operations: knownOperations,
-		Known: func(op string) bool {
-			_, ok := Endpoints[op]
-			return ok
-		},
-		CountChanged: countChangedIDs,
-	})
+// rootCatalog is the root's endpoint table as internal/queryid sees it; every
+// func reads the live table on each call.
+var rootCatalog = queryid.Catalog{
+	Operations: knownOperations,
+	Known: func(op string) bool {
+		_, ok := Endpoints[op]
+		return ok
+	},
+	CountChanged: countChangedIDs,
+}
+
+// defaultQIDConfig is the production refresher config with the root's catalog.
+func defaultQIDConfig() queryid.Config {
+	cfg := queryid.DefaultConfig()
+	cfg.Catalog = rootCatalog
+	return cfg
+}
+
+// newQIDRefresher builds a refresher over the root's endpoint table.
+func newQIDRefresher(cfg queryid.Config) *queryid.Refresher {
+	cfg.Catalog = rootCatalog
+	return queryid.New(cfg)
 }
 
 var processQIDPtr atomic.Pointer[queryid.Refresher]
@@ -34,7 +47,7 @@ func processQID() *queryid.Refresher {
 	if r := processQIDPtr.Load(); r != nil {
 		return r
 	}
-	r := queryid.New(queryid.DefaultConfig())
+	r := newQIDRefresher(defaultQIDConfig())
 	if processQIDPtr.CompareAndSwap(nil, r) {
 		return r
 	}

@@ -57,7 +57,7 @@ func (c *qidClock) Advance(d time.Duration) { c.ns.Add(int64(d)) }
 func useQIDRefresher(t *testing.T) (*queryid.Refresher, *qidClock) {
 	t.Helper()
 	clk := newQIDClock()
-	r := queryid.New(queryid.Config{
+	r := newQIDRefresher(queryid.Config{
 		TTL: queryid.RefreshTTL, FaultWindow: queryid.FaultWindow, MinInterval: queryid.MinInterval,
 		Timeout: 30 * time.Second, FaultThreshold: queryid.FaultThreshold,
 	})
@@ -680,7 +680,7 @@ func TestQIDRefresh_FeaturesAdditiveAndGuarded(t *testing.T) {
 // compiled id.
 //
 // Mutation: in queryid_refresh.go run() delete the
-// `carried := overlaySnapshot(prev, snap)` call (store only this walk's ids)
+// `carried := overlaySnapshot(prev, snap, r.Cfg.Catalog)` call (store only this walk's ids)
 // => RED.
 func TestQIDRefresh_F9_LaterPartialRefreshKeepsHealedOps(t *testing.T) {
 	r, clk := useQIDRefresher(t)

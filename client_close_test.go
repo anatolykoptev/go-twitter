@@ -91,7 +91,7 @@ func offlineClient(t *testing.T, c *Client) {
 	t.Helper()
 	c.xtidMgr = xtid.NewManager(failFetcher{})
 	c.accountPacer = nil
-	c.qid = queryid.New(queryid.Config{Disabled: true})
+	c.qid = newQIDRefresher(queryid.Config{Disabled: true})
 	c.warmDoerOverride = &fakeWarmBackend{} // authenticated warm fetches must not reach the real x.com
 }
 
@@ -222,7 +222,7 @@ func socialFixture(t *testing.T) (*social.Client, *xtid.Manager, *fakeWarmBacken
 	warm := &fakeWarmBackend{}
 	testHookSocialClient = func(c *Client) {
 		c.accountPacer = nil
-		c.qid = queryid.New(queryid.Config{Disabled: true})
+		c.qid = newQIDRefresher(queryid.Config{Disabled: true})
 		c.warmDoerOverride = warm // authenticated warm fetches must not reach the real x.com
 	}
 	t.Cleanup(func() { testHookSocialClient = nil })

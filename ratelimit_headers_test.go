@@ -134,7 +134,7 @@ func newRLClient(t *testing.T, n, perEndpointCap int, clk *rlFakeClock) (*Client
 		xpffGen: xpff.New("test-guest-id", defaultUserAgent),
 		cfg:     ClientConfig{DisableGuestFallback: true, BanCooldown: time.Hour, AuthCooldown: time.Hour},
 		// warm fetches must not reach the real x.com
-		qid:              queryid.New(queryid.Config{Disabled: true}),
+		qid:              newQIDRefresher(queryid.Config{Disabled: true}),
 		warmDoerOverride: &fakeWarmBackend{},
 	}, accs
 }

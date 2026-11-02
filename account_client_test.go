@@ -67,7 +67,7 @@ func newLoopbackClient(t *testing.T, cfg ClientConfig) *Client {
 	t.Cleanup(func() { _ = c.Close() })
 	c.xtidMgr = xtid.NewManager(failFetcher{})
 	c.accountPacer = nil
-	c.qid = queryid.New(queryid.Config{Disabled: true})
+	c.qid = newQIDRefresher(queryid.Config{Disabled: true})
 	c.warmDoerOverride = &fakeWarmBackend{} // warm fetches must not reach the real x.com
 	return c
 }

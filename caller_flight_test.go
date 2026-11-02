@@ -64,7 +64,7 @@ func TestBadRequest_Code214_FailsFastNoRotation(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	c, accs := newPoolWaitClient(t, 2)
-	qid := queryid.New(queryid.Config{FaultWindow: time.Minute, FaultThreshold: 3, Timeout: time.Second})
+	qid := newQIDRefresher(queryid.Config{FaultWindow: time.Minute, FaultThreshold: 3, Timeout: time.Second})
 	c.qid = qid
 
 	_, _, err := c.doGET(context.Background(), poolWaitEndpoint, srv.URL+"/i/api/graphql/x/"+poolWaitEndpoint)

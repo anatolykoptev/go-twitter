@@ -95,7 +95,7 @@ func TestQIDRefresh_XWeb_FlagOnAppliesRotatedNativeID(t *testing.T) {
 func TestQIDRefresh_XWeb_DefaultOffNeverCrawls(t *testing.T) {
 	r, _ := useQIDRefresher(t)
 	require.False(t, r.Cfg.XWeb, "the shipped default must be off")
-	require.False(t, queryid.DefaultConfig().XWeb)
+	require.False(t, defaultQIDConfig().XWeb)
 	c, w := newXWebClient(t, xwFixtureChunk(t, xwNewID))
 
 	_ = c.search(ctxTimeout(t))
@@ -107,9 +107,9 @@ func TestQIDRefresh_XWeb_DefaultOffNeverCrawls(t *testing.T) {
 
 func TestDefaultQIDConfig_XWebFollowsEnv(t *testing.T) {
 	t.Setenv(queryid.EnvXWeb, "on")
-	assert.True(t, queryid.DefaultConfig().XWeb)
+	assert.True(t, defaultQIDConfig().XWeb)
 	t.Setenv(queryid.EnvXWeb, "")
-	assert.False(t, queryid.DefaultConfig().XWeb)
+	assert.False(t, defaultQIDConfig().XWeb)
 }
 
 // An x-web-only bundle (the legacy walk finds none of the known ops) is still
