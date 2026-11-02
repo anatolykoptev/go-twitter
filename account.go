@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	stealth "github.com/anatolykoptev/go-stealth"
@@ -64,6 +65,15 @@ type Account struct {
 	// not lift a hold, and the pool's deactivation alert must not fire). The
 	// eligibility methods consult it via endpointGate.
 	heldUntil time.Time
+
+	// Pick pace (see SetPickPace). pickPace is an immutable range behind an
+	// atomic pointer (nil = off), so the disabled default costs one atomic
+	// load on the pick path and no lock; lastPick is the previous pick and
+	// nextPick the time the account is next allowed (the gap is drawn once at
+	// the pick), both guarded by mu together with the check that reads them.
+	pickPace atomic.Pointer[stealth.Jitter]
+	lastPick time.Time
+	nextPick time.Time
 
 	// Header-derived rate-limit state (see ratelimit_state.go), per endpoint.
 	// rlState is the last known X window; blockedUntil is every PERSISTED
@@ -192,6 +202,123 @@ func (a *Account) noteRateLimited88(respHdrs map[string]string) int {
 	defer a.mu.Unlock()
 	a.consecHeaderless88++
 	return a.consecHeaderless88
+}
+
+// SetPickPace sets the pace of pool picks for this account: after each pick
+// the pool skips the account for a random gap drawn uniformly from [Min, Max)
+// (stealth.Jitter, the shared range type), so an account in warm-up is picked
+// at most once per gap. A call that has no other account to go to waits
+// (ctx-bounded) for exactly the end of the drawn gap.
+//
+// The zero Jitter means off, which is the default. A degenerate range
+// (Max <= Min, e.g. {3s, 3s}) is a FIXED gap of Min, unlike Jitter.Duration,
+// which returns 0 for it. A negative Min counts as 0; Min and Max both <= 0 is
+// off. It is safe to call at runtime on a live pooled account: the gap of the
+// current interval is drawn again from the new range (so a lower range
+// releases the account sooner, and the zero value releases it at once), and
+// every later pick draws from it. Pool picks only: account-pinned writes and
+// media uploads never consult it (like Client.HoldAccount).
+func (a *Account) SetPickPace(j stealth.Jitter) {
+	var p *stealth.Jitter
+	if j.Min < 0 {
+		j.Min = 0
+	}
+	if j.Max < j.Min {
+		j.Max = j.Min
+	}
+	if j.Max > 0 {
+		p = &j
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.pickPace.Store(p)
+	if p != nil && !a.lastPick.IsZero() {
+		a.nextPick = a.lastPick.Add(pickGap(*p))
+	}
+}
+
+// PickPace returns the SetPickPace range; the zero Jitter means off.
+func (a *Account) PickPace() stealth.Jitter {
+	if p := a.pickPace.Load(); p != nil {
+		return *p
+	}
+	return stealth.Jitter{}
+}
+
+// pickGap draws one gap from a normalised range. A var only so tests can pin
+// the draw.
+var pickGap = func(j stealth.Jitter) time.Duration {
+	if j.Max <= j.Min {
+		return j.Min // fixed gap; Jitter.Duration would return 0
+	}
+	return j.Duration()
+}
+
+// intervalStamp is a successful pick reservation: last/next are the values it
+// wrote, prevLast/prevNext what it replaced, so a pick refused by a later
+// filter can give the reservation back.
+type intervalStamp struct{ prevLast, prevNext, last, next time.Time }
+
+// tryReserveInterval is the pace filter: it reports whether the account may be
+// picked now and, in the same critical section, stamps the pick and draws the
+// gap to the next one (stored as the time the account is next allowed, so a
+// waiter's wake time is exactly the gate). Two concurrent picks cannot both
+// pass. Off (the default) it is one atomic load, no lock. A pick refused by a
+// later filter must give the stamp back via unreserveInterval, otherwise a
+// pick that never happened would delay the next one (and, were the budget
+// spent first, a refused pick would inflate spend, the class of #129).
+//
+// The range is an atomic.Pointer to an immutable Jitter (nil = off): a
+// two-field value cannot be read atomically, a pointer to a fresh copy can.
+// It is re-read under a.mu, so a range changed after the fast-path load is
+// seen by the check.
+func (a *Account) tryReserveInterval() (intervalStamp, bool) {
+	if a.pickPace.Load() == nil {
+		return intervalStamp{}, true
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	p := a.pickPace.Load()
+	if p == nil {
+		return intervalStamp{}, true
+	}
+	now := a.nowLocked()
+	if now.Before(a.nextPick) {
+		return intervalStamp{}, false
+	}
+	r := intervalStamp{prevLast: a.lastPick, prevNext: a.nextPick, last: now, next: now.Add(pickGap(*p))}
+	a.lastPick, a.nextPick = r.last, r.next
+	return r, true
+}
+
+// unreserveInterval undoes tryReserveInterval for a pick that a later filter
+// refused. It restores the previous values only if no later pick has stamped
+// since (a zero reservation, pace off, is a no-op).
+func (a *Account) unreserveInterval(r intervalStamp) {
+	if r.last.IsZero() {
+		return
+	}
+	a.mu.Lock()
+	if a.lastPick.Equal(r.last) {
+		a.lastPick, a.nextPick = r.prevLast, r.prevNext
+	}
+	a.mu.Unlock()
+}
+
+// intervalRemaining returns how long until the pace lets this account be
+// picked again, or 0 when it is off or already elapsed. A duration, not a
+// time: it is measured on the account clock and the caller adds it to its own
+// clock. Read-only.
+func (a *Account) intervalRemaining() time.Duration {
+	if a.pickPace.Load() == nil {
+		return 0
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if d := a.nextPick.Sub(a.nowLocked()); d > 0 {
+		return d
+	}
+	return 0
 }
 
 // tryAcquireFlight takes one in-flight slot when the account is below limit.

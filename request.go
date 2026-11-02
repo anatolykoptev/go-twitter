@@ -88,7 +88,10 @@ const flightCapPoll = 500 * time.Millisecond
 // and no timed wake on rate limits or proxy backoff — only cap-blocked accounts
 // are waited on. The endpoint-fault retry and the guest-eligible endpoints use
 // it: they want "an account usable NOW, or a slot to free", never a long sleep.
-func (c *Client) nextAccountWithWait(ctx context.Context, endpoint string, filter func(*Account) bool, capWaitable func(*Account) bool, capOnly bool, deadline time.Time) (acc *Account, err error) {
+// The one timed wake they keep is for paceWaitable accounts — blocked only by
+// their pick pace (Account.SetPickPace) — which wait for exactly the end of the
+// drawn gap, ctx- and deadline-bounded.
+func (c *Client) nextAccountWithWait(ctx context.Context, endpoint string, filter func(*Account) bool, capWaitable, paceWaitable func(*Account) bool, capOnly bool, deadline time.Time) (acc *Account, err error) {
 	// twitter.client.pool.wait.duration: one sample per call that actually
 	// waited (slept for a usable account), labelled by how the wait ended.
 	var waited time.Duration
@@ -128,6 +131,13 @@ func (c *Client) nextAccountWithWait(ctx context.Context, endpoint string, filte
 			wake, ok := c.nextUsableAt(endpoint)
 			wait = time.Until(wake)
 			timed = ok && wait > 0 && wait <= time.Until(deadline)
+		} else if rem, ok := c.nextPaceWait(paceWaitable); ok {
+			// Cap-only picks never sleep for an endpoint limit or a hold, but
+			// an account refused ONLY by its pick pace (Account.SetPickPace)
+			// has a short, exact wake: wait it out instead of failing or
+			// falling to the guest token.
+			wait = rem
+			timed = wait <= time.Until(deadline)
 		}
 		// With no timed wake to honour, an account blocked only by its
 		// in-flight cap can still be served the moment a slot frees.
@@ -185,6 +195,24 @@ func (c *Client) nextAccountWithWait(ctx context.Context, endpoint string, filte
 	}
 }
 
+// nextPaceWait returns the shortest remaining pick-pace gap among the ACTIVE
+// accounts that paceWaitable accepts (blocked only by the pace). ok is false
+// when no such account has a gap left.
+func (c *Client) nextPaceWait(paceWaitable func(*Account) bool) (wait time.Duration, ok bool) {
+	if paceWaitable == nil {
+		return 0, false
+	}
+	for _, a := range c.pool.Items() {
+		if !a.IsActive() || !paceWaitable(a) {
+			continue
+		}
+		if rem := a.intervalRemaining(); rem > 0 && (!ok || rem < wait) {
+			wait, ok = rem, true
+		}
+	}
+	return wait, ok
+}
+
 // anyCapWaitable reports whether some ACTIVE account is blocked only by its
 // in-flight cap for this call — it could serve the moment a slot frees, so a
 // timed wake on rate limits/cooldowns is not the only way forward.
@@ -226,6 +254,14 @@ func (c *Client) nextUsableAt(endpoint string) (at time.Time, ok bool) {
 			ready = acc.proxyBackoff
 		}
 		acc.mu.Unlock()
+		if rem := acc.intervalRemaining(); rem > 0 {
+			// Pick-pace wake: the waiter sleeps to exactly the end of the drawn
+			// gap. rem is measured on the account clock, then placed on this
+			// loop's clock.
+			if iv := now.Add(rem); iv.After(ready) {
+				ready = iv
+			}
+		}
 		consider(ready)
 	}
 	return earliest, anyActive && !earliest.IsZero()
@@ -270,10 +306,23 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 		if endpointFaulted[a.ID()] || !time.Now().After(a.proxyBackoff) || !a.tryAcquireFlight(flightLimit) {
 			return false
 		}
+		// The minimum-interval check+stamp (Account.SetMinInterval) sits
+		// BEFORE the consuming AllowRequest, so an account refused for being
+		// too soon never spends rate-limit budget (#129); the in-flight slot
+		// is returned on that refusal.
+		rsv, ok := a.tryReserveInterval()
+		if !ok {
+			if flightLimit > 0 {
+				a.releaseFlight()
+			}
+			return false
+		}
 		// The slot is taken BEFORE the consuming AllowRequest, so a refused
 		// slot never burns a rate-limit slot; a refused AllowRequest returns
-		// the slot it just took.
+		// the slot it just took and the interval stamp (a pick that was not
+		// made must not delay the next one).
 		if !a.AllowRequest(endpoint) {
+			a.unreserveInterval(rsv)
 			if flightLimit > 0 {
 				a.releaseFlight()
 			}
@@ -295,6 +344,17 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 	// failing or waiting out a timed wake that cannot free a slot.
 	capWaitable := func(a *Account) bool {
 		return a.flightFull(flightLimit) &&
+			!endpointFaulted[a.ID()] &&
+			!a.IsEndpointRateLimited(endpoint) &&
+			time.Now().After(a.proxyBackoff)
+	}
+
+	// paceWaitable is the read-only twin for the cap-only paths: an account
+	// whose ONLY blocker is its pick pace (not faulted, not endpoint-limited or
+	// held, not proxy-backed-off). Those paths wait for it; they still never
+	// wait for a limit or a hold.
+	paceWaitable := func(a *Account) bool {
+		return a.intervalRemaining() > 0 &&
 			!endpointFaulted[a.ID()] &&
 			!a.IsEndpointRateLimited(endpoint) &&
 			time.Now().After(a.proxyBackoff)
@@ -342,15 +402,15 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 		var accErr error
 
 		if requiresAuth(endpoint) && !rotateNow {
-			acc, accErr = c.nextAccountWithWait(ctx, endpoint, poolFilter, capWaitable, false, waitDeadline)
+			acc, accErr = c.nextAccountWithWait(ctx, endpoint, poolFilter, capWaitable, paceWaitable, false, waitDeadline)
 		} else {
 			acc, accErr = c.pool.Next(poolFilter)
 			// Cap saturation is transient: an endpoint-fault retry and a
 			// guest-eligible endpoint wait (cap-only, ctx- and budget-bounded)
 			// for a slot instead of failing with "pool exhausted" or silently
 			// downgrading to a guest token. Faulted accounts stay excluded.
-			if accErr != nil && ctx.Err() == nil && c.anyCapWaitable(capWaitable) {
-				acc, accErr = c.nextAccountWithWait(ctx, endpoint, poolFilter, capWaitable, true, waitDeadline)
+			if accErr != nil && ctx.Err() == nil && (c.anyCapWaitable(capWaitable) || c.anyCapWaitable(paceWaitable)) {
+				acc, accErr = c.nextAccountWithWait(ctx, endpoint, poolFilter, capWaitable, paceWaitable, true, waitDeadline)
 			}
 		}
 		if accErr != nil {
