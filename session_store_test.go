@@ -122,7 +122,7 @@ func newRotatingClient(t *testing.T, cfg ClientConfig, accSpec string) *Client {
 	c, err := NewClient(cfg)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
-	c.client = startFakeX(t, rotatingFakeX)
+	adoptFakeX(c, startFakeX(t, rotatingFakeX))
 	c.xtidMgr = xtid.NewManager(failFetcher{})
 	c.cfg.DisableGuestFallback = true
 	return c
@@ -184,7 +184,7 @@ func TestSessionStore_WithSocialMakesZeroStoreCalls(t *testing.T) {
 	rec := newRecordingStore()
 	bc := startFakeX(t, rotatingFakeX)
 	testHookSocialClient = func(c *Client) {
-		c.client = bc
+		adoptFakeX(c, bc)
 		c.xtidMgr = xtid.NewManager(failFetcher{})
 		c.accountPacer = nil
 		c.cfg.SessionStore = rec

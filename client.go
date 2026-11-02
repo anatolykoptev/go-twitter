@@ -86,18 +86,26 @@ func NewClient(cfg ClientConfig, clientOpts ...ClientOption) (*Client, error) {
 	if cfg.DefaultProxy != "" {
 		opts = append(opts, stealth.WithProxy(cfg.DefaultProxy))
 	}
-	bc, err := stealth.NewClient(opts...)
+	bc, err := stealth.NewClient(append(opts, cfg.stealthOpts...)...)
 	if err != nil {
 		return nil, fmt.Errorf("stealth client: %w", err)
 	}
 
-	// Per-account transports for accounts pinned to their own proxy. A build
-	// failure disables only that account (a pooled consumer's shared client
-	// must survive one malformed proxy row) and NewClient fails only when no
-	// account is usable. Fail-closed is kept: the failed account is marked
+	// One transport per account. Every account owns its own stealth client, and
+	// with it its own cookie jar: a set-cookie on a response to account A can
+	// never ride on account B's next request (fhttp appends jar cookies to the
+	// explicit cookie header). An account without its own Proxy gets
+	// cfg.DefaultProxy, so its egress is unchanged. The shared client above
+	// serves only the account-less paths (guest token, warm fetches without an
+	// account).
+	//
+	// A build failure disables only that account (a pooled consumer's shared
+	// client must survive one malformed proxy row) and NewClient fails only when
+	// no account is usable. Fail-closed is kept: the failed account is marked
 	// permanently unselectable (IsActive) and clientForAccount refuses to lend
-	// it the shared client, which may be direct (the *WithSocial path sets no
-	// DefaultProxy) and would send its auth_token/ct0 from this host's IP.
+	// a proxy-pinned account the shared client, which may be direct (the
+	// *WithSocial path sets no DefaultProxy) and would send its auth_token/ct0
+	// from this host's IP.
 	//
 	// go-stealth's BrowserClient exposes no Close/CloseIdleConnections, so the
 	// clients built before an error return below cannot be released explicitly;
@@ -105,18 +113,21 @@ func NewClient(cfg ClientConfig, clientOpts ...ClientOption) (*Client, error) {
 	var buildErrs []error
 	usable := 0
 	for _, acc := range cfg.Accounts {
-		if acc.Proxy == "" {
-			usable++
-			continue
+		accProxy := acc.Proxy
+		if accProxy == "" {
+			accProxy = cfg.DefaultProxy
 		}
-		accClient, err := stealth.NewClient(
-			stealth.WithProxy(acc.Proxy),
+		accOpts := []stealth.ClientOption{
 			stealth.WithProfile(acc.Profile.TLSProfile),
 			stealth.WithHeaderOrder(twitterHeaderOrder),
-		)
+		}
+		if accProxy != "" {
+			accOpts = append(accOpts, stealth.WithProxy(accProxy))
+		}
+		accClient, err := stealth.NewClient(append(accOpts, cfg.stealthOpts...)...)
 		if err != nil {
 			acc.markProxyClientFailed()
-			label, reason := proxyBuildFailure(acc.Proxy)
+			label, reason := proxyBuildFailure(accProxy)
 			buildErrs = append(buildErrs, fmt.Errorf("per-account client for %s: %s", acc.Username, reason))
 			slog.Warn("per-account proxy client build failed, account disabled",
 				slog.String("user", acc.Username), slog.String("proxy", label), slog.String("error", reason))
@@ -285,6 +296,16 @@ func (c *Client) clientForAccount(acc *Account) (*stealth.BrowserClient, error) 
 	return c.client, nil
 }
 
+// usesOwnProxy reports whether an attempt served by acc went through the
+// account's own pinned proxy. Every account owns a client, so client identity
+// no longer says anything about the proxy; the account's Proxy field does, the
+// same gate attributeTransportError and the proxy-backoff paths use. nil (a
+// guest-token attempt) and an account on the shared DefaultProxy are not
+// proxied in this sense: their transport failures are not proxy-attributable.
+func usesOwnProxy(acc *Account) bool {
+	return acc != nil && acc.Proxy != ""
+}
+
 // flightCap returns the per-account in-flight cap (ClientConfig
 // .MaxInFlightPerAccount); <= 0 disables it. NewClient turns the zero value
 // into the default, so <= 0 here means either explicitly disabled or a
@@ -364,7 +385,7 @@ func (c *Client) observedPoolReq(ctx context.Context, acc *Account, endpoint str
 	start := time.Now()
 	body, hdrs, status, err := c.doPoolReq(ctx, bc, method, urlStr, payload, headers)
 	currentCall(ctx).done(status, len(body))
-	outcome := attemptOutcome(status, body, hdrs, err, bc != c.client)
+	outcome := attemptOutcome(status, body, hdrs, err, usesOwnProxy(acc))
 	c.metrics.recordRequest(endpoint, time.Since(start), outcome)
 	c.emitRequestEvent(acc, endpoint, status, outcome, hdrs)
 	return body, hdrs, status, err
@@ -375,7 +396,7 @@ func (c *Client) observedPoolReq(ctx context.Context, acc *Account, endpoint str
 func (c *Client) observedRequestWithBody(ctx context.Context, acc *Account, endpoint string, bc *stealth.BrowserClient, method, urlStr string, headers map[string]string, body io.Reader) ([]byte, map[string]string, int, error) {
 	start := time.Now()
 	respBody, hdrs, status, err := c.doRequestWithBody(ctx, bc, method, urlStr, headers, body)
-	outcome := attemptOutcome(status, respBody, hdrs, err, bc != c.client)
+	outcome := attemptOutcome(status, respBody, hdrs, err, usesOwnProxy(acc))
 	c.metrics.recordRequest(endpoint, time.Since(start), outcome)
 	c.emitRequestEvent(acc, endpoint, status, outcome, hdrs)
 	return respBody, hdrs, status, err
@@ -394,7 +415,7 @@ func (c *Client) observedRequest(ctx context.Context, acc *Account, endpoint str
 func (c *Client) observedMediaReq(ctx context.Context, acc *Account, bc *stealth.BrowserClient, method, urlStr string, payload []byte, headers map[string]string) ([]byte, map[string]string, int, error) {
 	start := time.Now()
 	body, hdrs, status, err := c.doPoolReq(ctx, bc, method, urlStr, payload, headers)
-	outcome := attemptOutcome(status, body, hdrs, err, bc != c.client)
+	outcome := attemptOutcome(status, body, hdrs, err, usesOwnProxy(acc))
 	c.metrics.recordRequest(epUploadMedia, time.Since(start), outcome)
 	c.emitRequestEvent(acc, epUploadMedia, status, outcome, hdrs)
 	return body, hdrs, status, err

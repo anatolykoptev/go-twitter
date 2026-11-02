@@ -75,7 +75,7 @@ func TestWithSocial_LeasedCredentialsBeatStaleDiskSession(t *testing.T) {
 	rec := &cookieRecorder{}
 	bc := startFakeX(t, rec.handler)
 	testHookSocialClient = func(c *Client) {
-		c.client = bc
+		adoptFakeX(c, bc)
 		c.xtidMgr = xtid.NewManager(failFetcher{})
 		c.accountPacer = nil
 	}
@@ -124,7 +124,7 @@ func TestParseAccounts_FreshDiskSessionBeatsStaticConfigToken(t *testing.T) {
 	c, err := NewClient(ClientConfig{Accounts: accs, SessionDir: dir, skipPoolGauge: true})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
-	c.client = bc
+	adoptFakeX(c, bc)
 	c.xtidMgr = xtid.NewManager(failFetcher{})
 	c.cfg.DisableGuestFallback = true
 

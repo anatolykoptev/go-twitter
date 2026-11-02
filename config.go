@@ -199,6 +199,11 @@ type ClientConfig struct {
 	// gauge has no per-client attribute, so a one-account per-call client would
 	// overwrite the series of the long-lived pool (see docs/metrics.md).
 	skipPoolGauge bool
+
+	// stealthOpts are appended to the options of every stealth client NewClient
+	// builds, shared and per-account. Test seam: a fake X on loopback needs
+	// stealth.WithoutSSRFGuard() on the clients NewClient itself constructs.
+	stealthOpts []stealth.ClientOption
 }
 
 // defaults fills in zero-value config fields with sensible defaults.

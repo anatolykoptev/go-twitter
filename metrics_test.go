@@ -119,6 +119,19 @@ func startFakeX(t *testing.T, handler http.HandlerFunc) *stealth.BrowserClient {
 	return bc
 }
 
+// adoptFakeX points a NewClient-built Client at a fake-X transport: the shared
+// client and every account's own client (NewClient gives each account one, and
+// those carry the SSRF guard, so loopback fake servers are unreachable through
+// them). Accounts without a client of their own stay that way.
+func adoptFakeX(c *Client, bc *stealth.BrowserClient) {
+	c.client = bc
+	for _, acc := range c.cfg.Accounts {
+		if acc.client != nil {
+			acc.client = bc
+		}
+	}
+}
+
 func (f *metricsFixture) collect(t *testing.T) map[string]metricdata.Metrics {
 	t.Helper()
 	var rm metricdata.ResourceMetrics
@@ -624,7 +637,7 @@ func TestNewClient_WiresMetrics(t *testing.T) {
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
-	c.client = bc
+	adoptFakeX(c, bc)
 	c.xtidMgr = xtid.NewManager(failFetcher{})
 
 	_, err = c.GetUserTweets(context.Background(), "999", 20)
