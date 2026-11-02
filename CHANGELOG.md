@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.1](https://github.com/anatolykoptev/go-twitter/compare/v0.8.0...v0.8.1) (2026-11-02)
+
+
+### Features
+
+* **deps:** move to Go 1.27 and release connections on Client.Close ([#141](https://github.com/anatolykoptev/go-twitter/issues/141)) ([1e5c968](https://github.com/anatolykoptev/go-twitter/commit/1e5c968a7fff5d2f464a024535a902ab15b09e0d))
+
 ## [0.8.0](https://github.com/anatolykoptev/go-twitter/compare/v0.7.2...v0.8.0) (2026-11-02)
 
 
