@@ -283,13 +283,13 @@ func (g *gateFetcher) Fetch(ctx context.Context, u string) ([]byte, error) {
 	return g.inner.Fetch(ctx, u)
 }
 
-// A background queryId refresh is still running on the Client's account client
-// when the *WithSocial call returns and Close runs. Close must neither fail nor
-// disturb it: the refresh finishes, succeeds, and records no failure.
+// Proves: a queryId refresh that is in flight on the Client's account client
+// when Client.Close runs succeeds and records no failure (no failing state, no
+// backoff streak, no alert). The refresh's first fetch is a real request parked
+// on the loopback server across the Close.
 //
-// Mutation: metrics.go Client.Close — close the BrowserClients themselves
-// (bc.Close()) instead of CloseIdleConnections. See the report: on loopback
-// this does not go RED.
+// It does not prove that Close avoids BrowserClient.Close: on loopback that
+// variant also passes this test. It says nothing about the xtid refresh.
 func TestClientClose_BackgroundRefreshInFlightIsNotFailed(t *testing.T) {
 	gate := make(chan struct{})
 	srv, cc := startCountedX(t, gate)
