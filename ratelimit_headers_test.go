@@ -2,6 +2,7 @@ package twitter
 
 import (
 	"context"
+	"github.com/anatolykoptev/go-twitter/internal/queryid"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -133,7 +134,7 @@ func newRLClient(t *testing.T, n, perEndpointCap int, clk *rlFakeClock) (*Client
 		xpffGen: xpff.New("test-guest-id", defaultUserAgent),
 		cfg:     ClientConfig{DisableGuestFallback: true, BanCooldown: time.Hour, AuthCooldown: time.Hour},
 		// warm fetches must not reach the real x.com
-		qid:              newQIDRefresher(qidConfig{disabled: true}),
+		qid:              queryid.New(queryid.Config{Disabled: true}),
 		warmDoerOverride: &fakeWarmBackend{},
 	}, accs
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"github.com/anatolykoptev/go-twitter/internal/queryid"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -53,22 +54,22 @@ func (c *qidClock) Advance(d time.Duration) { c.ns.Add(int64(d)) }
 // useQIDRefresher installs an ENABLED process-wide refresher with the
 // production constants and a fake clock, and a clean active snapshot; both are
 // restored afterwards.
-func useQIDRefresher(t *testing.T) (*qidRefresher, *qidClock) {
+func useQIDRefresher(t *testing.T) (*queryid.Refresher, *qidClock) {
 	t.Helper()
 	clk := newQIDClock()
-	r := newQIDRefresher(qidConfig{
-		ttl: qidRefreshTTL, faultWindow: qidFaultWindow, minInterval: qidMinInterval,
-		timeout: 30 * time.Second, faultThreshold: qidFaultThreshold,
+	r := queryid.New(queryid.Config{
+		TTL: queryid.RefreshTTL, FaultWindow: queryid.FaultWindow, MinInterval: queryid.MinInterval,
+		Timeout: 30 * time.Second, FaultThreshold: queryid.FaultThreshold,
 	})
-	r.now = clk.Now
-	r.started = clk.Now()
-	prev, prevSnap := processQIDPtr.Load(), activeQID.Load()
+	r.Now = clk.Now
+	r.Started = clk.Now()
+	prev, prevSnap := processQIDPtr.Load(), queryid.Active.Load()
 	processQIDPtr.Store(r)
-	activeQID.Store(nil)
+	queryid.Active.Store(nil)
 	t.Cleanup(func() {
-		r.wg.Wait()
+		r.WG.Wait()
 		processQIDPtr.Store(prev)
-		activeQID.Store(prevSnap)
+		queryid.Active.Store(prevSnap)
 	})
 	return r, clk
 }
@@ -267,20 +268,20 @@ func TestQIDRefresh_F1_RetiredIDRecoversAfterKFaults(t *testing.T) {
 	// A healthy call: the first authenticated request refreshes once, with the
 	// bundle still declaring the compiled ids.
 	require.NoError(t, c.search(ctx))
-	r.wg.Wait()
+	r.WG.Wait()
 	require.Equal(t, 1, w.bundleFetches(), "the first authenticated request refreshes once")
-	require.NotNil(t, activeQID.Load())
+	require.NotNil(t, queryid.Active.Load())
 
 	// X retires the id; well past the minimum interval, still inside the TTL.
 	w.retire("SearchTimeline", qidNewSearch)
-	clk.Advance(qidMinInterval + time.Minute)
+	clk.Advance(queryid.MinInterval + time.Minute)
 
-	for i := 0; i < qidFaultThreshold; i++ {
+	for i := 0; i < queryid.FaultThreshold; i++ {
 		err := c.search(ctx)
 		require.ErrorIs(t, err, ErrEndpoint, "call %d must fault on the retired id", i)
 		clk.Advance(5 * time.Second) // inside the fault window
 	}
-	r.wg.Wait()
+	r.WG.Wait()
 	require.Equal(t, 2, w.bundleFetches(), "K faults on one op must trigger exactly one refresh")
 
 	require.NoError(t, c.search(ctx), "the call after the refresh must use the new id")
@@ -306,18 +307,18 @@ func TestQIDRefresh_F8_WritePathFaultsTriggerRefresh(t *testing.T) {
 	}
 
 	require.NoError(t, post())
-	r.wg.Wait()
-	require.EqualValues(t, 1, r.attempts.Load())
+	r.WG.Wait()
+	require.EqualValues(t, 1, r.Attempts.Load())
 
 	const newCreate = "NewCreateID_0003"
 	w.retire("CreateTweet", newCreate)
-	clk.Advance(qidMinInterval + time.Minute)
-	for i := 0; i < qidFaultThreshold; i++ {
+	clk.Advance(queryid.MinInterval + time.Minute)
+	for i := 0; i < queryid.FaultThreshold; i++ {
 		require.ErrorIs(t, post(), ErrEndpoint, "write %d must fault on the retired id", i)
 		clk.Advance(5 * time.Second)
 	}
-	r.wg.Wait()
-	require.EqualValues(t, 2, r.attempts.Load(), "K write faults must trigger one refresh")
+	r.WG.Wait()
+	require.EqualValues(t, 2, r.Attempts.Load(), "K write faults must trigger one refresh")
 
 	require.NoError(t, post(), "the next write uses the refreshed id")
 	ids := w.requestedIDs()
@@ -350,11 +351,11 @@ func TestQIDRefresh_F2_SocialLeaseTwoServedByLeaseOneRefresh(t *testing.T) {
 		clientsMu.Unlock()
 	}
 	waitAll := func() {
-		r.wg.Wait()
+		r.WG.Wait()
 		clientsMu.Lock()
 		defer clientsMu.Unlock()
 		for _, c := range clients {
-			c.qidRefresh().wg.Wait()
+			c.qidRefresh().WG.Wait()
 		}
 	}
 
@@ -368,7 +369,7 @@ func TestQIDRefresh_F2_SocialLeaseTwoServedByLeaseOneRefresh(t *testing.T) {
 	// Past the shared chunk cache and the observed-page lifetime, inside the TTL:
 	// a second refresh by lease 2 could no longer hide behind either and would
 	// have to hit X again.
-	clk.Advance(qidObservedPageMaxAge + time.Minute)
+	clk.Advance(queryid.ObservedPageMaxAge + time.Minute)
 
 	// Lease 2 is a brand-new Client on another account: it must use the refreshed id.
 	user, err := GetUserWithSocial(context.Background(), rig.sc, "tesla")
@@ -378,7 +379,7 @@ func TestQIDRefresh_F2_SocialLeaseTwoServedByLeaseOneRefresh(t *testing.T) {
 
 	assert.Equal(t, 1, w.bundleFetches(), "one refresh serves both leases: the bundle is fetched once")
 	assert.Equal(t, 1, w.pageFetches(), "xtid's warm-page fetch is shared with the refresh and not repeated by lease 2")
-	assert.EqualValues(t, 1, r.attempts.Load(), "lease 2 must not start a refresh of its own")
+	assert.EqualValues(t, 1, r.Attempts.Load(), "lease 2 must not start a refresh of its own")
 	ids := w.requestedIDs()
 	require.Len(t, ids, 2)
 	assert.Equal(t, qidNewUser, ids[1])
@@ -398,10 +399,10 @@ func TestQIDRefresh_F3a_TooFewOperationsChangesNothing(t *testing.T) {
 		w.advertised = map[string]string{"SearchTimeline": qidNewSearch, "UserByScreenName": Endpoints["UserByScreenName"].ID}
 	})
 	_ = c.search(ctxTimeout(t)) // first authenticated request: the refresh runs on a partial bundle
-	r.wg.Wait()
+	r.WG.Wait()
 
 	require.GreaterOrEqual(t, w.bundleFetches(), 1, "the refresh must have read the bundle")
-	assert.Nil(t, activeQID.Load(), "a partial bundle must not half-apply")
+	assert.Nil(t, queryid.Active.Load(), "a partial bundle must not half-apply")
 	assert.Equal(t, Endpoints["SearchTimeline"].ID, endpointFor("SearchTimeline").ID)
 }
 
@@ -418,10 +419,10 @@ func TestQIDRefresh_F3b_MalformedIDRejectsWholeBundle(t *testing.T) {
 	w.retire("SearchTimeline", qidNewSearch)
 	w.set(func(w *qidWorld) { w.extraJS = `{queryId:"BAD/ID",operationName:"UserTweets"},` })
 	_ = c.search(ctxTimeout(t))
-	r.wg.Wait()
+	r.WG.Wait()
 
 	require.GreaterOrEqual(t, w.bundleFetches(), 1)
-	assert.Nil(t, activeQID.Load(), "a bundle carrying a malformed id must change nothing, not even the well-formed ops")
+	assert.Nil(t, queryid.Active.Load(), "a bundle carrying a malformed id must change nothing, not even the well-formed ops")
 }
 
 // F3c — validation: the id alphabet is enforced by the validator itself, not
@@ -438,11 +439,11 @@ func TestQIDRefresh_F3c_ValidatorEnforcesIDAlphabet(t *testing.T) {
 	require.True(t, gqlextract.QueryIDRe.MatchString(extracted["SearchTimeline"]))
 	extracted["SearchTimeline"] = "../../etc/passwd"
 
-	_, err := validateQIDs(known, extracted, func(string) bool { return false })
-	require.ErrorIs(t, err, errQIDRejected)
+	_, err := queryid.ValidateIDs(known, extracted, func(string) bool { return false })
+	require.ErrorIs(t, err, queryid.ErrRejected)
 
 	extracted["SearchTimeline"] = qidNewSearch
-	got, err := validateQIDs(known, extracted, func(string) bool { return false })
+	got, err := queryid.ValidateIDs(known, extracted, func(string) bool { return false })
 	require.NoError(t, err)
 	assert.Equal(t, qidNewSearch, got["SearchTimeline"])
 }
@@ -467,10 +468,10 @@ func TestQIDRefresh_F4_EnvOverrideBeatsRefreshedID(t *testing.T) {
 	ctx := ctxTimeout(t)
 
 	require.NoError(t, c.search(ctx))
-	r.wg.Wait()
-	snap := activeQID.Load()
+	r.WG.Wait()
+	snap := queryid.Active.Load()
 	require.NotNil(t, snap, "the refresh must have applied")
-	require.Equal(t, qidNewSearch, snap.ids["SearchTimeline"], "the refreshed id is in the snapshot ...")
+	require.Equal(t, qidNewSearch, snap.IDs["SearchTimeline"], "the refreshed id is in the snapshot ...")
 
 	require.NoError(t, c.search(ctx), "... but the operator's pin still serves requests")
 	ids := w.requestedIDs()
@@ -485,7 +486,7 @@ func TestQIDRefresh_F4_EnvOverrideBeatsRefreshedID(t *testing.T) {
 func TestQIDRefresh_F5_FetchFailureKeepsLastGoodMap(t *testing.T) {
 	r, clk := useQIDRefresher(t)
 	var alerts atomic.Int32
-	r.setAlertHook(func(topic string, _ any) {
+	r.SetAlertHook(func(topic string, _ any) {
 		if topic == "queryid.refresh_failed" {
 			alerts.Add(1)
 		}
@@ -496,31 +497,31 @@ func TestQIDRefresh_F5_FetchFailureKeepsLastGoodMap(t *testing.T) {
 	ctx := ctxTimeout(t)
 
 	_ = c.search(ctx) // first request: 404 on the compiled id; the first-trigger refresh learns the new one
-	r.wg.Wait()
-	good := activeQID.Load()
+	r.WG.Wait()
+	good := queryid.Active.Load()
 	require.NotNil(t, good)
 	require.NoError(t, c.search(ctx), "calls use the refreshed id")
 
 	// The TTL elapses and X stops serving the bundle: the refresh fails.
 	w.set(func(w *qidWorld) { w.failFetch = true })
 	for i := 0; i < 3; i++ {
-		clk.Advance(qidRefreshTTL + time.Hour)
+		clk.Advance(queryid.RefreshTTL + time.Hour)
 		require.NoError(t, c.search(ctx), "calls keep working on the last good map")
-		r.wg.Wait()
+		r.WG.Wait()
 	}
-	assert.Same(t, good, activeQID.Load(), "a failed refresh must not touch the active map")
+	assert.Same(t, good, queryid.Active.Load(), "a failed refresh must not touch the active map")
 	assert.EqualValues(t, 1, alerts.Load(), "three failures in a row alert once, not per attempt")
 
 	// Recovery re-arms the alert.
 	w.set(func(w *qidWorld) { w.failFetch = false })
 	clk.Advance(2 * time.Hour) // past the failure backoff (3 failures: 60 min)
 	require.NoError(t, c.search(ctx))
-	r.wg.Wait()
-	assert.NotSame(t, good, activeQID.Load(), "the next success replaces the map")
+	r.WG.Wait()
+	assert.NotSame(t, good, queryid.Active.Load(), "the next success replaces the map")
 	w.set(func(w *qidWorld) { w.failFetch = true })
-	clk.Advance(qidRefreshTTL + time.Hour)
+	clk.Advance(queryid.RefreshTTL + time.Hour)
 	require.NoError(t, c.search(ctx))
-	r.wg.Wait()
+	r.WG.Wait()
 	assert.EqualValues(t, 2, alerts.Load(), "a new ok->failed transition alerts again")
 }
 
@@ -536,13 +537,13 @@ func TestQIDRefresh_F6_FaultStormRefreshesOncePerInterval(t *testing.T) {
 	ctx := ctxTimeout(t)
 
 	require.NoError(t, c.search(ctx))
-	r.wg.Wait()
-	base := r.attempts.Load() // the first-trigger refresh
+	r.WG.Wait()
+	base := r.Attempts.Load() // the first-trigger refresh
 	require.EqualValues(t, 1, base)
 
 	// X breaks the id and the bundle does not advertise a fix: faults never stop.
 	w.set(func(w *qidWorld) { w.live["SearchTimeline"] = "XBrokeIt_0001" })
-	clk.Advance(qidMinInterval + time.Minute)
+	clk.Advance(queryid.MinInterval + time.Minute)
 
 	var wg sync.WaitGroup
 	for i := 0; i < 50; i++ {
@@ -550,17 +551,17 @@ func TestQIDRefresh_F6_FaultStormRefreshesOncePerInterval(t *testing.T) {
 		go func() { defer wg.Done(); _ = c.search(ctx) }()
 	}
 	wg.Wait()
-	r.wg.Wait()
+	r.WG.Wait()
 	// Count refresh RUNS, not chunk fetches: the shared chunk cache can serve a
 	// repeated walk from memory, which would hide a storm.
-	assert.Equal(t, base+1, r.attempts.Load(), "50 concurrent faults trigger one refresh")
+	assert.Equal(t, base+1, r.Attempts.Load(), "50 concurrent faults trigger one refresh")
 
 	clk.Advance(10 * time.Second)
 	for i := 0; i < 50; i++ {
 		_ = c.search(ctx)
 	}
-	r.wg.Wait()
-	assert.Equal(t, base+1, r.attempts.Load(), "faults inside the interval must not refresh again")
+	r.WG.Wait()
+	assert.Equal(t, base+1, r.Attempts.Load(), "faults inside the interval must not refresh again")
 }
 
 // F7 — the refresh metric records trigger and result, plus the changed-ids and
@@ -581,11 +582,11 @@ func TestQIDRefresh_F7_MetricRecordsTriggerAndResult(t *testing.T) {
 	ctx := ctxTimeout(t)
 
 	_ = c.search(ctx) // first trigger, ok, 1 id changed
-	r.wg.Wait()
+	r.WG.Wait()
 	w.set(func(w *qidWorld) { w.failFetch = true })
-	clk.Advance(qidRefreshTTL + time.Hour)
+	clk.Advance(queryid.RefreshTTL + time.Hour)
 	_ = c.search(ctx) // ttl trigger, fetch_failed
-	r.wg.Wait()
+	r.WG.Wait()
 
 	var rm metricdata.ResourceMetrics
 	require.NoError(t, reader.Collect(context.Background(), &rm))
@@ -613,7 +614,7 @@ func TestQIDRefresh_F7_MetricRecordsTriggerAndResult(t *testing.T) {
 	age, ok := got[telemetry.MetricQIDAge].Data.(metricdata.Gauge[float64])
 	require.True(t, ok)
 	require.NotEmpty(t, age.DataPoints)
-	assert.Greater(t, age.DataPoints[len(age.DataPoints)-1].Value, qidRefreshTTL.Seconds(),
+	assert.Greater(t, age.DataPoints[len(age.DataPoints)-1].Value, queryid.RefreshTTL.Seconds(),
 		"the age gauge reports how long the active map has been in force")
 }
 
@@ -625,12 +626,12 @@ func TestQIDRefresh_TTLTriggerPicksUpARotation(t *testing.T) {
 	ctx := ctxTimeout(t)
 
 	require.NoError(t, c.search(ctx))
-	r.wg.Wait()
+	r.WG.Wait()
 	w.retire("SearchTimeline", qidNewSearch)
-	clk.Advance(qidRefreshTTL + time.Minute)
+	clk.Advance(queryid.RefreshTTL + time.Minute)
 
 	_ = c.search(ctx) // the request that finds the TTL elapsed still uses the old id ...
-	r.wg.Wait()
+	r.WG.Wait()
 	require.NoError(t, c.search(ctx), "... and the next one uses the id the TTL refresh learned")
 }
 
@@ -645,7 +646,7 @@ func TestQIDRefresh_FeaturesAdditiveAndGuarded(t *testing.T) {
 		w.set(func(w *qidWorld) { w.newFlag = true })
 		c, _ := newQIDClient(t, w, 1)
 		require.NoError(t, c.search(ctxTimeout(t)))
-		r.wg.Wait()
+		r.WG.Wait()
 
 		got := gqlFeatures()
 		assert.Equal(t, true, got[qidNewFlag])
@@ -664,12 +665,12 @@ func TestQIDRefresh_FeaturesAdditiveAndGuarded(t *testing.T) {
 		w.set(func(w *qidWorld) { w.newFlag, w.dropFlags = true, true })
 		c, _ := newQIDClient(t, w, 1)
 		_ = c.search(ctxTimeout(t))
-		r.wg.Wait()
+		r.WG.Wait()
 
-		snap := activeQID.Load()
+		snap := queryid.Active.Load()
 		require.NotNil(t, snap, "queryIds must apply even when the feature extraction is unusable")
-		assert.Equal(t, qidNewSearch, snap.ids["SearchTimeline"])
-		assert.Nil(t, snap.features)
+		assert.Equal(t, qidNewSearch, snap.IDs["SearchTimeline"])
+		assert.Nil(t, snap.Features)
 		assert.NotContains(t, gqlFeatures(), qidNewFlag)
 	})
 }
@@ -689,7 +690,7 @@ func TestQIDRefresh_F9_LaterPartialRefreshKeepsHealedOps(t *testing.T) {
 	ctx := ctxTimeout(t)
 
 	_ = c.search(ctx) // refresh 1 heals SearchTimeline
-	r.wg.Wait()
+	r.WG.Wait()
 	require.NoError(t, c.search(ctx))
 
 	// Refresh 2: the bundle lacks SearchTimeline but carries 10 other known ops.
@@ -706,12 +707,12 @@ func TestQIDRefresh_F9_LaterPartialRefreshKeepsHealedOps(t *testing.T) {
 			w.advertised[op] = Endpoints[op].ID
 		}
 	})
-	clk.Advance(qidRefreshTTL + time.Minute)
+	clk.Advance(queryid.RefreshTTL + time.Minute)
 	require.NoError(t, c.search(ctx)) // triggers the ttl refresh
-	r.wg.Wait()
-	require.EqualValues(t, 2, r.attempts.Load(), "the partial refresh must have run and been accepted")
+	r.WG.Wait()
+	require.EqualValues(t, 2, r.Attempts.Load(), "the partial refresh must have run and been accepted")
 
-	assert.Equal(t, qidNewSearch, activeQID.Load().ids["SearchTimeline"], "the healed id is carried forward")
+	assert.Equal(t, qidNewSearch, queryid.Active.Load().IDs["SearchTimeline"], "the healed id is carried forward")
 	require.NoError(t, c.search(ctx), "the call after the partial refresh still uses the healed id")
 }
 
@@ -732,38 +733,38 @@ func TestQIDRefresh_F10_FailuresBackOffExponentially(t *testing.T) {
 	c.metrics = newClientMetrics(mp)
 	ctx := ctxTimeout(t)
 
-	wantWaits := []time.Duration{qidMinInterval, 2 * qidMinInterval, 4 * qidMinInterval}
+	wantWaits := []time.Duration{queryid.MinInterval, 2 * queryid.MinInterval, 4 * queryid.MinInterval}
 	for i, want := range wantWaits {
 		require.NoError(t, c.search(ctx))
-		r.wg.Wait()
-		require.EqualValues(t, i+1, r.attempts.Load(), "attempt %d must run", i+1)
-		gap := time.Unix(0, r.nextAllowedNS.Load()).Sub(clk.Now())
+		r.WG.Wait()
+		require.EqualValues(t, i+1, r.Attempts.Load(), "attempt %d must run", i+1)
+		gap := time.Unix(0, r.NextAllowedNS.Load()).Sub(clk.Now())
 		assert.Equal(t, want, gap, "after failure %d the next attempt is allowed %s later", i+1, want)
 
 		// One minute short of the wait: still refused.
 		clk.Advance(want - time.Minute)
 		require.NoError(t, c.search(ctx))
-		r.wg.Wait()
-		require.EqualValues(t, i+1, r.attempts.Load(), "inside the backoff no attempt may run")
+		r.WG.Wait()
+		require.EqualValues(t, i+1, r.Attempts.Load(), "inside the backoff no attempt may run")
 		clk.Advance(2 * time.Minute)
 	}
 
 	// A fault storm cannot defeat the backoff either.
-	for i := 0; i < 3*qidFaultThreshold; i++ {
-		r.onEndpointFault("SearchTimeline", func() bundle.Fetcher { return nil }, c.metrics)
+	for i := 0; i < 3*queryid.FaultThreshold; i++ {
+		r.OnEndpointFault("SearchTimeline", func() bundle.Fetcher { return nil }, c.metrics.instruments())
 	}
-	require.EqualValues(t, len(wantWaits), r.attempts.Load())
+	require.EqualValues(t, len(wantWaits), r.Attempts.Load())
 
 	// Cap.
-	assert.Equal(t, qidMaxBackoff, r.backoff(40))
+	assert.Equal(t, queryid.MaxBackoff, r.Backoff(40))
 
 	// A success resets the spacing.
 	w.set(func(w *qidWorld) { w.failFetch = false })
-	clk.Advance(qidMaxBackoff)
+	clk.Advance(queryid.MaxBackoff)
 	require.NoError(t, c.search(ctx))
-	r.wg.Wait()
-	gap := time.Unix(0, r.nextAllowedNS.Load()).Sub(clk.Now())
-	assert.Equal(t, qidMinInterval, gap, "success resets the spacing to the minimum interval")
+	r.WG.Wait()
+	gap := time.Unix(0, r.NextAllowedNS.Load()).Sub(clk.Now())
+	assert.Equal(t, queryid.MinInterval, gap, "success resets the spacing to the minimum interval")
 
 	// The suppressed attempts were counted.
 	var rm metricdata.ResourceMetrics
@@ -773,7 +774,7 @@ func TestQIDRefresh_F10_FailuresBackOffExponentially(t *testing.T) {
 		for _, m := range sm.Metrics {
 			if sum, ok := m.Data.(metricdata.Sum[int64]); ok && m.Name == telemetry.MetricQIDRefreshes {
 				for _, p := range sum.DataPoints {
-					if attrMap(p.Attributes)[telemetry.AttrResult] == qidResultSuppressed {
+					if attrMap(p.Attributes)[telemetry.AttrResult] == queryid.ResultSuppressed {
 						suppressed += p.Value
 					}
 				}
@@ -795,17 +796,17 @@ func TestQIDRefresh_SuppressedFaultTriggerKeepsHistory(t *testing.T) {
 	f := instantFailFetcher{}
 	mk := func() bundle.Fetcher { return f }
 
-	r.nextAllowedNS.Store(clk.Now().Add(30 * time.Second).UnixNano()) // lifts inside the fault window
-	for i := 0; i < qidFaultThreshold; i++ {
-		r.onEndpointFault("SearchTimeline", mk, nil)
+	r.NextAllowedNS.Store(clk.Now().Add(30 * time.Second).UnixNano()) // lifts inside the fault window
+	for i := 0; i < queryid.FaultThreshold; i++ {
+		r.OnEndpointFault("SearchTimeline", mk, nil)
 	}
-	r.wg.Wait()
-	require.EqualValues(t, 0, r.attempts.Load(), "the spacing refuses the trigger")
+	r.WG.Wait()
+	require.EqualValues(t, 0, r.Attempts.Load(), "the spacing refuses the trigger")
 
 	clk.Advance(time.Minute)
-	r.onEndpointFault("SearchTimeline", mk, nil) // one more fault: history was kept
-	r.wg.Wait()
-	assert.EqualValues(t, 1, r.attempts.Load(), "the trigger fires on the first fault after the spacing lifts")
+	r.OnEndpointFault("SearchTimeline", mk, nil) // one more fault: history was kept
+	r.WG.Wait()
+	assert.EqualValues(t, 1, r.Attempts.Load(), "the trigger fires on the first fault after the spacing lifts")
 }
 
 // A panic while parsing a network-supplied body must not crash the process: it
@@ -818,21 +819,21 @@ func TestQIDRefresh_PanicInExtractionIsRecovered(t *testing.T) {
 	r, _ := useQIDRefresher(t)
 	var alerts atomic.Int32
 	var gotResult atomic.Value
-	r.setAlertHook(func(_ string, payload any) {
+	r.SetAlertHook(func(_ string, payload any) {
 		alerts.Add(1)
 		gotResult.Store(payload.(map[string]any)["result"])
 	})
-	orig := qidConsume
-	qidConsume = func(*gqlextract.Extractor, string, []byte) { panic("hostile bundle") }
-	t.Cleanup(func() { qidConsume = orig })
+	orig := queryid.Consume
+	queryid.Consume = func(*gqlextract.Extractor, string, []byte) { panic("hostile bundle") }
+	t.Cleanup(func() { queryid.Consume = orig })
 
 	w := newQIDWorld(t)
 	c, _ := newQIDClient(t, w, 1)
 	require.NoError(t, c.search(ctxTimeout(t)))
-	r.wg.Wait()
+	r.WG.Wait()
 
-	assert.EqualValues(t, 1, r.attempts.Load())
-	assert.Nil(t, activeQID.Load())
+	assert.EqualValues(t, 1, r.Attempts.Load())
+	assert.Nil(t, queryid.Active.Load())
 	assert.EqualValues(t, 1, alerts.Load())
-	assert.Equal(t, qidResultPanic, gotResult.Load())
+	assert.Equal(t, queryid.ResultPanic, gotResult.Load())
 }

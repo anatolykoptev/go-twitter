@@ -3,6 +3,7 @@ package twitter
 import (
 	"context"
 	"encoding/json"
+	"github.com/anatolykoptev/go-twitter/internal/queryid"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -90,7 +91,7 @@ func offlineClient(t *testing.T, c *Client) {
 	t.Helper()
 	c.xtidMgr = xtid.NewManager(failFetcher{})
 	c.accountPacer = nil
-	c.qid = newQIDRefresher(qidConfig{disabled: true})
+	c.qid = queryid.New(queryid.Config{Disabled: true})
 	c.warmDoerOverride = &fakeWarmBackend{} // authenticated warm fetches must not reach the real x.com
 }
 
@@ -221,7 +222,7 @@ func socialFixture(t *testing.T) (*social.Client, *xtid.Manager, *fakeWarmBacken
 	warm := &fakeWarmBackend{}
 	testHookSocialClient = func(c *Client) {
 		c.accountPacer = nil
-		c.qid = newQIDRefresher(qidConfig{disabled: true})
+		c.qid = queryid.New(queryid.Config{Disabled: true})
 		c.warmDoerOverride = warm // authenticated warm fetches must not reach the real x.com
 	}
 	t.Cleanup(func() { testHookSocialClient = nil })
@@ -296,7 +297,7 @@ func TestClientClose_BackgroundRefreshInFlightIsNotFailed(t *testing.T) {
 	r, _ := useQIDRefresher(t)
 	var alerts []string
 	var alertMu sync.Mutex
-	r.setAlertHook(func(topic string, _ any) { alertMu.Lock(); alerts = append(alerts, topic); alertMu.Unlock() })
+	r.SetAlertHook(func(topic string, _ any) { alertMu.Lock(); alerts = append(alerts, topic); alertMu.Unlock() })
 
 	c := newCountedClient(t, "a:pw:tokA:ct0A")
 	c.qid = nil // the process-wide refresher installed above
@@ -306,7 +307,7 @@ func TestClientClose_BackgroundRefreshInFlightIsNotFailed(t *testing.T) {
 		inner: &bundle.StealthFetcher{Client: w, UserAgent: defaultUserAgent},
 	}
 
-	r.onAuthedRequest(g, c.metrics) // fires the first-use refresh in the background
+	r.OnAuthedRequest(g, c.metrics.instruments()) // fires the first-use refresh in the background
 	select {
 	case <-g.started:
 	case <-time.After(5 * time.Second):
@@ -316,14 +317,14 @@ func TestClientClose_BackgroundRefreshInFlightIsNotFailed(t *testing.T) {
 
 	require.NoError(t, c.Close()) // mid-flight
 	close(gate)
-	r.wg.Wait()
+	r.WG.Wait()
 
 	require.NoError(t, g.err, "the in-flight request must not be failed by Close")
-	assert.NotZero(t, r.lastSuccessNS.Load(), "the refresh must complete successfully")
+	assert.NotZero(t, r.LastSuccessNS.Load(), "the refresh must complete successfully")
 	assert.Equal(t, 1, w.bundleFetches(), "the refresh walked the bundle")
-	r.mu.Lock()
-	failing, streak := r.failing, r.streak
-	r.mu.Unlock()
+	r.Mu.Lock()
+	failing, streak := r.Failing, r.Streak
+	r.Mu.Unlock()
 	assert.False(t, failing, "no refresh failure may be recorded")
 	assert.Zero(t, streak)
 	alertMu.Lock()

@@ -3,6 +3,7 @@ package twitter
 import (
 	"context"
 	"errors"
+	"github.com/anatolykoptev/go-twitter/internal/queryid"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -63,7 +64,7 @@ func TestBadRequest_Code214_FailsFastNoRotation(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	c, accs := newPoolWaitClient(t, 2)
-	qid := newQIDRefresher(qidConfig{faultWindow: time.Minute, faultThreshold: 3, timeout: time.Second})
+	qid := queryid.New(queryid.Config{FaultWindow: time.Minute, FaultThreshold: 3, Timeout: time.Second})
 	c.qid = qid
 
 	_, _, err := c.doGET(context.Background(), poolWaitEndpoint, srv.URL+"/i/api/graphql/x/"+poolWaitEndpoint)
@@ -77,9 +78,9 @@ func TestBadRequest_Code214_FailsFastNoRotation(t *testing.T) {
 		assert.Zero(t, failed, "account %d must not be charged a failure for a caller error", i)
 		assert.Zero(t, a.InFlight(), "account %d in-flight slot must be released", i)
 	}
-	qid.mu.Lock()
-	defer qid.mu.Unlock()
-	assert.Empty(t, qid.faults, "caller input rejection must not count as an endpoint fault")
+	qid.Mu.Lock()
+	defer qid.Mu.Unlock()
+	assert.Empty(t, qid.Faults, "caller input rejection must not count as an endpoint fault")
 }
 
 // F2 social leg: same 400+214 through *WithSocial — one lease, a "success"
