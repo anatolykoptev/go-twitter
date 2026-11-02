@@ -248,7 +248,10 @@ func (c *Client) loginOpenAccount(ctx context.Context) (*Account, error) {
 	if err != nil {
 		return nil, fmt.Errorf("new client: %w", err)
 	}
-	c.owned.add(bc) // used for this login only; Close releases what it left idle
+	// The client serves this login only. Release its idle connections when the
+	// login ends rather than listing it on the Client: listing would pin its
+	// jar, which holds the open account's cookies, for the Client's lifetime.
+	defer bc.CloseIdleConnections()
 
 	guestToken, err := c.getGuestToken(bc)
 	if err != nil {
