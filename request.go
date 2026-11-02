@@ -386,7 +386,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 		// server-side, so replacing it with a client-random value on a timer
 		// guarantees CSRF-353 and the doomed relogin cascade (the live-reproduced
 		// killer). ct0 is kept current by adopting the server's set-cookie ct0 on
-		// each successful response below. See shouldProactivelyRotate (ct0.go).
+		// each successful response below.
 		bc, err := c.clientForAccount(acc)
 		if err != nil {
 			// The pool never selects such an account (IsActive); reaching here
@@ -931,7 +931,7 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 			}
 		}
 
-		// NO proactive ct0 rotation (see doPoolRequest / shouldProactivelyRotate):
+		// NO proactive ct0 rotation (see doPoolRequest):
 		// client-rotating an established session's ct0 forces CSRF-353. ct0 stays
 		// current via the server's set-cookie adopted on each success below.
 		bc, err := c.clientForAccount(acc)

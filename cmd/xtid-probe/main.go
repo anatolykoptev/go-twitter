@@ -1,10 +1,8 @@
 // Command xtid-probe measures which x-client-transaction-id source X accepts.
 //
 // It sends UserTweetsAndReplies (a request X validates the id on) repeatedly
-// with ids from four variants and prints only HTTP status counts per variant:
+// with ids from three variants and prints only HTTP status counts per variant:
 //
-//	a  the algorithm before the reference-parity fix (truncated hex fraction),
-//	   keys from the logged-in page
 //	b  the fixed algorithm, keys from the logged-in page
 //	c  the fixed algorithm, keys from the cookie-less https://x.com/i/jf/
 //	d  no x-client-transaction-id header
@@ -32,7 +30,6 @@ import (
 
 	stealth "github.com/anatolykoptev/go-stealth"
 	twitter "github.com/anatolykoptev/go-twitter"
-	"github.com/anatolykoptev/go-twitter/cmd/xtid-probe/internal/legacyxtid"
 	"github.com/anatolykoptev/go-twitter/internal/bundle"
 	"github.com/anatolykoptev/go-twitter/internal/xtidprobe"
 	"github.com/anatolykoptev/go-twitter/xtid"
@@ -167,20 +164,10 @@ func buildVariants(ctx context.Context, acct, guest bundle.Fetcher, pace time.Du
 	jfPage, jfJS, jerr := xtidprobe.FetchMaterial(ctx, guest, xtid.LoggedOutPageURL)
 	time.Sleep(pace)
 
-	mk := func(name, desc string, page, js string, ferr error, legacy bool) variant {
+	mk := func(name, desc string, page, js string, ferr error) variant {
 		v := variant{name: name, desc: desc}
 		if ferr != nil {
 			v.err = short(redact.Replace(ferr.Error()))
-			return v
-		}
-		if legacy {
-			ct, err := legacyxtid.New(page, js)
-			if err != nil {
-				v.err = short(err.Error())
-				return v
-			}
-			v.gen = func(p string) (string, bool) { return ct.GenerateID("GET", p), true }
-			v.key = ct.AnimationKey()
 			return v
 		}
 		ct, err := xtidprobe.NewTransaction(page, js)
@@ -193,9 +180,8 @@ func buildVariants(ctx context.Context, acct, guest bundle.Fetcher, pace time.Du
 		return v
 	}
 	return []variant{
-		mk("a", "old algorithm (truncated hex), logged-in page", acctPage, acctJS, aerr, true),
-		mk("b", "fixed algorithm, logged-in page", acctPage, acctJS, aerr, false),
-		mk("c", "fixed algorithm, logged-out /i/jf/ page", jfPage, jfJS, jerr, false),
+		mk("b", "fixed algorithm, logged-in page", acctPage, acctJS, aerr),
+		mk("c", "fixed algorithm, logged-out /i/jf/ page", jfPage, jfJS, jerr),
 		{name: "d", desc: "no x-client-transaction-id", gen: func(string) (string, bool) { return "", false }},
 	}
 }
@@ -269,28 +255,20 @@ func cloneHeaders(h map[string]string) map[string]string {
 }
 
 // keyReport compares the animation keys of the variants without printing them.
-// The old algorithm only ever drops hex fraction digits (the rest of the key is
-// identical), so the length difference b-a is the number of digits it dropped.
 func keyReport(vs []variant) string {
 	by := map[string]variant{}
 	for _, v := range vs {
 		by[v.name] = v
 	}
-	a, b, c := by["a"], by["b"], by["c"]
-	cmp := func(x, y variant) string {
-		if x.err != "" || y.err != "" {
-			return "n/a"
+	b, c := by["b"], by["c"]
+	res := "n/a"
+	if b.err == "" && c.err == "" {
+		res = "no"
+		if b.key != c.key {
+			res = "yes"
 		}
-		if x.key != y.key {
-			return "yes"
-		}
-		return "no"
 	}
-	out := fmt.Sprintf("anim keys: a!=b %s, b!=c %s", cmp(a, b), cmp(b, c))
-	if a.err == "" && b.err == "" {
-		out += fmt.Sprintf("; hex fraction digits dropped by the old path: %d", len(b.key)-len(a.key))
-	}
-	return out
+	return fmt.Sprintf("anim keys: b!=c %s", res)
 }
 
 // stopReason says why a status ends the run ("" = keep going). Any 401/403/429

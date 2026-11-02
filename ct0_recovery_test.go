@@ -13,12 +13,9 @@ import (
 // value. For an ESTABLISHED session x.com validates ct0 server-side, so a
 // self-generated ct0 can never match and yields CSRF error 353 forever.
 //
-// This drives the exact pre-request decision request.go makes (the
-// CT0Age()>ct0MaxAge check) and asserts the credential the next request would
-// send is the still-valid SERVER ct0, not a fresh random one. Before the fix the
-// proactive block called acc.RotateCT0() here and the assertion fails (the ct0
-// is a random GenerateCT0 value); after the fix the block is gone and the server
-// ct0 survives.
+// There is no pre-request rotation decision in request.go: ct0 is never
+// rotated proactively, so the credential the next request would send is the
+// still-valid SERVER ct0, not a fresh random one.
 func TestNoProactiveRandomRotation_AgedSessionKeepsServerCT0(t *testing.T) {
 	const serverCT0 = "serverissuedct0abcdef0123456789"
 	acc := &Account{Username: "u", AuthToken: "auth", CT0: serverCT0}
@@ -26,12 +23,6 @@ func TestNoProactiveRandomRotation_AgedSessionKeepsServerCT0(t *testing.T) {
 	acc.mu.Lock()
 	acc.ct0RefreshedAt = time.Now().Add(-2 * ct0MaxAge)
 	acc.mu.Unlock()
-
-	// shouldProactivelyRotate is the gate request.go consults before each request.
-	// The fix makes it always false: an established session is never client-rotated.
-	if shouldProactivelyRotate(acc) {
-		t.Fatal("aged established session must NOT be proactively rotated to a random ct0 (CSRF-353 killer)")
-	}
 
 	// The credential the next request would carry must still be the server ct0.
 	_, ct0, _ := acc.Credentials()
