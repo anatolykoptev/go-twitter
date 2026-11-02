@@ -16,12 +16,16 @@ func TestBuildURLAndCounts(t *testing.T) {
 }
 
 func TestKeyReport(t *testing.T) {
-	vs := []variant{{name: "a", key: "ab"}, {name: "b", key: "abcde"}, {name: "c", key: "abcde"}, {name: "d"}}
-	if got, want := keyReport(vs), "anim keys: a!=b yes, b!=c no; hex fraction digits dropped by the old path: 3"; got != want {
+	vs := []variant{{name: "b", key: "abcde"}, {name: "c", key: "abcde"}, {name: "d"}}
+	if got, want := keyReport(vs), "anim keys: b!=c no"; got != want {
 		t.Fatalf("keyReport = %q, want %q", got, want)
 	}
-	vs[2].err = "unavailable"
-	if got := keyReport(vs); !strings.HasPrefix(got, "anim keys: a!=b yes, b!=c n/a") {
+	vs[1].key = "ab"
+	if got := keyReport(vs); got != "anim keys: b!=c yes" {
+		t.Fatalf("keyReport with differing keys = %q", got)
+	}
+	vs[1].err = "unavailable"
+	if got := keyReport(vs); got != "anim keys: b!=c n/a" {
 		t.Fatalf("keyReport with unavailable c = %q", got)
 	}
 }

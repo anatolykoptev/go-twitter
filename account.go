@@ -140,24 +140,6 @@ func (a *Account) releaseHold() {
 	a.mu.Unlock()
 }
 
-// CT0Age returns the time since the ct0 token was last refreshed.
-func (a *Account) CT0Age() time.Duration {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.ct0RefreshedAt.IsZero() {
-		return 24 * time.Hour
-	}
-	return time.Since(a.ct0RefreshedAt)
-}
-
-// RotateCT0 generates a fresh ct0 token and updates the refresh timestamp.
-func (a *Account) RotateCT0() {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.CT0 = GenerateCT0()
-	a.ct0RefreshedAt = time.Now()
-}
-
 // SetCT0 updates the ct0 from a server response.
 func (a *Account) SetCT0(ct0 string) {
 	a.mu.Lock()

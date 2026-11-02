@@ -2,6 +2,7 @@ package twitter
 
 import (
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 
@@ -764,5 +765,356 @@ func TestParseCreateTweet(t *testing.T) {
 	// Empty/missing result -> error (the silent-no-op trap for the reply path).
 	if _, err := parseCreateTweet([]byte(`{"data":{"create_tweet":{}}}`)); err == nil {
 		t.Fatal("expected error on empty tweet result")
+	}
+}
+
+// TestParseUserByScreenName_CoreShape grounds the parser against a REAL,
+// live-captured UserByScreenName response body (cz_binance, 2026-06-23), after
+// X moved name / screen_name / created_at out of `legacy` into a new `core`
+// object and the avatar to `avatar.image_url`. With the pre-migration parser
+// (which reads only legacy.*) Handle/DisplayName/CreatedAt/HasAvatar come back
+// empty even though numeric stats parse fine — the exact production symptom that
+// produced empty handle/display_name from /v1/account/cz_binance.
+//
+// Fixture provenance: testdata/ubsn_cz_binance.json is the verbatim body
+// returned by GetUserByScreenName via a downstream consumer's deployed credentials.
+func TestParseUserByScreenName_CoreShape(t *testing.T) {
+	body, err := os.ReadFile("testdata/ubsn_cz_binance.json")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+
+	user, err := parseUserByScreenName(body)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	// rest_id has never moved — sanity that we parsed the right node.
+	if user.ID != "902926941413453824" {
+		t.Fatalf("ID: want 902926941413453824, got %q", user.ID)
+	}
+
+	// The migrated fields — these are the bug.
+	if user.Handle != "cz_binance" {
+		t.Fatalf("Handle: want cz_binance, got %q (core.screen_name not read)", user.Handle)
+	}
+	if user.DisplayName != "CZ 🔶 BNB" {
+		t.Fatalf("DisplayName: want %q, got %q (core.name not read)", "CZ 🔶 BNB", user.DisplayName)
+	}
+	if user.CreatedAt.IsZero() {
+		t.Fatal("CreatedAt: want non-zero from core.created_at, got zero")
+	}
+	if user.CreatedAt.Year() != 2017 {
+		t.Fatalf("CreatedAt: want year 2017, got %d", user.CreatedAt.Year())
+	}
+	if !user.HasAvatar {
+		t.Fatal("HasAvatar: want true from avatar.image_url, got false")
+	}
+
+	// These never moved — must still parse from legacy.* so the fix does not
+	// regress the working fields.
+	if user.Followers != 11601459 {
+		t.Fatalf("Followers: want 11601459, got %d", user.Followers)
+	}
+	if user.Following != 1280 {
+		t.Fatalf("Following: want 1280, got %d", user.Following)
+	}
+	if user.TweetCount != 8838 {
+		t.Fatalf("TweetCount: want 8838, got %d", user.TweetCount)
+	}
+	if user.ListedCount != 40383 {
+		t.Fatalf("ListedCount: want 40383, got %d", user.ListedCount)
+	}
+	if !user.IsVerified {
+		t.Fatal("IsVerified: want true (is_blue_verified), got false")
+	}
+	if !user.HasBio {
+		t.Fatal("HasBio: want true, got false")
+	}
+	// Bio is grounded in the REAL captured body. This fixture carries the bio in
+	// BOTH the post-migration profile_bio.description and the still-populated
+	// legacy.description (identical content) — the migration-in-progress
+	// signature. Asserting the exact text proves Bio parses to the captured value
+	// regardless of which source bio() reads.
+	const wantBio = "Buy the book (proceeds go to charity):\nEnglish: https://t.co/UxgYxYJ3NF\nChinese: https://t.co/ItFd8FEyuK \n\n@binance\n@BNBchain\n@YZiLabs\n@GiggleAcademy"
+	if user.Bio != wantBio {
+		t.Fatalf("Bio: want %q, got %q", wantBio, user.Bio)
+	}
+}
+
+// TestParseUserResult_BioProfileBioPath proves Bio reads the post-migration
+// profile_bio.description location. Here legacy.description is ABSENT while
+// profile_bio.description carries the text — the shape X serves once the bio
+// field finishes migrating out of legacy (mirroring the core.* migration this
+// PR fixes). With the pre-fix parser (which read only r.Legacy.Description) this
+// returns an empty Bio / HasBio=false; the bio() helper makes it read the new
+// path. This is the RED-without-the-fix proof for the profile_bio fallback.
+func TestParseUserResult_BioProfileBioPath(t *testing.T) {
+	body := []byte(`{
+		"data": {
+			"user": {
+				"result": {
+					"__typename": "User",
+					"id": "VXNlcjoxMDA=",
+					"rest_id": "100",
+					"core": {
+						"name": "Migrated Bio User",
+						"screen_name": "migrated_bio",
+						"created_at": "Mon Jan 02 15:04:05 +0000 2021"
+					},
+					"profile_bio": {
+						"description": "bio from the new profile_bio location"
+					},
+					"avatar": {
+						"image_url": "https://pbs.twimg.com/profile_images/100/new.jpg"
+					},
+					"legacy": {
+						"followers_count": 5,
+						"friends_count": 2,
+						"statuses_count": 9,
+						"listed_count": 1
+					},
+					"is_blue_verified": true
+				}
+			}
+		}
+	}`)
+
+	user, err := parseUserByScreenName(body)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	const wantBio = "bio from the new profile_bio location"
+	if user.Bio != wantBio {
+		t.Fatalf("Bio: want %q from profile_bio.description, got %q (new path not read)", wantBio, user.Bio)
+	}
+	if !user.HasBio {
+		t.Fatal("HasBio: want true from profile_bio.description, got false")
+	}
+}
+
+// TestParseUserResult_BioLegacyFallback proves the bio() helper still falls back
+// to the pre-migration legacy.description when profile_bio is absent, so the new
+// fallback is non-destructive for the old shape X may still serve during rollout.
+func TestParseUserResult_BioLegacyFallback(t *testing.T) {
+	body := []byte(`{
+		"data": {
+			"user": {
+				"result": {
+					"__typename": "User",
+					"id": "VXNlcjoxMDE=",
+					"rest_id": "101",
+					"legacy": {
+						"name": "Legacy Bio User",
+						"screen_name": "legacy_bio",
+						"description": "bio from legacy.description",
+						"followers_count": 5
+					},
+					"is_blue_verified": false
+				}
+			}
+		}
+	}`)
+
+	user, err := parseUserByScreenName(body)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	const wantBio = "bio from legacy.description"
+	if user.Bio != wantBio {
+		t.Fatalf("Bio: want %q from legacy.description fallback, got %q", wantBio, user.Bio)
+	}
+	if !user.HasBio {
+		t.Fatal("HasBio: want true from legacy.description fallback, got false")
+	}
+}
+
+// TestParseUserResult_LegacyFallback proves the fix is non-destructive across
+// BOTH response shapes: an OLD, pre-migration body (name/screen_name/created_at
+// still under legacy, no core object) must still parse. X may serve either shape
+// during a rollout, so the parser must prefer core and fall back to legacy.
+//
+// This body is synthetic by necessity — X has already migrated, so the old shape
+// can no longer be captured live. It mirrors the exact pre-2026-06 legacy layout.
+func TestParseUserResult_LegacyFallback(t *testing.T) {
+	body := []byte(`{
+		"data": {
+			"user": {
+				"result": {
+					"__typename": "User",
+					"id": "VXNlcjo5OQ==",
+					"rest_id": "99",
+					"legacy": {
+						"name": "Legacy Name",
+						"screen_name": "legacy_handle",
+						"created_at": "Mon Jan 02 15:04:05 +0000 2020",
+						"followers_count": 7,
+						"friends_count": 3,
+						"statuses_count": 11,
+						"listed_count": 1,
+						"verified": true,
+						"description": "old shape bio",
+						"profile_image_url_https": "https://pbs.twimg.com/profile_images/9/legacy.jpg"
+					},
+					"is_blue_verified": false
+				}
+			}
+		}
+	}`)
+
+	user, err := parseUserByScreenName(body)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if user.Handle != "legacy_handle" {
+		t.Fatalf("Handle: want legacy_handle (legacy fallback), got %q", user.Handle)
+	}
+	if user.DisplayName != "Legacy Name" {
+		t.Fatalf("DisplayName: want Legacy Name (legacy fallback), got %q", user.DisplayName)
+	}
+	if user.CreatedAt.IsZero() {
+		t.Fatal("CreatedAt: want non-zero from legacy.created_at fallback, got zero")
+	}
+	if !user.HasAvatar {
+		t.Fatal("HasAvatar: want true from legacy.profile_image_url_https fallback, got false")
+	}
+	if !user.IsVerified {
+		t.Fatal("IsVerified: want true from legacy.verified, got false")
+	}
+}
+
+// TestParseUserTweets_CoreAuthorShape grounds the tweet-author path against a
+// REAL, live-captured UserTweets timeline entry (VitalikButerin, 2026-06-23).
+// The nested tweet_results.result.core.user_results.result also moved
+// name/screen_name into `core`, so the pre-migration parser (which reads
+// ...user_results.result.legacy.screen_name) returns an empty AuthorHandle /
+// AuthorName.
+//
+// Fixture provenance: testdata/usertweets_vitalik.json is a single real timeline
+// entry extracted verbatim from the deployed UserTweets response.
+func TestParseUserTweets_CoreAuthorShape(t *testing.T) {
+	body, err := os.ReadFile("testdata/usertweets_vitalik.json")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+
+	tweets, err := parseTweetTimeline(body, "295218901")
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if len(tweets) == 0 {
+		t.Fatal("expected at least one tweet")
+	}
+	tw := tweets[0]
+	if tw.AuthorHandle != "VitalikButerin" {
+		t.Fatalf("AuthorHandle: want VitalikButerin from core.user_results.result.core.screen_name, got %q", tw.AuthorHandle)
+	}
+	if tw.AuthorName != "vitalik.eth" {
+		t.Fatalf("AuthorName: want vitalik.eth from core.user_results.result.core.name, got %q", tw.AuthorName)
+	}
+	if tw.AuthorID != "295218901" {
+		t.Fatalf("AuthorID: want 295218901, got %q", tw.AuthorID)
+	}
+}
+
+// TestParseUserByScreenName_NoLegacyShape grounds the parser against a REAL,
+// live-captured UserByScreenName response (elonmusk, 2026-10-17) in the
+// post-2026-10 schema where X drops the `legacy` key ENTIRELY — a hard cut,
+// not the hybrid shape seen during the core.* migration. Follower/following/
+// tweet counts move to relationship_counts.* and tweet_counts.tweets; with a
+// legacy-only parser all three silently return 0 while name/bio/avatar keep
+// working — the exact production symptom (profile counters zeroed through the
+// go-social shared read path).
+//
+// Fixture provenance: testdata/ubsn_elonmusk_nolegacy.json is the verbatim
+// body returned by GetUserByScreenName through the deployed go-social shared
+// client on 2026-10-17.
+func TestParseUserByScreenName_NoLegacyShape(t *testing.T) {
+	body, err := os.ReadFile("testdata/ubsn_elonmusk_nolegacy.json")
+	if err != nil {
+		t.Fatalf("read fixture: %v", err)
+	}
+
+	user, err := parseUserByScreenName(body)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+
+	if user.ID != "44196397" {
+		t.Fatalf("ID: want 44196397, got %q", user.ID)
+	}
+	if user.Handle != "elonmusk" {
+		t.Fatalf("Handle: want elonmusk, got %q", user.Handle)
+	}
+	if user.DisplayName != "Elon Musk" {
+		t.Fatalf("DisplayName: want Elon Musk, got %q", user.DisplayName)
+	}
+	// The bug under test: counts live in relationship_counts / tweet_counts,
+	// not legacy. A legacy-only read yields exactly 0 — assert the captured
+	// real values, not just non-zero.
+	if user.Followers != 241501933 {
+		t.Fatalf("Followers: want 241501933, got %d", user.Followers)
+	}
+	if user.Following != 1420 {
+		t.Fatalf("Following: want 1420, got %d", user.Following)
+	}
+	if user.TweetCount != 110396 {
+		t.Fatalf("TweetCount: want 110396, got %d", user.TweetCount)
+	}
+	// listed_count has no observed post-migration location — the field is
+	// simply absent in this shape; assert 0 rather than a wrong-source value.
+	if user.ListedCount != 0 {
+		t.Fatalf("ListedCount: want 0 (no new-shape location), got %d", user.ListedCount)
+	}
+	if !user.IsVerified {
+		t.Fatal("IsVerified: want true (is_blue_verified), got false")
+	}
+	if !user.HasAvatar {
+		t.Fatal("HasAvatar: want true from avatar.image_url, got false")
+	}
+	if !user.HasBio {
+		t.Fatal("HasBio: want true, got false")
+	}
+}
+
+// TestParseUserResult_RelationshipCountsPreferred proves presence (not value)
+// selects the source: when relationship_counts is present alongside legacy,
+// the new location is authoritative even if the legacy values differ — a
+// migration-in-progress hybrid must not read stale legacy counters.
+func TestParseUserResult_RelationshipCountsPreferred(t *testing.T) {
+	body := []byte(`{
+		"data": {
+			"user": {
+				"result": {
+					"__typename": "User",
+					"id": "VXNlcjoxMDI=",
+					"rest_id": "102",
+					"core": {"name": "Hybrid", "screen_name": "hybrid"},
+					"relationship_counts": {"followers": 10, "following": 0},
+					"tweet_counts": {"tweets": 3},
+					"legacy": {"followers_count": 999, "friends_count": 888, "statuses_count": 777, "listed_count": 5},
+					"is_blue_verified": false
+				}
+			}
+		}
+	}`)
+
+	user, err := parseUserByScreenName(body)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if user.Followers != 10 {
+		t.Fatalf("Followers: want 10 from relationship_counts, got %d", user.Followers)
+	}
+	// A genuine zero in the new location must not fall back to legacy's 888.
+	if user.Following != 0 {
+		t.Fatalf("Following: want 0 from relationship_counts, got %d", user.Following)
+	}
+	if user.TweetCount != 3 {
+		t.Fatalf("TweetCount: want 3 from tweet_counts, got %d", user.TweetCount)
+	}
+	// listed_count is legacy-only by design.
+	if user.ListedCount != 5 {
+		t.Fatalf("ListedCount: want 5 from legacy (only location), got %d", user.ListedCount)
 	}
 }
