@@ -1,7 +1,7 @@
 github.com/anatolykoptev/go-kit v0.97.19 h1:SYpvEdYfwnzoPpNZBdSL0U2IVhsd0GfNY10KplV8kx4=
 github.com/anatolykoptev/go-kit v0.97.19/go.mod h1:YzADfXVpzihE6j+v4WuiQYU4EuCPI8sXxrZdhexTaH0=
-github.com/anatolykoptev/go-stealth v1.24.1-0.20261102212338-c7eec72c1c2c h1:n8yYfzQiS9pq/w3FaVgldqD/S4xEkpL5k3nSTQLup5E=
-github.com/anatolykoptev/go-stealth v1.24.1-0.20261102212338-c7eec72c1c2c/go.mod h1:YfrRrGZJ9esBwNfQDVkinHqNbf5FV85eOjqNax5P3lU=
+github.com/anatolykoptev/go-stealth v1.25.0 h1:SRIdskE8xacGhOkWx7+l3oqqQR8gHOoh7PAidg6FU8c=
+github.com/anatolykoptev/go-stealth v1.25.0/go.mod h1:YfrRrGZJ9esBwNfQDVkinHqNbf5FV85eOjqNax5P3lU=
 github.com/andybalholm/brotli v1.2.7 h1:UgafRPGMam5ySHfRkhthMqOFA6IFoeF3D7mWIDLjG5A=
 github.com/andybalholm/brotli v1.2.7/go.mod h1:rzTDkvFWvIrjDXZHkuS16NPggd91W3kUSvPlQ1pLaKY=
 github.com/bdandy/go-errors v1.2.2 h1:WdFv/oukjTJCLa79UfkGmwX7ZxONAihKu4V0mLIs11Q=
