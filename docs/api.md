@@ -74,7 +74,7 @@ All methods below are on `*twitter.Client`. Every one of them needs an authentic
 | `AccountByUsername(username)` | Look up a pool account (case-insensitive); nil if absent. |
 | `HealthReport()` | Per-account totals, consecutive failures, and proxy backoff state. |
 | `Pool()` | The underlying account pool. |
-| `Close()` | Unregisters the client's metrics callback so a replacement client can report on the same `MeterProvider`. Does not stop in-flight requests. |
+| `Close()` | Closes the idle connections of every HTTP client the `Client` built and unregisters its metrics callback, so a replacement client can report on the same `MeterProvider`. Does not stop in-flight requests or background refreshes; the `Client` stays usable. |
 | `Account.SetPickPace(stealth.Jitter{Min, Max})` / `PickPace()` | Pool picks of the account are separated by a random gap in `[Min, Max)` (zero value = off, the default; `Max <= Min` = fixed `Min`). Other accounts serve meanwhile; a call with no other account waits for the gap. Runtime-safe; pool picks only (not account-pinned writes or media). See [Rate limits](rate-limits.md). |
 | `ValidateAccount(ctx, acc)` | Check an account's credentials against the account settings endpoint. |
 | `SetAutoReloginGate(gate)` | Replace the relogin circuit breaker (see below). |

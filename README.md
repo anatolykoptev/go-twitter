@@ -15,7 +15,7 @@ Give it one or more logged-in sessions and call typed methods for timelines, sea
 go get github.com/anatolykoptev/go-twitter
 ```
 
-Requires Go 1.26.3 or newer.
+Requires Go 1.27.3 or newer.
 
 ## Quick start
 

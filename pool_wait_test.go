@@ -91,6 +91,7 @@ func newPoolWaitClient(t *testing.T, n int) (*Client, []*Account) {
 			AuthCooldown:         time.Hour,
 		},
 	}
+	keepOffline(c)
 	return c, accs
 }
 

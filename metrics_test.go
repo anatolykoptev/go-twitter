@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -96,6 +97,7 @@ func newMetricsFixture(t *testing.T, handler http.HandlerFunc, username string) 
 	}
 	c.metrics.now = func() time.Time { return now }
 	c.registerPoolGauge(mp)
+	c.warmDoerOverride = refusingWarm{} // xtid stays unavailable, offline: failFetcher's counterpart for the authenticated fetch
 
 	return &metricsFixture{c: c, reader: reader, acc: acc, now: now}
 }
@@ -120,11 +122,29 @@ func startFakeX(t *testing.T, handler http.HandlerFunc) *stealth.BrowserClient {
 	return bc
 }
 
+// refusingWarm is a warm backend that answers every fetch with HTTP 500.
+type refusingWarm struct{}
+
+func (refusingWarm) DoCtx(context.Context, string, string, map[string]string, io.Reader) ([]byte, map[string]string, int, error) {
+	return nil, nil, http.StatusInternalServerError, nil
+}
+
+// keepOffline stops c's xtid warm fetches from reaching the real x.com through
+// its real transports: they go to a fake warm backend unless the test set its
+// own. Without it an authenticated request sends a warm-page fetch (with the
+// test's fake cookies) to x.com and blocks on the answer.
+func keepOffline(c *Client) {
+	if c.warmDoerOverride == nil {
+		c.warmDoerOverride = &fakeWarmBackend{}
+	}
+}
+
 // adoptFakeX points a NewClient-built Client at a fake-X transport: the shared
 // client and every account's own client (NewClient gives each account one, and
 // those carry the SSRF guard, so loopback fake servers are unreachable through
 // them). Accounts without a client of their own stay that way.
 func adoptFakeX(c *Client, bc *stealth.BrowserClient) {
+	keepOffline(c)
 	c.client = bc
 	for _, acc := range c.cfg.Accounts {
 		if acc.client != nil {

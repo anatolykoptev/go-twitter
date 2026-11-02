@@ -16,7 +16,7 @@ body:
     id: go-version
     attributes:
       label: Go version
-      placeholder: go1.26.3
+      placeholder: go1.27.3
     validations:
       required: true
   - type: textarea

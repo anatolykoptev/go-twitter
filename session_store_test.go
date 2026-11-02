@@ -214,9 +214,7 @@ func TestSessionStore_WithSocialMakesZeroStoreCalls(t *testing.T) {
 func TestSessionStore_ReloginDeletesStoredSession(t *testing.T) {
 	rec := newRecordingStore()
 	rec.data["u4"] = Session{AuthToken: "t", CT0: "c", SavedAt: time.Now()}
-	c := &Client{cfg: ClientConfig{SessionStore: rec}, client: startFakeX(t, func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	})}
+	c := failingClient(t, rec)
 	acc := &Account{Username: "u4", Password: "pw"}
 
 	acc.client = c.client // NewClient gives every account one; the shared fake stands in
@@ -253,12 +251,19 @@ func TestFileSessionStore_TTL(t *testing.T) {
 	assert.ErrorIs(t, err, ErrSessionNotFound)
 }
 
-// failingClient answers 500 to everything: a login attempt against it fails fast.
+// failingClient is a Client whose every request, including the login flow's
+// requests to api.twitter.com, goes through a loopback proxy that refuses it: a
+// login attempt fails fast and nothing leaves the machine.
 func failingClient(t *testing.T, store SessionStore) *Client {
 	t.Helper()
-	return &Client{cfg: ClientConfig{SessionStore: store}, client: startFakeX(t, func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusInternalServerError)
-	})}
+	_ = startFakeX(t, func(http.ResponseWriter, *http.Request) {}) // shortens the jitter and backoff
+	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusBadGateway)
+	}))
+	t.Cleanup(proxy.Close)
+	bc, err := stealth.NewClient(stealth.WithProxy(proxy.URL), stealth.WithoutSSRFGuard())
+	require.NoError(t, err)
+	return &Client{cfg: ClientConfig{SessionStore: store}, client: bc}
 }
 
 // A non-NotFound Load error leaves the stored state unknown: a password-only
