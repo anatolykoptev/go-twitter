@@ -77,7 +77,7 @@ instrumented.
 
 **Header-less-88 escalation.** Three consecutive code-88 responses carrying no
 parseable `x-rate-limit-remaining` (with no successful response in between) are
-a ban signature: the account is soft-deactivated for `BanCooldown` and the call
+an account restriction: the account is soft-deactivated for `BanCooldown` and the call
 fails with an `IsBanned` error. Each of those responses is still recorded here
 as `rate_limited` — this instrument reports the per-response truth, and a
 header-less 88 is per-response a rate limit — so the escalation is **not**
@@ -217,7 +217,7 @@ Observed on collection, alongside `pool.accounts` in the same callback (same
 one-client-per-provider rule). The sum of every pool account's in-flight
 request count — the requests currently holding a slot under
 `ClientConfig.MaxInFlightPerAccount` (default 2, negative disables the cap).
-The gauge counts slots, not sockets: a cancelled request releases its slot at once while its socket can outlive it until go-stealth's own timeout. Each account's count never exceeds the cap; a saturated pool waits on the
+The gauge counts slots, not sockets: a cancelled request releases its slot at once while its socket can outlive it until the transport's own timeout. Each account's count never exceeds the cap; a saturated pool waits on the
 `pool.wait` machinery instead of exceeding it, so a persistently pegged gauge
 means the cap or the account count is the bottleneck. Per-call `*WithSocial`
 clients register no gauge.

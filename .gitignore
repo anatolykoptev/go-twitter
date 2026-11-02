@@ -1,0 +1,14 @@
+# Build and test output
+/bin/
+*.test
+*.out
+
+# Local secrets and sessions
+.env
+.env.*
+sessions/
+
+# Editors and OS files
+.idea/
+.vscode/
+.DS_Store
