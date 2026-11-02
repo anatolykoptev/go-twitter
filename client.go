@@ -36,6 +36,7 @@ type Client struct {
 	alertHook            func(topic string, payload any)                  // proxy/pool event sink (PoolAlertHook or slog fallback)
 	metrics              *clientMetrics                                   // OpenTelemetry instruments (nil-safe)
 	poolGaugeReg         metric.Registration                              // pool.accounts callback; unregistered by Close (guarded by mu)
+	owned                *clientSet                                       // every BrowserClient this Client built; Close releases their idle connections (nil-safe)
 	warmDoerOverride     warmDoer                                         // test seam: replaces the account client for xtid warm-page fetches
 	qid                  *qidRefresher                                    // nil = the process-wide queryId refresher; only tests set it
 	requestJitter        *stealth.Jitter                                  // pre-request jitter for pool requests (opt-in); nil = none
@@ -90,6 +91,8 @@ func NewClient(cfg ClientConfig, clientOpts ...ClientOption) (*Client, error) {
 	if err != nil {
 		return nil, fmt.Errorf("stealth client: %w", err)
 	}
+	owned := &clientSet{}
+	owned.add(bc)
 
 	// One transport per account. Every account owns its own stealth client, and
 	// with it its own cookie jar: a set-cookie on a response to account A can
@@ -106,9 +109,9 @@ func NewClient(cfg ClientConfig, clientOpts ...ClientOption) (*Client, error) {
 	// it the shared client, which may be direct (the *WithSocial path sets no
 	// DefaultProxy) and would send its auth_token/ct0 from this host's IP.
 	//
-	// go-stealth's BrowserClient exposes no Close/CloseIdleConnections, so the
-	// clients built before an error return below cannot be released explicitly;
-	// they hold no goroutines until first use and are reclaimed by the GC.
+	// The clients built before an error return below are not released
+	// explicitly; they have made no request yet, so they hold no connections
+	// and are reclaimed by the GC.
 	var buildErrs []error
 	usable := 0
 	for _, acc := range cfg.Accounts {
@@ -119,6 +122,7 @@ func NewClient(cfg ClientConfig, clientOpts ...ClientOption) (*Client, error) {
 			buildErrs = append(buildErrs, fmt.Errorf("per-account client for %s: %s", acc.Username, reason))
 			continue
 		}
+		owned.add(accClient)
 		acc.client = accClient
 		usable++
 	}
@@ -201,6 +205,7 @@ func NewClient(cfg ClientConfig, clientOpts ...ClientOption) (*Client, error) {
 		requestJitter:        cfg.RequestJitter,
 		alertHook:            alertHook,
 		metrics:              m,
+		owned:                owned,
 	}
 	if !cfg.skipPoolGauge {
 		c.registerPoolGauge(cfg.MeterProvider)
@@ -328,8 +333,43 @@ func (c *Client) clientForAccount(acc *Account) (*stealth.BrowserClient, error) 
 		reportClientBuildFailure(acc, proxy, c.metrics, c.alertHook)
 		return nil, fmt.Errorf("%w: %s", ErrProxyClientUnavailable, acc.Username)
 	}
+	c.owned.add(bc)
 	acc.client = bc
 	return bc, nil
+}
+
+// clientSet is the BrowserClients one Client built. Close walks it instead of
+// reading Account.client: an Account handed to two Clients carries whichever
+// client was stored last, and a caller-owned client must never be released
+// here. A nil *clientSet is valid and empty, so a bare &Client{} never panics.
+type clientSet struct {
+	mu  sync.Mutex
+	set []*stealth.BrowserClient
+}
+
+func (s *clientSet) add(bc *stealth.BrowserClient) {
+	if s == nil || bc == nil {
+		return
+	}
+	s.mu.Lock()
+	s.set = append(s.set, bc)
+	s.mu.Unlock()
+}
+
+// closeIdle closes the idle connections of every listed client. It never closes
+// a client: a background xtid or queryId refresh may still be using one, and
+// CloseIdleConnections is safe beside a running request, repeatedly, and after
+// Close.
+func (s *clientSet) closeIdle() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	snap := append([]*stealth.BrowserClient(nil), s.set...)
+	s.mu.Unlock()
+	for _, bc := range snap {
+		bc.CloseIdleConnections()
+	}
 }
 
 // usesOwnProxy reports whether an attempt served by acc went through the

@@ -3,7 +3,7 @@ module github.com/anatolykoptev/go-twitter
 go 1.27.3
 
 require (
-	github.com/anatolykoptev/go-stealth v1.23.1-0.20261102210406-307927f94f5b
+	github.com/anatolykoptev/go-stealth v1.24.1-0.20261102212338-c7eec72c1c2c
 	github.com/pquerna/otp v1.5.0
 	github.com/stretchr/testify v1.12.1
 	go.opentelemetry.io/otel v1.47.0

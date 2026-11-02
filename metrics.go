@@ -303,14 +303,21 @@ func (c *Client) registerPoolGauge(mp metric.MeterProvider) {
 	c.mu.Unlock()
 }
 
-// Close unregisters the client's pool.accounts gauge callback so the client can
-// be garbage collected and a replacement client can report on the same
-// MeterProvider. It is idempotent and safe on a nil client; it does not stop
-// in-flight requests.
+// Close closes the idle connections of every HTTP client this Client built (the
+// shared one, each account's, and the open-account login client) and
+// unregisters the pool.accounts gauge callback so the client can be garbage
+// collected and a replacement client can report on the same MeterProvider. It
+// is idempotent and safe on a nil client.
+//
+// It does not stop in-flight requests or background xtid / queryId refreshes,
+// and it does not close the HTTP clients: the Client stays usable, a connection
+// opened after Close idles out on its own, and the process-wide xtid manager,
+// pacer and fetch client of the *WithSocial path are left alone.
 func (c *Client) Close() error {
 	if c == nil {
 		return nil
 	}
+	c.owned.closeIdle()
 	c.mu.Lock()
 	reg := c.poolGaugeReg
 	c.poolGaugeReg = nil

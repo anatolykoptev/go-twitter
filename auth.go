@@ -248,6 +248,7 @@ func (c *Client) loginOpenAccount(ctx context.Context) (*Account, error) {
 	if err != nil {
 		return nil, fmt.Errorf("new client: %w", err)
 	}
+	c.owned.add(bc) // used for this login only; Close releases what it left idle
 
 	guestToken, err := c.getGuestToken(bc)
 	if err != nil {
