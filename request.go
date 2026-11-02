@@ -14,6 +14,7 @@ import (
 	"time"
 
 	stealth "github.com/anatolykoptev/go-stealth"
+	"github.com/anatolykoptev/go-twitter/internal/parse"
 	"github.com/anatolykoptev/go-twitter/internal/telemetry"
 )
 
@@ -1322,12 +1323,7 @@ func (c *Client) markProxyDown(acc *Account) {
 	}
 }
 
-func truncateBytes(b []byte, n int) string {
-	if len(b) <= n {
-		return string(b)
-	}
-	return string(b[:n]) + "..."
-}
+func truncateBytes(b []byte, n int) string { return parse.TruncateBytes(b, n) }
 
 // hasResponseData returns true if the JSON body carries a "data" field with
 // real content: not absent, not null, not an empty object/array, and not a

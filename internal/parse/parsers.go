@@ -1,7 +1,11 @@
-package twitter
+// Package parse decodes X API response bodies into the model types. It holds no
+// transport, account or metrics state: every function takes the raw body and
+// returns a value or an error.
+package parse
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -9,12 +13,30 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/anatolykoptev/go-twitter/internal/tweetflag"
+	"github.com/anatolykoptev/go-twitter/model"
 )
+
+// ErrNotFound marks deterministic "the resource does not exist" outcomes —
+// deleted tweets, suspended/unavailable handles. Pool callers treat it as a
+// healthy-account response (no retry, no auth_error report): the credential
+// worked; the thing asked for simply isn't there. The root package re-exports
+// it as twitter.ErrNotFound.
+var ErrNotFound = errors.New("twitter: resource not found")
+
+// TruncateBytes returns b as a string cut to n bytes with a "..." marker.
+func TruncateBytes(b []byte, n int) string {
+	if len(b) <= n {
+		return string(b)
+	}
+	return string(b[:n]) + "..."
+}
 
 var tokenMentionRe = regexp.MustCompile(`\$([A-Z]{2,10})`)
 
-// parseUserByScreenName parses the UserByScreenName GraphQL response.
-func parseUserByScreenName(body []byte) (*TwitterUser, error) {
+// UserByScreenName parses the UserByScreenName GraphQL response.
+func UserByScreenName(body []byte) (*model.TwitterUser, error) {
 	var raw struct {
 		Data struct {
 			User struct {
@@ -40,8 +62,8 @@ func parseUserByScreenName(body []byte) (*TwitterUser, error) {
 	return parseUserResult(raw.Data.User.Result)
 }
 
-// parseUserList parses Followers/Following response.
-func parseUserList(body []byte) ([]*TwitterUser, string, error) {
+// UserList parses Followers/Following response.
+func UserList(body []byte) ([]*model.TwitterUser, string, error) {
 	var raw struct {
 		Data struct {
 			User struct {
@@ -59,8 +81,8 @@ func parseUserList(body []byte) ([]*TwitterUser, string, error) {
 	return extractUsersFromTimeline(raw.Data.User.Result.Timeline.Timeline)
 }
 
-// parseRetweeterList parses Retweeters response.
-func parseRetweeterList(body []byte) ([]*TwitterUser, string, error) {
+// RetweeterList parses Retweeters response.
+func RetweeterList(body []byte) ([]*model.TwitterUser, string, error) {
 	var raw struct {
 		Data struct {
 			RetweetersTimeline struct {
@@ -73,17 +95,17 @@ func parseRetweeterList(body []byte) ([]*TwitterUser, string, error) {
 	}
 	tl := raw.Data.RetweetersTimeline.Timeline
 	if len(tl.Instructions) == 0 {
-		return parseUserList(body)
+		return UserList(body)
 	}
 	return extractUsersFromTimeline(tl)
 }
 
-// parseTweetDetail parses a TweetDetail GraphQL response. focalID is the
+// TweetDetail parses a TweetDetail GraphQL response. focalID is the
 // requested tweet: when non-empty and absent from the extracted page the
 // result is a deterministic miss — ErrNotFound, not a silently substituted
 // tweets[0] (a deleted focal still returns ancestors/replies that would
 // otherwise be misidentified as the requested tweet).
-func parseTweetDetail(body []byte, focalID string) ([]*Tweet, error) {
+func TweetDetail(body []byte, focalID string) ([]*model.Tweet, error) {
 	type itemContentRef = json.RawMessage
 	type moduleItem struct {
 		EntryID string `json:"entryId"`
@@ -184,8 +206,8 @@ func isPromotedItem(entryID string, itemContent json.RawMessage) bool {
 	return json.Unmarshal(itemContent, &probe) == nil && probe.Promoted != nil
 }
 
-// parseTweetTimeline parses UserTweets timeline response.
-func parseTweetTimeline(body []byte, authorID string) ([]*Tweet, error) {
+// TweetTimeline parses UserTweets timeline response.
+func TweetTimeline(body []byte, authorID string) ([]*model.Tweet, error) {
 	var raw struct {
 		Data struct {
 			User struct {
@@ -210,8 +232,8 @@ func parseTweetTimeline(body []byte, authorID string) ([]*Tweet, error) {
 	return extractTweetsFromTimeline(tl, authorID)
 }
 
-// parseSearchTimeline parses SearchTimeline response.
-func parseSearchTimeline(body []byte) ([]*Tweet, error) {
+// SearchTimeline parses SearchTimeline response.
+func SearchTimeline(body []byte) ([]*model.Tweet, error) {
 	var raw struct {
 		Data struct {
 			SearchByRawQuery struct {
@@ -252,7 +274,7 @@ func parseSearchTimeline(body []byte) ([]*Tweet, error) {
 // rootFn finds no instructions it falls back to the recursive scan and logs a
 // warning tagged with op, so a rotated/broken typed root key is observable (the
 // happy typed-path hit stays silent — no log noise).
-func timelineTweetParse(body []byte, op string, rootFn func(json.RawMessage) timelineObj) ([]*Tweet, string, error) {
+func timelineTweetParse(body []byte, op string, rootFn func(json.RawMessage) timelineObj) ([]*model.Tweet, string, error) {
 	var env struct {
 		Data   json.RawMessage `json:"data"`
 		Errors []struct {
@@ -277,11 +299,11 @@ func timelineTweetParse(body []byte, op string, rootFn func(json.RawMessage) tim
 	return tweets, bottomCursor(tl), nil
 }
 
-// parseBookmarks parses the Bookmarks response.
+// Bookmarks parses the Bookmarks response.
 // Root: data.bookmark_timeline_v2.timeline.instructions — CONFIRMED against
 // imperatrona/twitter-scraper (bookmark_timeline_v2 struct) + twscrape's
 // graphql_timeline_v2_bookmark_timeline feature flag.
-func parseBookmarks(body []byte) ([]*Tweet, string, error) {
+func Bookmarks(body []byte) ([]*model.Tweet, string, error) {
 	return timelineTweetParse(body, "Bookmarks", func(data json.RawMessage) timelineObj {
 		var r struct {
 			BookmarkTimeline struct {
@@ -293,10 +315,10 @@ func parseBookmarks(body []byte) ([]*Tweet, string, error) {
 	})
 }
 
-// parseHomeTimeline parses HomeTimeline / HomeLatestTimeline responses (same shape).
+// HomeTimeline parses HomeTimeline / HomeLatestTimeline responses (same shape).
 // Root: data.home.home_timeline_urt.instructions — canonical home-timeline shape
 // (trevorhobenshield/twitter-api-client home_timeline_urt).
-func parseHomeTimeline(body []byte) ([]*Tweet, string, error) {
+func HomeTimeline(body []byte) ([]*model.Tweet, string, error) {
 	return timelineTweetParse(body, "HomeTimeline", func(data json.RawMessage) timelineObj {
 		var r struct {
 			Home struct {
@@ -308,10 +330,10 @@ func parseHomeTimeline(body []byte) ([]*Tweet, string, error) {
 	})
 }
 
-// parseListTweets parses the ListLatestTweetsTimeline response.
+// ListTweets parses the ListLatestTweetsTimeline response.
 // Root: data.list.tweets_timeline.timeline.instructions — canonical list shape
 // (vladkens/twscrape ListLatestTweetsTimeline).
-func parseListTweets(body []byte) ([]*Tweet, string, error) {
+func ListTweets(body []byte) ([]*model.Tweet, string, error) {
 	return timelineTweetParse(body, "ListLatestTweetsTimeline", func(data json.RawMessage) timelineObj {
 		var r struct {
 			List struct {
@@ -325,14 +347,14 @@ func parseListTweets(body []byte) ([]*Tweet, string, error) {
 	})
 }
 
-// parseCommunityTweets parses the CommunityTweetsTimeline response.
+// CommunityTweets parses the CommunityTweetsTimeline response.
 // Root: data.communityResults.result.ranked_community_timeline.timeline.instructions.
 // The data.communityResults.result prefix is CONFIRMED (twscrape models.py uses
 // "data.communityResults.result"); the ranked_community_timeline wrapper is
 // UNVERIFIED root key — confirm against a live authed response (smoke test). The
 // recursive fallback in timelineTweetParse keeps the parser working if the exact
 // wrapper key differs at runtime.
-func parseCommunityTweets(body []byte) ([]*Tweet, string, error) {
+func CommunityTweets(body []byte) ([]*model.Tweet, string, error) {
 	return timelineTweetParse(body, "CommunityTweetsTimeline", func(data json.RawMessage) timelineObj {
 		var r struct {
 			CommunityResults struct {
@@ -651,8 +673,8 @@ type tweetResult struct {
 
 // --- Extraction helpers ---
 
-func extractUsersFromTimeline(tl timelineObj) ([]*TwitterUser, string, error) {
-	var users []*TwitterUser
+func extractUsersFromTimeline(tl timelineObj) ([]*model.TwitterUser, string, error) {
+	var users []*model.TwitterUser
 	var nextCursor string
 
 	for _, instruction := range tl.Instructions {
@@ -693,8 +715,8 @@ func extractUsersFromTimeline(tl timelineObj) ([]*TwitterUser, string, error) {
 	return users, nextCursor, nil
 }
 
-func extractTweetsFromTimeline(tl timelineObj, defaultAuthorID string) ([]*Tweet, error) {
-	var tweets []*Tweet
+func extractTweetsFromTimeline(tl timelineObj, defaultAuthorID string) ([]*model.Tweet, error) {
+	var tweets []*model.Tweet
 
 	for _, instruction := range tl.Instructions {
 		for _, entry := range instruction.Entries {
@@ -718,7 +740,7 @@ func extractTweetsFromTimeline(tl timelineObj, defaultAuthorID string) ([]*Tweet
 				slog.Debug("skip tweet parse error", slog.Any("error", err))
 				continue
 			}
-			t.promoted = isPromotedItem(entry.EntryID, entry.Content.ItemContent)
+			tweetflag.Set(t, isPromotedItem(entry.EntryID, entry.Content.ItemContent))
 			tweets = append(tweets, t)
 		}
 	}
@@ -746,7 +768,7 @@ func parseTwitterTime(raw, site string) time.Time {
 	return t
 }
 
-func parseUserResult(r userResult) (*TwitterUser, error) {
+func parseUserResult(r userResult) (*model.TwitterUser, error) {
 	if r.TypeName == "UserUnavailable" {
 		return nil, fmt.Errorf("%w: user unavailable (suspended or restricted)", ErrNotFound)
 	}
@@ -756,7 +778,7 @@ func parseUserResult(r userResult) (*TwitterUser, error) {
 	createdAt := parseTwitterTime(r.createdAtRaw(), "user")
 	bio := strings.TrimSpace(r.bio())
 	avatarURL := r.avatarURL()
-	return &TwitterUser{
+	return &model.TwitterUser{
 		ID:          r.RestID,
 		Handle:      r.screenName(),
 		DisplayName: r.displayName(),
@@ -772,7 +794,7 @@ func parseUserResult(r userResult) (*TwitterUser, error) {
 	}, nil
 }
 
-func parseTweetResult(r tweetResult, defaultAuthorID string) (*Tweet, error) {
+func parseTweetResult(r tweetResult, defaultAuthorID string) (*model.Tweet, error) {
 	// Unwrap *Results shells (TweetWithVisibilityResults for sensitive
 	// tweets): the payload nests the real tweet one level down. Loop —
 	// not a fixed depth — so a stacked wrapper still decodes.
@@ -799,7 +821,7 @@ func parseTweetResult(r tweetResult, defaultAuthorID string) (*Tweet, error) {
 	mentions := extractTokenMentions(text)
 
 	author := r.Core.UserResults.Result
-	return &Tweet{
+	return &model.Tweet{
 		ID:            r.RestID,
 		AuthorID:      authorID,
 		AuthorHandle:  author.screenName(),
@@ -815,8 +837,8 @@ func parseTweetResult(r tweetResult, defaultAuthorID string) (*Tweet, error) {
 	}, nil
 }
 
-// parseCreateTweet extracts the tweet ID from a CreateTweet mutation response.
-func parseCreateTweet(body []byte) (string, error) {
+// CreateTweet extracts the tweet ID from a CreateTweet mutation response.
+func CreateTweet(body []byte) (string, error) {
 	var raw struct {
 		Data struct {
 			CreateTweet struct {
@@ -839,17 +861,17 @@ func parseCreateTweet(body []byte) (string, error) {
 	}
 	tweetID := raw.Data.CreateTweet.TweetResults.Result.RestID
 	if tweetID == "" {
-		return "", fmt.Errorf("CreateTweet returned empty tweet ID: %s", truncateBytes(body, 300))
+		return "", fmt.Errorf("CreateTweet returned empty tweet ID: %s", TruncateBytes(body, 300))
 	}
 	return tweetID, nil
 }
 
-// parseAck validates a bare "Done" acknowledgement from a like/unlike mutation
+// Ack validates a bare "Done" acknowledgement from a like/unlike mutation
 // response. op is the op name for error context; key is the data field carrying
-// the ack ("favorite_tweet" / "unfavorite_tweet"). Mirrors parseCreateTweet's
+// the ack ("favorite_tweet" / "unfavorite_tweet"). Mirrors CreateTweet's
 // handling: surface API errors[] first, then on a missing or non-"Done" ack
 // return an error with a truncated body (never a silent success).
-func parseAck(body []byte, op, key string) error {
+func Ack(body []byte, op, key string) error {
 	var raw struct {
 		Data   map[string]json.RawMessage `json:"data"`
 		Errors []struct {
@@ -867,14 +889,14 @@ func parseAck(body []byte, op, key string) error {
 		_ = json.Unmarshal(v, &ack)
 	}
 	if ack != "Done" {
-		return fmt.Errorf("%s did not return \"Done\": %s", op, truncateBytes(body, 300))
+		return fmt.Errorf("%s did not return \"Done\": %s", op, TruncateBytes(body, 300))
 	}
 	return nil
 }
 
-// parseCreateRetweet extracts the new retweet's rest_id from a CreateRetweet
-// mutation response. Mirrors parseCreateTweet's error+empty handling.
-func parseCreateRetweet(body []byte) (string, error) {
+// CreateRetweet extracts the new retweet's rest_id from a CreateRetweet
+// mutation response. Mirrors CreateTweet's error+empty handling.
+func CreateRetweet(body []byte) (string, error) {
 	var raw struct {
 		Data struct {
 			CreateRetweet struct {
@@ -897,15 +919,15 @@ func parseCreateRetweet(body []byte) (string, error) {
 	}
 	id := raw.Data.CreateRetweet.RetweetResults.Result.RestID
 	if id == "" {
-		return "", fmt.Errorf("CreateRetweet returned empty retweet ID: %s", truncateBytes(body, 300))
+		return "", fmt.Errorf("CreateRetweet returned empty retweet ID: %s", TruncateBytes(body, 300))
 	}
 	return id, nil
 }
 
-// parseDeleteRetweet extracts the source tweet's rest_id from a DeleteRetweet
-// mutation response (the op key is "unretweet"). Mirrors parseCreateTweet's
+// DeleteRetweet extracts the source tweet's rest_id from a DeleteRetweet
+// mutation response (the op key is "unretweet"). Mirrors CreateTweet's
 // error+empty handling.
-func parseDeleteRetweet(body []byte) (string, error) {
+func DeleteRetweet(body []byte) (string, error) {
 	var raw struct {
 		Data struct {
 			Unretweet struct {
@@ -928,7 +950,7 @@ func parseDeleteRetweet(body []byte) (string, error) {
 	}
 	id := raw.Data.Unretweet.SourceTweetResults.Result.RestID
 	if id == "" {
-		return "", fmt.Errorf("DeleteRetweet returned empty source tweet ID: %s", truncateBytes(body, 300))
+		return "", fmt.Errorf("DeleteRetweet returned empty source tweet ID: %s", TruncateBytes(body, 300))
 	}
 	return id, nil
 }
@@ -946,9 +968,9 @@ func extractTokenMentions(text string) []string {
 	return result
 }
 
-// parseSearchUsersTimeline parses a People-tab SearchTimeline response —
-// same envelope as parseSearchTimeline, user entries instead of tweets.
-func parseSearchUsersTimeline(body []byte) ([]*TwitterUser, error) {
+// SearchUsersTimeline parses a People-tab SearchTimeline response —
+// same envelope as SearchTimeline, user entries instead of tweets.
+func SearchUsersTimeline(body []byte) ([]*model.TwitterUser, error) {
 	var raw struct {
 		Data struct {
 			SearchByRawQuery struct {
@@ -975,11 +997,11 @@ func parseSearchUsersTimeline(body []byte) ([]*TwitterUser, error) {
 	return users, err
 }
 
-// splitConversation picks the focal tweet (ID match, else first entry) out of
+// SplitConversation picks the focal tweet (ID match, else first entry) out of
 // a TweetDetail conversation page and returns the rest as replies in entry
 // order. Every copy of the focal ID is excluded from replies — the focal
 // reappears inside its own conversationthread-* module as the anchor item.
-func splitConversation(tweets []*Tweet, focalID string) (focal *Tweet, replies []*Tweet) {
+func SplitConversation(tweets []*model.Tweet, focalID string) (focal *model.Tweet, replies []*model.Tweet) {
 	if len(tweets) == 0 {
 		return nil, nil
 	}

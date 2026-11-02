@@ -11,7 +11,7 @@ The logged-out build is one audience's view: the authenticated build can carry d
 ## Verdicts
 
 - **same-shape**: the response root the go-twitter parser reads is unchanged. Inner tweet/user objects are not diffed.
-- **new-shape**: the root moved, or the artifact normalises the timeline through the client's own URT layer (entries arrive as `entry_id` / `content.content` / `details.full_text` / `created_at_ms`, see `xwebTimeline` in `devicefollow.go`), so the legacy timeline parser cannot read it.
+- **new-shape**: the root moved, or the artifact normalises the timeline through the client's own URT layer (entries arrive as `entry_id` / `content.content` / `details.full_text` / `created_at_ms`, see `xwebTimeline` in `internal/parse/devicefollow.go`), so the legacy timeline parser cannot read it.
 - **not-found-in-x-web**: no artifact under any candidate name in the crawled graph.
 - **undetermined**: the artifact was found but its response selection could not be read from the chunk.
 

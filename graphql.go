@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+
+	"github.com/anatolykoptev/go-twitter/internal/parse"
 )
 
 // GetUserByScreenName fetches a user profile by Twitter handle.
@@ -23,7 +25,7 @@ func (c *Client) GetUserByScreenName(ctx context.Context, handle string) (*Twitt
 	if err != nil {
 		return nil, fmt.Errorf("UserByScreenName: %w", err)
 	}
-	return parseUserByScreenName(body)
+	return parse.UserByScreenName(body)
 }
 
 // GetFollowers fetches followers for a user (paginated).
@@ -92,7 +94,7 @@ func (c *Client) fetchUserList(ctx context.Context, operation, userID string, ma
 			return users, fmt.Errorf("%s: %w", operation, err)
 		}
 
-		batch, nextCursor, err := parseUserList(body)
+		batch, nextCursor, err := parse.UserList(body)
 		if err != nil {
 			return users, fmt.Errorf("parse %s: %w", operation, err)
 		}
@@ -151,7 +153,7 @@ func (c *Client) fetchTweetUserList(ctx context.Context, operation, tweetID stri
 			return users, fmt.Errorf("%s: %w", operation, err)
 		}
 
-		batch, nextCursor, err := parseRetweeterList(body)
+		batch, nextCursor, err := parse.RetweeterList(body)
 		if err != nil {
 			return users, fmt.Errorf("parse %s: %w", operation, err)
 		}
@@ -171,7 +173,7 @@ func (c *Client) GetTweetByID(ctx context.Context, tweetID string) (*Tweet, erro
 	if err != nil {
 		return nil, err
 	}
-	focal, _ := splitConversation(tweets, tweetID)
+	focal, _ := parse.SplitConversation(tweets, tweetID)
 	return focal, nil
 }
 
@@ -205,7 +207,7 @@ func (c *Client) getTweetDetail(ctx context.Context, tweetID string) ([]*Tweet, 
 	if err != nil {
 		return nil, fmt.Errorf("TweetDetail: %w", err)
 	}
-	tweets, err := parseTweetDetail(body, tweetID)
+	tweets, err := parse.TweetDetail(body, tweetID)
 	if err != nil {
 		// If parsing fails, log the raw response for debugging
 		slog.Debug("TweetDetail parse failed", slog.String("body_prefix", string(body[:min(500, len(body))])))
@@ -235,7 +237,7 @@ func (c *Client) GetUserTweets(ctx context.Context, userID string, count int) ([
 	if err != nil {
 		return nil, fmt.Errorf("UserTweets: %w", err)
 	}
-	tweets, err := parseTweetTimeline(body, userID)
+	tweets, err := parse.TweetTimeline(body, userID)
 	if err == nil {
 		c.metrics.recordFreshness("UserTweets", tweets)
 	}
@@ -263,7 +265,7 @@ func (c *Client) SearchUsers(ctx context.Context, query string, count int) ([]*T
 	if err != nil {
 		return nil, fmt.Errorf("SearchUsers: %w", err)
 	}
-	return parseSearchUsersTimeline(body)
+	return parse.SearchUsersTimeline(body)
 }
 
 func (c *Client) searchTimeline(ctx context.Context, query string, product SearchProduct, count int) ([]*Tweet, error) {
@@ -271,7 +273,7 @@ func (c *Client) searchTimeline(ctx context.Context, query string, product Searc
 	if err != nil {
 		return nil, fmt.Errorf("SearchTimeline: %w", err)
 	}
-	tweets, err := parseSearchTimeline(body)
+	tweets, err := parse.SearchTimeline(body)
 	if err == nil {
 		c.metrics.recordFreshness("SearchTimeline", tweets)
 	}
@@ -332,7 +334,7 @@ func (c *Client) CreateTweet(ctx context.Context, acc *Account, text string) (st
 	if err != nil {
 		return "", fmt.Errorf("CreateTweet: %w", err)
 	}
-	return parseCreateTweet(body)
+	return parse.CreateTweet(body)
 }
 
 // --- T5.5 engagement mutations (account-pinned POST, mirror CreateTweet) ---
@@ -365,7 +367,7 @@ func (c *Client) LikeTweet(ctx context.Context, acc *Account, tweetID string) er
 	if err != nil {
 		return err
 	}
-	return parseAck(body, "FavoriteTweet", "favorite_tweet")
+	return parse.Ack(body, "FavoriteTweet", "favorite_tweet")
 }
 
 // UnlikeTweet un-favorites a tweet from a specific account. Returns nil on the
@@ -375,7 +377,7 @@ func (c *Client) UnlikeTweet(ctx context.Context, acc *Account, tweetID string) 
 	if err != nil {
 		return err
 	}
-	return parseAck(body, "UnfavoriteTweet", "unfavorite_tweet")
+	return parse.Ack(body, "UnfavoriteTweet", "unfavorite_tweet")
 }
 
 // Retweet retweets a tweet from a specific account. Returns the new retweet ID.
@@ -387,7 +389,7 @@ func (c *Client) Retweet(ctx context.Context, acc *Account, tweetID string) (str
 	if err != nil {
 		return "", err
 	}
-	return parseCreateRetweet(body)
+	return parse.CreateRetweet(body)
 }
 
 // Unretweet removes a retweet from a specific account. Returns the source tweet ID.
@@ -403,7 +405,7 @@ func (c *Client) Unretweet(ctx context.Context, acc *Account, tweetID string) (s
 	if err != nil {
 		return "", err
 	}
-	return parseDeleteRetweet(body)
+	return parse.DeleteRetweet(body)
 }
 
 // ReplyTweet posts a reply to tweetID from a specific account. Returns the reply
@@ -414,7 +416,7 @@ func (c *Client) ReplyTweet(ctx context.Context, acc *Account, tweetID, text str
 	if err != nil {
 		return "", err
 	}
-	return parseCreateTweet(body)
+	return parse.CreateTweet(body)
 }
 
 // replyTweetVariables builds CreateTweet variables for a reply: the same
@@ -500,7 +502,7 @@ func (c *Client) GetBookmarks(ctx context.Context, maxCount int) ([]*Tweet, erro
 				variables["cursor"] = cursor
 			}
 			return variables, bookmarkFeatures()
-		}, parseBookmarks)
+		}, parse.Bookmarks)
 }
 
 // GetListTweets fetches the latest tweets in a list (paginated up to maxCount).
@@ -515,7 +517,7 @@ func (c *Client) GetListTweets(ctx context.Context, listID string, maxCount int)
 				variables["cursor"] = cursor
 			}
 			return variables, endpointFor("ListLatestTweetsTimeline").Features
-		}, parseListTweets)
+		}, parse.ListTweets)
 }
 
 // GetCommunityTweets fetches the latest tweets in a community (paginated up to maxCount).
@@ -532,7 +534,7 @@ func (c *Client) GetCommunityTweets(ctx context.Context, communityID string, max
 				variables["cursor"] = cursor
 			}
 			return variables, endpointFor("CommunityTweetsTimeline").Features
-		}, parseCommunityTweets)
+		}, parse.CommunityTweets)
 }
 
 // GetVerifiedFollowers fetches a user's blue-verified followers (paginated up to
@@ -583,7 +585,7 @@ func (c *Client) fetchHomeTimeline(ctx context.Context, operation string, count 
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", operation, err)
 	}
-	tweets, _, err := parseHomeTimeline(body)
+	tweets, _, err := parse.HomeTimeline(body)
 	if err != nil {
 		return nil, fmt.Errorf("parse %s: %w", operation, err)
 	}
@@ -611,6 +613,6 @@ func (c *Client) GetTweetConversation(ctx context.Context, tweetID string) (*Twe
 	if err != nil {
 		return nil, nil, err
 	}
-	focal, replies := splitConversation(tweets, tweetID)
+	focal, replies := parse.SplitConversation(tweets, tweetID)
 	return focal, replies, nil
 }

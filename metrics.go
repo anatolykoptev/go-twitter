@@ -1,12 +1,13 @@
 package twitter
 
 import (
-	"strconv"
 	"time"
 
 	"go.opentelemetry.io/otel/metric"
 
+	"github.com/anatolykoptev/go-twitter/internal/parse"
 	"github.com/anatolykoptev/go-twitter/internal/telemetry"
+	"github.com/anatolykoptev/go-twitter/internal/tweetflag"
 )
 
 // Metrics: see docs/metrics.md. The instruments, metric names and label values
@@ -121,7 +122,7 @@ func (m *clientMetrics) recordFreshness(endpoint string, tweets []*Tweet) {
 	}
 	var newest time.Time
 	for _, t := range tweets {
-		if t == nil || t.promoted {
+		if t == nil || tweetflag.Promoted(t) {
 			continue
 		}
 		ts, err := SnowflakeTime(t.ID)
@@ -209,29 +210,12 @@ func (m *clientMetrics) recordProxyFailure() {
 }
 
 // twitterEpochMs is the Twitter snowflake epoch (2010-11-04T01:42:54.657Z).
-const twitterEpochMs = 1288834974657
+const twitterEpochMs = parse.TwitterEpochMs
 
 // SnowflakeTime returns the creation time encoded in a Twitter/X snowflake ID
 // (a tweet ID): (id >> 22) + 1288834974657 ms. Consumers use it to compute
 // their own publication-to-first-seen lag.
-func SnowflakeTime(id string) (time.Time, error) {
-	n, err := strconv.ParseUint(id, 10, 64)
-	if err != nil {
-		return time.Time{}, &snowflakeError{id: id, err: err}
-	}
-	return time.UnixMilli(int64(n>>22) + twitterEpochMs).UTC(), nil
-}
-
-type snowflakeError struct {
-	id  string
-	err error
-}
-
-func (e *snowflakeError) Error() string {
-	return "twitter: invalid snowflake id " + strconv.Quote(e.id) + ": " + e.err.Error()
-}
-
-func (e *snowflakeError) Unwrap() error { return e.err }
+func SnowflakeTime(id string) (time.Time, error) { return parse.SnowflakeTime(id) }
 
 // attemptOutcome classifies (proxied: the attempt went through a per-account
 // proxy; only then can a transport failure be attributed to the proxy, the same

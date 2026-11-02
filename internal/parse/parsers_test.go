@@ -1,4 +1,4 @@
-package twitter
+package parse
 
 import (
 	"encoding/json"
@@ -8,6 +8,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/anatolykoptev/go-twitter/model"
 )
 
 func TestParseUserByScreenName(t *testing.T) {
@@ -36,7 +38,7 @@ func TestParseUserByScreenName(t *testing.T) {
 		}
 	}`
 
-	user, err := parseUserByScreenName([]byte(body))
+	user, err := UserByScreenName([]byte(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -75,7 +77,7 @@ func TestParseUserByScreenName_Unavailable(t *testing.T) {
 		}
 	}`
 
-	_, err := parseUserByScreenName([]byte(body))
+	_, err := UserByScreenName([]byte(body))
 	require.ErrorIs(t, err, ErrNotFound, "unavailable user is a deterministic miss")
 }
 
@@ -87,13 +89,13 @@ func TestParseUserByScreenName_ErrorsWithData(t *testing.T) {
 		"data": {"user": {"result": {"__typename": "UserUnavailable", "rest_id": ""}}},
 		"errors": [{"message": "UserUnavailable"}]
 	}`
-	_, err := parseUserByScreenName([]byte(body))
+	_, err := UserByScreenName([]byte(body))
 	require.ErrorIs(t, err, ErrNotFound)
 }
 
 func TestParseUserByScreenName_ErrorsOnly(t *testing.T) {
 	body := `{"data": {}, "errors": [{"message": "bad query"}]}`
-	_, err := parseUserByScreenName([]byte(body))
+	_, err := UserByScreenName([]byte(body))
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "bad query")
 	assert.NotErrorIs(t, err, ErrNotFound)
@@ -108,7 +110,7 @@ func TestParseSearchUsersTimeline(t *testing.T) {
 				{"entryId": "cursor-bottom", "content": {"entryType": "TimelineTimelineCursor", "cursorType": "Bottom", "value": "CUR1"}}
 			]}]}}}}
 	}`)
-	users, err := parseSearchUsersTimeline(body)
+	users, err := SearchUsersTimeline(body)
 	require.NoError(t, err)
 	require.Len(t, users, 1)
 	u := users[0]
@@ -132,7 +134,7 @@ func TestParseSearchUsersTimeline_SkipsTweets(t *testing.T) {
 				{"entryId": "user-8", "content": {"entryType": "TimelineTimelineItem", "itemContent": {"__typename": "TimelineUser", "user_results": {"result": {"__typename": "User", "rest_id": "8", "core": {"name": "Ann", "screen_name": "ann"}, "legacy": {"followers_count": 5}}}}}}
 			]}]}}}}
 	}`)
-	users, err := parseSearchUsersTimeline(body)
+	users, err := SearchUsersTimeline(body)
 	require.NoError(t, err)
 	require.Len(t, users, 1)
 	assert.Equal(t, "ann", users[0].Handle)
@@ -143,34 +145,34 @@ func TestParseSearchUsersTimeline_SkipsTweets(t *testing.T) {
 // production callers go through parseTweetDetail's ErrNotFound gate),
 // replies keep entry order minus every copy of the focal ID.
 func TestSplitConversation(t *testing.T) {
-	focal := &Tweet{ID: "10"}
-	reply1 := &Tweet{ID: "11"}
-	reply2 := &Tweet{ID: "12"}
+	focal := &model.Tweet{ID: "10"}
+	reply1 := &model.Tweet{ID: "11"}
+	reply2 := &model.Tweet{ID: "12"}
 
-	main, replies := splitConversation([]*Tweet{focal, reply1, reply2}, "10")
+	main, replies := SplitConversation([]*model.Tweet{focal, reply1, reply2}, "10")
 	assert.Equal(t, "10", main.ID)
 	require.Len(t, replies, 2)
 	assert.Equal(t, "11", replies[0].ID)
 
 	// The focal reappears as the anchor item of its own conversationthread-*
 	// module — every copy must stay out of replies.
-	dup := &Tweet{ID: "10"}
-	main, replies = splitConversation([]*Tweet{focal, dup, reply1}, "10")
+	dup := &model.Tweet{ID: "10"}
+	main, replies = SplitConversation([]*model.Tweet{focal, dup, reply1}, "10")
 	assert.Equal(t, "10", main.ID)
 	require.Len(t, replies, 1)
 	assert.Equal(t, "11", replies[0].ID)
 
 	// Defensive fallback only: unreachable through getTweetDetail, which
 	// returns ErrNotFound when the focal is absent.
-	main, replies = splitConversation([]*Tweet{reply1, reply2}, "10")
+	main, replies = SplitConversation([]*model.Tweet{reply1, reply2}, "10")
 	assert.Equal(t, "11", main.ID)
 	require.Len(t, replies, 1)
 	assert.Equal(t, "12", replies[0].ID)
 
-	main, _ = splitConversation([]*Tweet{focal}, "10")
+	main, _ = SplitConversation([]*model.Tweet{focal}, "10")
 	assert.Equal(t, "10", main.ID)
 
-	main, replies = splitConversation(nil, "10")
+	main, replies = SplitConversation(nil, "10")
 	assert.Nil(t, main)
 	assert.Empty(t, replies)
 }
@@ -232,10 +234,10 @@ func TestParseTweetDetail_ConversationModules(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	tweets, err := parseTweetDetail(body, "100")
+	tweets, err := TweetDetail(body, "100")
 	require.NoError(t, err)
 	require.Len(t, tweets, 4, "pin + focal module anchor + 2 replies; both promoted items excluded")
-	focal, replies := splitConversation(tweets, "100")
+	focal, replies := SplitConversation(tweets, "100")
 	require.NotNil(t, focal)
 	assert.Equal(t, "100", focal.ID)
 	assert.Equal(t, "focal tweet", focal.Text)
@@ -281,7 +283,7 @@ func TestParseTweetDetail_VisibilityWrappedFocal(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	tweets, err := parseTweetDetail(body, "100")
+	tweets, err := TweetDetail(body, "100")
 	require.NoError(t, err)
 	require.Len(t, tweets, 1)
 	assert.Equal(t, "100", tweets[0].ID)
@@ -301,7 +303,7 @@ func TestParseTweetDetail_FocalAbsent(t *testing.T) {
 			]}}
 		]}
 	]}}}`
-	_, err := parseTweetDetail([]byte(body), "100")
+	_, err := TweetDetail([]byte(body), "100")
 	require.ErrorIs(t, err, ErrNotFound)
 }
 
@@ -309,14 +311,14 @@ func TestParseTweetDetail_FocalAbsent(t *testing.T) {
 // surface as an error, not an empty conversation.
 func TestParseTweetDetail_Errors(t *testing.T) {
 	body := `{"data":{},"errors":[{"message":"Rate limit exceeded"}]}`
-	_, err := parseTweetDetail([]byte(body), "")
+	_, err := TweetDetail([]byte(body), "")
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "Rate limit exceeded")
 }
 
 func TestParseSearchTimeline_Errors(t *testing.T) {
 	body := `{"data":{},"errors":[{"message":"query too long"}]}`
-	_, err := parseSearchTimeline([]byte(body))
+	_, err := SearchTimeline([]byte(body))
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "query too long")
 }
@@ -361,7 +363,7 @@ func TestParseSearchTimeline(t *testing.T) {
 		}
 	}`
 
-	tweets, err := parseSearchTimeline([]byte(body))
+	tweets, err := SearchTimeline([]byte(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -429,7 +431,7 @@ const tweetInstructions = `"instructions": [{
 
 // assertOneTweetWithCursor checks the (tweets, cursor) result every read-cluster
 // parser must produce against the shared tweetInstructions fixture.
-func assertOneTweetWithCursor(t *testing.T, tweets []*Tweet, cursor string, err error) {
+func assertOneTweetWithCursor(t *testing.T, tweets []*model.Tweet, cursor string, err error) {
 	t.Helper()
 	if err != nil {
 		t.Fatal(err)
@@ -450,25 +452,25 @@ func assertOneTweetWithCursor(t *testing.T, tweets []*Tweet, cursor string, err 
 
 func TestParseBookmarks(t *testing.T) {
 	body := `{"data":{"bookmark_timeline_v2":{"timeline":{` + tweetInstructions + `}}}}`
-	tweets, cursor, err := parseBookmarks([]byte(body))
+	tweets, cursor, err := Bookmarks([]byte(body))
 	assertOneTweetWithCursor(t, tweets, cursor, err)
 }
 
 func TestParseHomeTimeline(t *testing.T) {
 	body := `{"data":{"home":{"home_timeline_urt":{` + tweetInstructions + `}}}}`
-	tweets, cursor, err := parseHomeTimeline([]byte(body))
+	tweets, cursor, err := HomeTimeline([]byte(body))
 	assertOneTweetWithCursor(t, tweets, cursor, err)
 }
 
 func TestParseListTweets(t *testing.T) {
 	body := `{"data":{"list":{"tweets_timeline":{"timeline":{` + tweetInstructions + `}}}}}`
-	tweets, cursor, err := parseListTweets([]byte(body))
+	tweets, cursor, err := ListTweets([]byte(body))
 	assertOneTweetWithCursor(t, tweets, cursor, err)
 }
 
 func TestParseCommunityTweets(t *testing.T) {
 	body := `{"data":{"communityResults":{"result":{"ranked_community_timeline":{"timeline":{` + tweetInstructions + `}}}}}}`
-	tweets, cursor, err := parseCommunityTweets([]byte(body))
+	tweets, cursor, err := CommunityTweets([]byte(body))
 	assertOneTweetWithCursor(t, tweets, cursor, err)
 }
 
@@ -478,7 +480,7 @@ func TestParseCommunityTweets(t *testing.T) {
 // resilience guarantee documented in timelineTweetParse.
 func TestParseCommunityTweets_RecursiveFallback(t *testing.T) {
 	body := `{"data":{"communityResults":{"result":{"some_other_wrapper_key":{"timeline":{` + tweetInstructions + `}}}}}}`
-	tweets, cursor, err := parseCommunityTweets([]byte(body))
+	tweets, cursor, err := CommunityTweets([]byte(body))
 	assertOneTweetWithCursor(t, tweets, cursor, err)
 }
 
@@ -506,7 +508,7 @@ func instrBlockJSON(entries ...string) string {
 // tweet ("123") and never the decoy ("999"). It FAILS if the typed root key is
 // broken, because the recursive fallback would then surface the larger decoy
 // block instead.
-func assertTypedTweet(t *testing.T, tweets []*Tweet, err error) {
+func assertTypedTweet(t *testing.T, tweets []*model.Tweet, err error) {
 	t.Helper()
 	if err != nil {
 		t.Fatal(err)
@@ -521,7 +523,7 @@ func assertTypedTweet(t *testing.T, tweets []*Tweet, err error) {
 	}
 }
 
-func tweetIDs(tweets []*Tweet) []string {
+func tweetIDs(tweets []*model.Tweet) []string {
 	ids := make([]string, len(tweets))
 	for i, tw := range tweets {
 		ids[i] = tw.ID
@@ -539,21 +541,21 @@ var decoyBlock = `"decoy_module":{` + instrBlockJSON(tweetEntryJSON("999"), twee
 // the typed path must win over a larger decoy block under data.
 func TestParseBookmarks_DiscriminatesRoot(t *testing.T) {
 	body := `{"data":{"bookmark_timeline_v2":{"timeline":{` + instrBlockJSON(tweetEntryJSON("123")) + `}},` + decoyBlock + `}}`
-	tweets, _, err := parseBookmarks([]byte(body))
+	tweets, _, err := Bookmarks([]byte(body))
 	assertTypedTweet(t, tweets, err)
 }
 
 // TestParseHomeTimeline_DiscriminatesRoot pins data.home.home_timeline_urt.
 func TestParseHomeTimeline_DiscriminatesRoot(t *testing.T) {
 	body := `{"data":{"home":{"home_timeline_urt":{` + instrBlockJSON(tweetEntryJSON("123")) + `}},` + decoyBlock + `}}`
-	tweets, _, err := parseHomeTimeline([]byte(body))
+	tweets, _, err := HomeTimeline([]byte(body))
 	assertTypedTweet(t, tweets, err)
 }
 
 // TestParseListTweets_DiscriminatesRoot pins data.list.tweets_timeline.timeline.
 func TestParseListTweets_DiscriminatesRoot(t *testing.T) {
 	body := `{"data":{"list":{"tweets_timeline":{"timeline":{` + instrBlockJSON(tweetEntryJSON("123")) + `}}},` + decoyBlock + `}}`
-	tweets, _, err := parseListTweets([]byte(body))
+	tweets, _, err := ListTweets([]byte(body))
 	assertTypedTweet(t, tweets, err)
 }
 
@@ -563,7 +565,7 @@ func TestParseListTweets_DiscriminatesRoot(t *testing.T) {
 // differs, this test fails and the code + assertion update together.
 func TestParseCommunityTweets_DiscriminatesRoot(t *testing.T) {
 	body := `{"data":{"communityResults":{"result":{"ranked_community_timeline":{"timeline":{` + instrBlockJSON(tweetEntryJSON("123")) + `}}}},` + decoyBlock + `}}`
-	tweets, _, err := parseCommunityTweets([]byte(body))
+	tweets, _, err := CommunityTweets([]byte(body))
 	assertTypedTweet(t, tweets, err)
 }
 
@@ -628,7 +630,7 @@ func TestParseBlueVerifiedFollowers(t *testing.T) {
 			}]
 		}}}}}
 	}`
-	users, cursor, err := parseUserList([]byte(body))
+	users, cursor, err := UserList([]byte(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -650,15 +652,15 @@ func TestParseBlueVerifiedFollowers(t *testing.T) {
 
 func TestParseAck_Favorite(t *testing.T) {
 	// Success: bare "Done" ack.
-	if err := parseAck([]byte(`{"data":{"favorite_tweet":"Done"}}`), "FavoriteTweet", "favorite_tweet"); err != nil {
+	if err := Ack([]byte(`{"data":{"favorite_tweet":"Done"}}`), "FavoriteTweet", "favorite_tweet"); err != nil {
 		t.Fatalf("expected nil on Done ack, got %v", err)
 	}
 	// Success: unfavorite key.
-	if err := parseAck([]byte(`{"data":{"unfavorite_tweet":"Done"}}`), "UnfavoriteTweet", "unfavorite_tweet"); err != nil {
+	if err := Ack([]byte(`{"data":{"unfavorite_tweet":"Done"}}`), "UnfavoriteTweet", "unfavorite_tweet"); err != nil {
 		t.Fatalf("expected nil on Done ack, got %v", err)
 	}
 	// API error surfaced.
-	err := parseAck([]byte(`{"errors":[{"message":"already favorited"}]}`), "FavoriteTweet", "favorite_tweet")
+	err := Ack([]byte(`{"errors":[{"message":"already favorited"}]}`), "FavoriteTweet", "favorite_tweet")
 	if err == nil {
 		t.Fatal("expected error from errors[]")
 	}
@@ -666,10 +668,10 @@ func TestParseAck_Favorite(t *testing.T) {
 		t.Fatalf("expected API message surfaced, got %v", err)
 	}
 	// Missing / non-"Done" ack -> error (not silent success).
-	if err := parseAck([]byte(`{"data":{}}`), "FavoriteTweet", "favorite_tweet"); err == nil {
+	if err := Ack([]byte(`{"data":{}}`), "FavoriteTweet", "favorite_tweet"); err == nil {
 		t.Fatal("expected error on missing ack")
 	}
-	if err := parseAck([]byte(`{"data":{"favorite_tweet":"Nope"}}`), "FavoriteTweet", "favorite_tweet"); err == nil {
+	if err := Ack([]byte(`{"data":{"favorite_tweet":"Nope"}}`), "FavoriteTweet", "favorite_tweet"); err == nil {
 		t.Fatal("expected error on non-Done ack")
 	}
 }
@@ -677,7 +679,7 @@ func TestParseAck_Favorite(t *testing.T) {
 func TestParseCreateRetweet(t *testing.T) {
 	// Success-shape -> retweet rest_id.
 	body := `{"data":{"create_retweet":{"retweet_results":{"result":{"rest_id":"1700000000000000001"}}}}}`
-	id, err := parseCreateRetweet([]byte(body))
+	id, err := CreateRetweet([]byte(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -685,12 +687,12 @@ func TestParseCreateRetweet(t *testing.T) {
 		t.Fatalf("expected retweet id, got %q", id)
 	}
 	// errors[] surfaced.
-	_, err = parseCreateRetweet([]byte(`{"errors":[{"message":"rate limited"}]}`))
+	_, err = CreateRetweet([]byte(`{"errors":[{"message":"rate limited"}]}`))
 	if err == nil || !strings.Contains(err.Error(), "rate limited") {
 		t.Fatalf("expected API error surfaced, got %v", err)
 	}
 	// Empty/missing result -> error.
-	if _, err := parseCreateRetweet([]byte(`{"data":{"create_retweet":{}}}`)); err == nil {
+	if _, err := CreateRetweet([]byte(`{"data":{"create_retweet":{}}}`)); err == nil {
 		t.Fatal("expected error on empty retweet result")
 	}
 }
@@ -698,7 +700,7 @@ func TestParseCreateRetweet(t *testing.T) {
 func TestParseDeleteRetweet(t *testing.T) {
 	// Success-shape -> source tweet rest_id (op key "unretweet").
 	body := `{"data":{"unretweet":{"source_tweet_results":{"result":{"rest_id":"1600000000000000002"}}}}}`
-	id, err := parseDeleteRetweet([]byte(body))
+	id, err := DeleteRetweet([]byte(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -706,12 +708,12 @@ func TestParseDeleteRetweet(t *testing.T) {
 		t.Fatalf("expected source tweet id, got %q", id)
 	}
 	// errors[] surfaced.
-	_, err = parseDeleteRetweet([]byte(`{"errors":[{"message":"not found"}]}`))
+	_, err = DeleteRetweet([]byte(`{"errors":[{"message":"not found"}]}`))
 	if err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("expected API error surfaced, got %v", err)
 	}
 	// Empty/missing result -> error.
-	if _, err := parseDeleteRetweet([]byte(`{"data":{"unretweet":{}}}`)); err == nil {
+	if _, err := DeleteRetweet([]byte(`{"data":{"unretweet":{}}}`)); err == nil {
 		t.Fatal("expected error on empty source result")
 	}
 }
@@ -735,22 +737,10 @@ func TestExtractTokenMentions(t *testing.T) {
 	}
 }
 
-func TestCT0(t *testing.T) {
-	ct0 := GenerateCT0()
-	if len(ct0) != 64 {
-		t.Fatalf("expected 64 char hex, got %d chars", len(ct0))
-	}
-	// Should be different each time
-	ct02 := GenerateCT0()
-	if ct0 == ct02 {
-		t.Fatal("expected different ct0 values")
-	}
-}
-
 func TestParseCreateTweet(t *testing.T) {
 	// Success-shape -> tweet rest_id (ReplyTweet reuses this parser).
 	body := `{"data":{"create_tweet":{"tweet_results":{"result":{"rest_id":"1800000000000000001"}}}}}`
-	id, err := parseCreateTweet([]byte(body))
+	id, err := CreateTweet([]byte(body))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -758,12 +748,12 @@ func TestParseCreateTweet(t *testing.T) {
 		t.Fatalf("expected tweet id, got %q", id)
 	}
 	// errors[] surfaced.
-	_, err = parseCreateTweet([]byte(`{"errors":[{"message":"duplicate"}]}`))
+	_, err = CreateTweet([]byte(`{"errors":[{"message":"duplicate"}]}`))
 	if err == nil || !strings.Contains(err.Error(), "duplicate") {
 		t.Fatalf("expected API error surfaced, got %v", err)
 	}
 	// Empty/missing result -> error (the silent-no-op trap for the reply path).
-	if _, err := parseCreateTweet([]byte(`{"data":{"create_tweet":{}}}`)); err == nil {
+	if _, err := CreateTweet([]byte(`{"data":{"create_tweet":{}}}`)); err == nil {
 		t.Fatal("expected error on empty tweet result")
 	}
 }
@@ -779,12 +769,12 @@ func TestParseCreateTweet(t *testing.T) {
 // Fixture provenance: testdata/ubsn_cz_binance.json is the verbatim body
 // returned by GetUserByScreenName via a downstream consumer's deployed credentials.
 func TestParseUserByScreenName_CoreShape(t *testing.T) {
-	body, err := os.ReadFile("testdata/ubsn_cz_binance.json")
+	body, err := os.ReadFile("../../testdata/ubsn_cz_binance.json")
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
 
-	user, err := parseUserByScreenName(body)
+	user, err := UserByScreenName(body)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -880,7 +870,7 @@ func TestParseUserResult_BioProfileBioPath(t *testing.T) {
 		}
 	}`)
 
-	user, err := parseUserByScreenName(body)
+	user, err := UserByScreenName(body)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -916,7 +906,7 @@ func TestParseUserResult_BioLegacyFallback(t *testing.T) {
 		}
 	}`)
 
-	user, err := parseUserByScreenName(body)
+	user, err := UserByScreenName(body)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -962,7 +952,7 @@ func TestParseUserResult_LegacyFallback(t *testing.T) {
 		}
 	}`)
 
-	user, err := parseUserByScreenName(body)
+	user, err := UserByScreenName(body)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -993,12 +983,12 @@ func TestParseUserResult_LegacyFallback(t *testing.T) {
 // Fixture provenance: testdata/usertweets_vitalik.json is a single real timeline
 // entry extracted verbatim from the deployed UserTweets response.
 func TestParseUserTweets_CoreAuthorShape(t *testing.T) {
-	body, err := os.ReadFile("testdata/usertweets_vitalik.json")
+	body, err := os.ReadFile("../../testdata/usertweets_vitalik.json")
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
 
-	tweets, err := parseTweetTimeline(body, "295218901")
+	tweets, err := TweetTimeline(body, "295218901")
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -1030,12 +1020,12 @@ func TestParseUserTweets_CoreAuthorShape(t *testing.T) {
 // body returned by GetUserByScreenName through the deployed go-social shared
 // client on 2026-10-17.
 func TestParseUserByScreenName_NoLegacyShape(t *testing.T) {
-	body, err := os.ReadFile("testdata/ubsn_elonmusk_nolegacy.json")
+	body, err := os.ReadFile("../../testdata/ubsn_elonmusk_nolegacy.json")
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
 
-	user, err := parseUserByScreenName(body)
+	user, err := UserByScreenName(body)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}
@@ -1099,7 +1089,7 @@ func TestParseUserResult_RelationshipCountsPreferred(t *testing.T) {
 		}
 	}`)
 
-	user, err := parseUserByScreenName(body)
+	user, err := UserByScreenName(body)
 	if err != nil {
 		t.Fatalf("parse: %v", err)
 	}

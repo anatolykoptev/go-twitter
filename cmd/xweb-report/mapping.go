@@ -4,7 +4,7 @@ package main
 // twitter.Endpoints) is expected to appear in the x-web stack.
 //
 // The legacy side (variables, response root, parser) is transcribed from the
-// call sites in graphql.go / devicefollow.go and the parsers in parsers.go; the
+// call sites in graphql.go / devicefollow.go and the parsers in internal/parse; the
 // completeness test fails when an Endpoints key has no row here, so a newly
 // added operation cannot silently escape the report.
 type opSpec struct {
