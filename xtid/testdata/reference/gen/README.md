@@ -33,6 +33,20 @@ Two data sets, each a page plus the script that carries the key-byte indices:
   few entries, and the four loading animation SVGs. Everything else (guest
   cookies, nonces, tokens, the rest of the app shell) is dropped.
 
+## The one known divergence from the reference
+
+The reference floors a colour channel at 0 but does not cap it at 255, so for
+about 4% of verification keys a channel prints as three hex digits (`112`)
+where X expects `ff`; X answers 404 to those ids (live probe, 2026-11-02: 4 of 4
+key loads with a channel above 255 failed, 46 of 46 without passed, and the same
+keys succeeded once capped). `xtid` caps the channel, so each `animate` and
+`keys` vector carries two values: the reference's own output and the
+expectation `xtid` is held to, `xExpected` in `gen.mjs` (the reference's
+computation with `min(v, 255)`). They are equal wherever no channel exceeds 255,
+and `TestReferenceGolden` fails unless they differ only in the leading channels.
+For those vectors live X, not the reference, is the oracle. Nothing else is
+excluded from the comparison.
+
 ## What the vectors cover
 
 - `animate`: `animate(row, t)` for every frame x row, with random times, times

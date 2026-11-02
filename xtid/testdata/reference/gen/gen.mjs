@@ -68,6 +68,18 @@ function variantAnimate(ct, frames, targetTime, { eps, clamp }) {
   return strArr.join("").replace(/[.-]/g, "");
 }
 
+// KNOWN DIVERGENCE FROM THE REFERENCE (the only one). The reference floors a
+// colour channel at 0 but does not cap it at 255, so a channel can print as
+// three hex digits ("112") where X expects "ff"; X answers 404 to such ids (live
+// probe, 2026-11-02: 4 of 4 key loads with a channel above 255 failed, 46 of 46
+// without passed). Every animation vector therefore carries two expectations:
+// the reference's own output (kept, and still compared by the self-check below)
+// and xExpected, the reference's computation with the channel capped at 255 -
+// what xtid must produce. They are equal wherever no channel exceeds 255.
+function xExpected(ct, frames, t) {
+  return variantAnimate(ct, frames, t, { eps: 1e-5, clamp: true });
+}
+
 const SETS = [
   { name: "fixture", page: "../home_real.html", ondemand: "../ondemand_real.js", seed: 101 },
   { name: "live", page: "live_page.html", ondemand: "live_ondemand.js", seed: 202 },
@@ -121,7 +133,7 @@ async function buildSet(spec) {
     if (!same(ref5, key)) throw new Error(`variant self-check failed at ${k}`);
     if (!same(variantAnimate(ct, arrs[f][row], t, { eps: 1e-5, clamp: true }), key)) stats.clampCases++;
     if (!same(variantAnimate(ct, arrs[f][row], t, { eps: 1e-6, clamp: false }), key)) stats.epsilonCases++;
-    animate.push([f, row, t, key]);
+    animate.push([f, row, t, key, xExpected(ct, arrs[f][row], t)]);
   };
   for (let f = 0; f < 4; f++) for (let row = 0; row < arrs[f].length; row++) {
     const clampT = [], epsT = [];
@@ -153,7 +165,7 @@ async function buildSet(spec) {
     const key = ct.getAnimationKey(kb, doc);
     const d = describe(kb);
     if (!same(variantAnimate(ct, arrs[d.f][d.row], d.t, { eps: 1e-5, clamp: false }), key)) throw new Error("key variant self-check failed");
-    keys.push([Buffer.from(kb).toString("base64"), key]);
+    keys.push([Buffer.from(kb).toString("base64"), key, xExpected(ct, arrs[d.f][d.row], d.t)]);
     return d;
   };
   addKey(ct.keyBytes.slice());

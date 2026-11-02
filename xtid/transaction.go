@@ -106,14 +106,14 @@ func (ct *ClientTransaction) animate(frames []int, targetTime float64) string {
 	val := c.getValue(targetTime)
 
 	color := interpolate(fromColor, toColor, val)
-	// Floor at 0 only, as the reference does (`value > 0 ? value : 0`). The
-	// cubic overshoots [0,1] (its y control values lie in [-1,1]), so a channel
-	// can legitimately exceed 255 and print as "100"; clamping it to "ff"
-	// produced a different animation key for ~4% of random verification keys.
+	// Cap every channel to 0..255. The cubic overshoots [0,1] (its y control
+	// values lie in [-1,1]), so a channel can reach ~285; it would print as three
+	// hex digits ("112") where X expects "ff", and X rejects the id with a 404.
+	// That is about 4% of verification keys. The reference implementation
+	// (Lqm1/x-client-transaction-id) floors at 0 but does not cap, so it shares
+	// the defect: for these keys live X, not the reference, is the oracle.
 	for i := range color {
-		if color[i] < 0 {
-			color[i] = 0
-		}
+		color[i] = math.Max(0, math.Min(255, color[i]))
 	}
 
 	rotation := interpolate(fromRotation, toRotation, val)
