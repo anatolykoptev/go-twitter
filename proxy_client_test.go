@@ -14,6 +14,8 @@ import (
 	"github.com/stretchr/testify/require"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
+
+	"github.com/anatolykoptev/go-twitter/internal/telemetry"
 )
 
 // One malformed per-account proxy must disable ONLY that account, never the
@@ -242,15 +244,15 @@ func TestBadProxyClient_FailureAlertFiresOnceForBadAccount(t *testing.T) {
 	var got int64
 	for _, sm := range rm.ScopeMetrics {
 		for _, mm := range sm.Metrics {
-			if mm.Name != metricProxyClientFailures {
+			if mm.Name != telemetry.MetricProxyClientFailures {
 				continue
 			}
 			s, ok := mm.Data.(metricdata.Sum[int64])
-			require.True(t, ok, "%s must be an Int64 sum", metricProxyClientFailures)
+			require.True(t, ok, "%s must be an Int64 sum", telemetry.MetricProxyClientFailures)
 			for _, dp := range s.DataPoints {
 				got += dp.Value
 			}
 		}
 	}
-	assert.Equal(t, int64(1), got, "%s must record the one failed build", metricProxyClientFailures)
+	assert.Equal(t, int64(1), got, "%s must record the one failed build", telemetry.MetricProxyClientFailures)
 }

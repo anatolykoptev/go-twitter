@@ -17,6 +17,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 
 	"github.com/anatolykoptev/go-twitter/internal/gqlextract"
+	"github.com/anatolykoptev/go-twitter/internal/telemetry"
 )
 
 // x-web source for the runtime refresh (#119 phase 1). The fake X serves, next
@@ -203,14 +204,14 @@ func qidSeries(t *testing.T, reader sdkmetric.Reader) map[string]int64 {
 	series := map[string]int64{}
 	for _, sm := range rm.ScopeMetrics {
 		for _, m := range sm.Metrics {
-			if m.Name != metricQIDRefreshes {
+			if m.Name != telemetry.MetricQIDRefreshes {
 				continue
 			}
 			sum, ok := m.Data.(metricdata.Sum[int64])
 			require.True(t, ok)
 			for _, p := range sum.DataPoints {
 				a := attrMap(p.Attributes)
-				series[a[attrTrigger]+"/"+a[attrResult]] = p.Value
+				series[a[telemetry.AttrTrigger]+"/"+a[telemetry.AttrResult]] = p.Value
 			}
 		}
 	}

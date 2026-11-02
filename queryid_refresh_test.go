@@ -21,6 +21,7 @@ import (
 
 	"github.com/anatolykoptev/go-twitter/internal/bundle"
 	"github.com/anatolykoptev/go-twitter/internal/gqlextract"
+	"github.com/anatolykoptev/go-twitter/internal/telemetry"
 )
 
 // Runtime queryId refresh journeys (#68). Each drives the real request path
@@ -595,21 +596,21 @@ func TestQIDRefresh_F7_MetricRecordsTriggerAndResult(t *testing.T) {
 		}
 	}
 
-	refreshes, ok := got[metricQIDRefreshes].Data.(metricdata.Sum[int64])
+	refreshes, ok := got[telemetry.MetricQIDRefreshes].Data.(metricdata.Sum[int64])
 	require.True(t, ok, "queryid.refreshes must be an int64 counter")
 	series := map[string]int64{}
 	for _, p := range refreshes.DataPoints {
 		a := attrMap(p.Attributes)
-		series[a[attrTrigger]+"/"+a[attrResult]] = p.Value
+		series[a[telemetry.AttrTrigger]+"/"+a[telemetry.AttrResult]] = p.Value
 	}
 	assert.Equal(t, map[string]int64{"first/ok": 1, "ttl/fetch_failed": 1}, series)
 
-	changed, ok := got[metricQIDChanged].Data.(metricdata.Gauge[int64])
+	changed, ok := got[telemetry.MetricQIDChanged].Data.(metricdata.Gauge[int64])
 	require.True(t, ok)
 	require.Len(t, changed.DataPoints, 1)
 	assert.EqualValues(t, 1, changed.DataPoints[0].Value, "SearchTimeline differs from the compiled set")
 
-	age, ok := got[metricQIDAge].Data.(metricdata.Gauge[float64])
+	age, ok := got[telemetry.MetricQIDAge].Data.(metricdata.Gauge[float64])
 	require.True(t, ok)
 	require.NotEmpty(t, age.DataPoints)
 	assert.Greater(t, age.DataPoints[len(age.DataPoints)-1].Value, qidRefreshTTL.Seconds(),
@@ -770,9 +771,9 @@ func TestQIDRefresh_F10_FailuresBackOffExponentially(t *testing.T) {
 	var suppressed int64
 	for _, sm := range rm.ScopeMetrics {
 		for _, m := range sm.Metrics {
-			if sum, ok := m.Data.(metricdata.Sum[int64]); ok && m.Name == metricQIDRefreshes {
+			if sum, ok := m.Data.(metricdata.Sum[int64]); ok && m.Name == telemetry.MetricQIDRefreshes {
 				for _, p := range sum.DataPoints {
-					if attrMap(p.Attributes)[attrResult] == qidResultSuppressed {
+					if attrMap(p.Attributes)[telemetry.AttrResult] == qidResultSuppressed {
 						suppressed += p.Value
 					}
 				}

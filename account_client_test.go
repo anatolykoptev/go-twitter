@@ -11,6 +11,7 @@ import (
 
 	stealth "github.com/anatolykoptev/go-stealth"
 	"github.com/anatolykoptev/go-stealth/pool"
+	"github.com/anatolykoptev/go-twitter/internal/telemetry"
 	"github.com/anatolykoptev/go-twitter/xtid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -174,8 +175,8 @@ func requestOutcomes(t *testing.T, drive func(ctx context.Context, c *Client, ac
 		}
 	}
 	var labels []string
-	for _, dp := range histPoints(t, all, metricRequestDuration) {
-		labels = append(labels, attrMap(dp.Attributes)[attrOutcome])
+	for _, dp := range histPoints(t, all, telemetry.MetricRequestDuration) {
+		labels = append(labels, attrMap(dp.Attributes)[telemetry.AttrOutcome])
 	}
 	return acc, labels, alerts
 }
@@ -184,7 +185,7 @@ func assertNotChargedToProxy(t *testing.T, acc *Account, labels, alerts []string
 	t.Helper()
 	require.NotEmpty(t, labels)
 	for _, l := range labels {
-		assert.Equal(t, outcomeTransport, l, "a no-proxy account's transport failure must not be labelled proxy")
+		assert.Equal(t, telemetry.OutcomeTransport, l, "a no-proxy account's transport failure must not be labelled proxy")
 	}
 	acc.mu.Lock()
 	consec, backoff := acc.proxyConsecFails, acc.proxyBackoff

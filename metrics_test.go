@@ -17,6 +17,7 @@ import (
 	stealth "github.com/anatolykoptev/go-stealth"
 	"github.com/anatolykoptev/go-stealth/pool"
 	"github.com/anatolykoptev/go-stealth/ratelimit"
+	"github.com/anatolykoptev/go-twitter/internal/telemetry"
 	"github.com/anatolykoptev/go-twitter/xpff"
 	"github.com/anatolykoptev/go-twitter/xtid"
 	"github.com/stretchr/testify/assert"
@@ -159,7 +160,7 @@ func (f *metricsFixture) collect(t *testing.T) map[string]metricdata.Metrics {
 	require.NoError(t, f.reader.Collect(context.Background(), &rm))
 	out := map[string]metricdata.Metrics{}
 	for _, sm := range rm.ScopeMetrics {
-		assert.Equal(t, meterName, sm.Scope.Name)
+		assert.Equal(t, telemetry.MeterName, sm.Scope.Name)
 		for _, m := range sm.Metrics {
 			out[m.Name] = m
 		}
@@ -212,11 +213,11 @@ func TestMetrics_UserTweetsJourney_RecordsDurationOK(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, tweets, 1)
 
-	pts := histPoints(t, f.collect(t), metricRequestDuration)
+	pts := histPoints(t, f.collect(t), telemetry.MetricRequestDuration)
 	require.Len(t, pts, 1, "exactly one request attempt was made")
-	assert.Equal(t, map[string]string{attrOperation: "UserTweets", attrOutcome: outcomeOK}, attrMap(pts[0].Attributes))
+	assert.Equal(t, map[string]string{telemetry.AttrOperation: "UserTweets", telemetry.AttrOutcome: telemetry.OutcomeOK}, attrMap(pts[0].Attributes))
 	assert.Equal(t, uint64(1), pts[0].Count)
-	assert.Equal(t, requestDurationBuckets, pts[0].Bounds)
+	assert.Equal(t, telemetry.RequestDurationBuckets, pts[0].Bounds)
 
 	assert.Equal(t, []hookCall{{"UserTweets", true, false}}, calls, "legacy MetricsHook must be unchanged")
 }
@@ -234,12 +235,12 @@ func TestMetrics_429RecordsRateLimited(t *testing.T) {
 	_, err := f.c.GetUserTweets(ctx, "999", 20)
 	require.Error(t, err)
 
-	pts := histPoints(t, f.collect(t), metricRequestDuration)
+	pts := histPoints(t, f.collect(t), telemetry.MetricRequestDuration)
 	require.NotEmpty(t, pts)
 	for _, p := range pts {
 		a := attrMap(p.Attributes)
-		assert.Equal(t, "UserTweets", a[attrOperation])
-		assert.Equal(t, outcomeRateLimited, a[attrOutcome], "a 429 must be rate_limited, got %v", a)
+		assert.Equal(t, "UserTweets", a[telemetry.AttrOperation])
+		assert.Equal(t, telemetry.OutcomeRateLimited, a[telemetry.AttrOutcome], "a 429 must be rate_limited, got %v", a)
 	}
 }
 
@@ -260,12 +261,12 @@ func TestMetrics_ListTweetsJourney_RecordsFreshness(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, tweets, 3)
 
-	pts := histPoints(t, f.collect(t), metricFreshness)
+	pts := histPoints(t, f.collect(t), telemetry.MetricFreshness)
 	require.Len(t, pts, 1)
-	assert.Equal(t, map[string]string{attrOperation: "ListLatestTweetsTimeline"}, attrMap(pts[0].Attributes))
+	assert.Equal(t, map[string]string{telemetry.AttrOperation: "ListLatestTweetsTimeline"}, attrMap(pts[0].Attributes))
 	assert.Equal(t, uint64(1), pts[0].Count)
 	assert.InDelta(t, 5.0, pts[0].Sum, 0.01, "freshness is the age of the NEWEST tweet")
-	assert.Equal(t, freshnessBuckets, pts[0].Bounds)
+	assert.Equal(t, telemetry.FreshnessBuckets, pts[0].Bounds)
 }
 
 // F4 — no instrument's attributes carry an account handle / user id / list id;
@@ -282,9 +283,9 @@ func TestMetrics_AttributesAreBoundedAndAccountFree(t *testing.T) {
 	require.NoError(t, err)
 
 	want := map[string][]string{
-		metricRequestDuration: {attrOperation, attrOutcome},
-		metricFreshness:       {attrOperation},
-		metricPoolAccounts:    {attrAccountState},
+		telemetry.MetricRequestDuration: {telemetry.AttrOperation, telemetry.AttrOutcome},
+		telemetry.MetricFreshness:       {telemetry.AttrOperation},
+		telemetry.MetricPoolAccounts:    {telemetry.AttrAccountState},
 	}
 	got := f.collect(t)
 	for name, wantKeys := range want {
@@ -296,7 +297,7 @@ func TestMetrics_AttributesAreBoundedAndAccountFree(t *testing.T) {
 				keys = append(keys, k)
 				assert.NotContains(t, v, handle, "%s leaked the account handle in %s", name, k)
 				assert.NotContains(t, v, "424242", "%s leaked the user id in %s", name, k)
-				if k == attrOperation {
+				if k == telemetry.AttrOperation {
 					_, known := Endpoints[v]
 					assert.True(t, known, "%s: operation %q is not in the Endpoints registry", name, v)
 				}
@@ -326,12 +327,12 @@ func TestMetrics_PoolWaitDuration_Acquired(t *testing.T) {
 	_, err := f.c.GetUserTweets(context.Background(), "999", 20)
 	require.NoError(t, err)
 
-	pts := histPoints(t, f.collect(t), metricPoolWait)
+	pts := histPoints(t, f.collect(t), telemetry.MetricPoolWait)
 	require.Len(t, pts, 1, "one wait, one sample")
-	assert.Equal(t, map[string]string{attrOperation: "UserTweets", attrResult: waitResultAcquired}, attrMap(pts[0].Attributes))
+	assert.Equal(t, map[string]string{telemetry.AttrOperation: "UserTweets", telemetry.AttrResult: telemetry.WaitResultAcquired}, attrMap(pts[0].Attributes))
 	assert.Equal(t, uint64(1), pts[0].Count)
 	assert.Greater(t, pts[0].Sum, 0.1, "the sample is the real ~150ms wait")
-	assert.Equal(t, poolWaitBuckets, pts[0].Bounds)
+	assert.Equal(t, telemetry.PoolWaitBuckets, pts[0].Bounds)
 }
 
 func TestMetrics_PoolWaitDuration_CtxDone(t *testing.T) {
@@ -346,9 +347,9 @@ func TestMetrics_PoolWaitDuration_CtxDone(t *testing.T) {
 	_, err := f.c.GetUserTweets(ctx, "999", 20)
 	require.Error(t, err)
 
-	pts := histPoints(t, f.collect(t), metricPoolWait)
+	pts := histPoints(t, f.collect(t), telemetry.MetricPoolWait)
 	require.Len(t, pts, 1)
-	assert.Equal(t, map[string]string{attrOperation: "UserTweets", attrResult: waitResultCtxDone}, attrMap(pts[0].Attributes))
+	assert.Equal(t, map[string]string{telemetry.AttrOperation: "UserTweets", telemetry.AttrResult: telemetry.WaitResultCtxDone}, attrMap(pts[0].Attributes))
 	assert.Equal(t, uint64(1), pts[0].Count)
 	assert.Less(t, pts[0].Sum, 1.0, "the sample is the ~60ms actually waited, not the 10s limit")
 }
@@ -381,9 +382,9 @@ func TestMetrics_PoolWaitDuration_GaveUp(t *testing.T) {
 	_, err := f.c.GetUserTweets(context.Background(), "999", 20)
 	require.Error(t, err)
 
-	pts := histPoints(t, f.collect(t), metricPoolWait)
+	pts := histPoints(t, f.collect(t), telemetry.MetricPoolWait)
 	require.Len(t, pts, 1, "one wait, one sample")
-	assert.Equal(t, map[string]string{attrOperation: "UserTweets", attrResult: waitResultGaveUp}, attrMap(pts[0].Attributes))
+	assert.Equal(t, map[string]string{telemetry.AttrOperation: "UserTweets", telemetry.AttrResult: telemetry.WaitResultGaveUp}, attrMap(pts[0].Attributes))
 	assert.Equal(t, uint64(1), pts[0].Count)
 	assert.Greater(t, pts[0].Sum, 0.1, "the sample is the real ~150ms wait, not the re-limit")
 }
@@ -433,31 +434,31 @@ func TestAttemptOutcome(t *testing.T) {
 		direct bool // true: the attempt did not go through a per-account proxy
 		want   string
 	}{
-		{"ok", 200, `{"data":{}}`, nil, false, outcomeOK},
-		{"created", 201, ``, nil, false, outcomeOK},
-		{"429", 429, `{}`, nil, false, outcomeRateLimited},
-		{"403 bare", 403, `{}`, nil, false, outcomeForbidden},
-		{"401 bare", 401, `{}`, nil, false, outcomeAuth},
-		{"404", 404, `{}`, nil, false, outcomeNotFound},
-		{"graphql-shaped 400", 400, `{"errors":[{"code":336,"message":"Bad request"}]}`, nil, false, outcomeEndpoint},
-		{"graphql 400 caller-validation 214", 400, `{"errors":[{"code":214,"message":"Bad Request"}]}`, nil, false, outcomeBadRequest},
-		{"graphql 400 nested extensions 214", 400, `{"errors":[{"extensions":{"code":214}}]}`, nil, false, outcomeBadRequest},
-		{"unshaped 400", 400, `oops`, nil, false, outcomeOther},
-		{"500", 500, `oops`, nil, false, outcomeOverloaded},
-		{"503", 503, `{}`, nil, false, outcomeOverloaded},
-		{"LoadShed on 200", 200, `{"errors":[{"code":-1,"message":"LoadShed"}]}`, nil, false, outcomeOverloaded},
-		{"LoadShed message on 403", 403, `{"errors":[{"code":99,"message":"LoadShed: overloaded"}]}`, nil, false, outcomeOverloaded},
-		{"code 32", 401, `{"errors":[{"code":32}]}`, nil, false, outcomeAuth},
-		{"code 353", 403, `{"errors":[{"code":353}]}`, nil, false, outcomeCSRF},
-		{"code 88 in a 200 without headers is a rate limit", 200, `{"errors":[{"code":88}]}`, nil, false, outcomeRateLimited},
-		{"code 64", 200, `{"errors":[{"code":64}]}`, nil, false, outcomeSuspended},
-		{"code 326", 200, `{"errors":[{"code":326}]}`, nil, false, outcomeLocked},
-		{"code 161", 200, `{"errors":[{"code":161}]}`, nil, false, outcomeBlocked},
-		{"code 131", 200, `{"errors":[{"code":131}]}`, nil, false, outcomeInternal},
-		{"transport", 0, ``, errors.New("EOF"), false, outcomeTransport},
-		{"proxy", 0, ``, errors.New("Proxy responded with non 200 code: 407"), false, outcomeProxy},
+		{"ok", 200, `{"data":{}}`, nil, false, telemetry.OutcomeOK},
+		{"created", 201, ``, nil, false, telemetry.OutcomeOK},
+		{"429", 429, `{}`, nil, false, telemetry.OutcomeRateLimited},
+		{"403 bare", 403, `{}`, nil, false, telemetry.OutcomeForbidden},
+		{"401 bare", 401, `{}`, nil, false, telemetry.OutcomeAuth},
+		{"404", 404, `{}`, nil, false, telemetry.OutcomeNotFound},
+		{"graphql-shaped 400", 400, `{"errors":[{"code":336,"message":"Bad request"}]}`, nil, false, telemetry.OutcomeEndpoint},
+		{"graphql 400 caller-validation 214", 400, `{"errors":[{"code":214,"message":"Bad Request"}]}`, nil, false, telemetry.OutcomeBadRequest},
+		{"graphql 400 nested extensions 214", 400, `{"errors":[{"extensions":{"code":214}}]}`, nil, false, telemetry.OutcomeBadRequest},
+		{"unshaped 400", 400, `oops`, nil, false, telemetry.OutcomeOther},
+		{"500", 500, `oops`, nil, false, telemetry.OutcomeOverloaded},
+		{"503", 503, `{}`, nil, false, telemetry.OutcomeOverloaded},
+		{"LoadShed on 200", 200, `{"errors":[{"code":-1,"message":"LoadShed"}]}`, nil, false, telemetry.OutcomeOverloaded},
+		{"LoadShed message on 403", 403, `{"errors":[{"code":99,"message":"LoadShed: overloaded"}]}`, nil, false, telemetry.OutcomeOverloaded},
+		{"code 32", 401, `{"errors":[{"code":32}]}`, nil, false, telemetry.OutcomeAuth},
+		{"code 353", 403, `{"errors":[{"code":353}]}`, nil, false, telemetry.OutcomeCSRF},
+		{"code 88 in a 200 without headers is a rate limit", 200, `{"errors":[{"code":88}]}`, nil, false, telemetry.OutcomeRateLimited},
+		{"code 64", 200, `{"errors":[{"code":64}]}`, nil, false, telemetry.OutcomeSuspended},
+		{"code 326", 200, `{"errors":[{"code":326}]}`, nil, false, telemetry.OutcomeLocked},
+		{"code 161", 200, `{"errors":[{"code":161}]}`, nil, false, telemetry.OutcomeBlocked},
+		{"code 131", 200, `{"errors":[{"code":131}]}`, nil, false, telemetry.OutcomeInternal},
+		{"transport", 0, ``, errors.New("EOF"), false, telemetry.OutcomeTransport},
+		{"proxy", 0, ``, errors.New("Proxy responded with non 200 code: 407"), false, telemetry.OutcomeProxy},
 		// A direct account's DNS / connection-refused is not a proxy failure.
-		{"direct no such host", 0, ``, errors.New("dial tcp: lookup x.com: no such host"), true, outcomeTransport},
+		{"direct no such host", 0, ``, errors.New("dial tcp: lookup x.com: no such host"), true, telemetry.OutcomeTransport},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -472,7 +473,7 @@ func TestOutcomeForClass_CoversEveryClass(t *testing.T) {
 	seen := map[string]errorClass{}
 	for c := errNone; c < errClassCount; c++ {
 		o := outcomeForClass(c)
-		assert.NotEqual(t, outcomeOther, o, "errorClass %d has no outcome mapping", c)
+		assert.NotEqual(t, telemetry.OutcomeOther, o, "errorClass %d has no outcome mapping", c)
 		if c != errAuthExpired && c != errNotAuthorized {
 			if prev, dup := seen[o]; dup {
 				t.Errorf("classes %d and %d share outcome %q", prev, c, o)
@@ -493,7 +494,7 @@ func TestPoolAccountStates(t *testing.T) {
 
 	got := c.poolAccountStates(now)
 	assert.Equal(t, map[string]int64{
-		accountStateActive: 1, accountStateProxyBackoff: 1, accountStateCoolingDown: 1, accountStateDeactivated: 1,
+		telemetry.AccountStateActive: 1, telemetry.AccountStateProxyBackoff: 1, telemetry.AccountStateCoolingDown: 1, telemetry.AccountStateDeactivated: 1,
 	}, got)
 }
 
@@ -518,10 +519,10 @@ func TestMetrics_RelogAndProxyCounters(t *testing.T) {
 			sums[m.Name] = s
 		}
 	}
-	require.Len(t, sums[metricProxyFailures].DataPoints, 1)
-	assert.Equal(t, int64(1), sums[metricProxyFailures].DataPoints[0].Value)
-	require.Len(t, sums[metricRelogins].DataPoints, 1)
-	assert.Equal(t, map[string]string{attrOutcome: outcomeBreakerOpen}, attrMap(sums[metricRelogins].DataPoints[0].Attributes))
+	require.Len(t, sums[telemetry.MetricProxyFailures].DataPoints, 1)
+	assert.Equal(t, int64(1), sums[telemetry.MetricProxyFailures].DataPoints[0].Value)
+	require.Len(t, sums[telemetry.MetricRelogins].DataPoints, 1)
+	assert.Equal(t, map[string]string{telemetry.AttrOutcome: telemetry.OutcomeBreakerOpen}, attrMap(sums[telemetry.MetricRelogins].DataPoints[0].Attributes))
 }
 
 // failingMeter errors on every histogram, to prove construction degrades to
@@ -540,7 +541,7 @@ func TestNewClientMetrics_InstrumentErrorFallsBackToNoop(t *testing.T) {
 	var m *clientMetrics
 	require.NotPanics(t, func() { m = newClientMetrics(failingProvider{}) })
 	require.NotPanics(t, func() {
-		m.recordRequest("UserTweets", time.Second, outcomeOK)
+		m.recordRequest("UserTweets", time.Second, telemetry.OutcomeOK)
 		m.recordFreshness("UserTweets", []*Tweet{{ID: snowflakeAt(time.Now())}})
 	})
 }
@@ -548,9 +549,9 @@ func TestNewClientMetrics_InstrumentErrorFallsBackToNoop(t *testing.T) {
 func TestClientMetrics_NilReceiverIsSafe(t *testing.T) {
 	var m *clientMetrics
 	require.NotPanics(t, func() {
-		m.recordRequest("x", time.Second, outcomeOK)
+		m.recordRequest("x", time.Second, telemetry.OutcomeOK)
 		m.recordFreshness("x", nil)
-		m.recordRelogin(outcomeOK)
+		m.recordRelogin(telemetry.OutcomeOK)
 		m.recordProxyFailure()
 	})
 }
@@ -575,7 +576,7 @@ func TestMetrics_FreshnessIgnoresPromotedTweets(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, tweets, 2, "promoted tweets are still returned to the caller; only the metric ignores them")
 
-	pts := histPoints(t, f.collect(t), metricFreshness)
+	pts := histPoints(t, f.collect(t), telemetry.MetricFreshness)
 	require.Len(t, pts, 1)
 	assert.InDelta(t, 40.0, pts[0].Sum, 0.01, "freshness must be the organic tweet's age, not the ad's")
 }
@@ -624,12 +625,12 @@ func TestMetrics_PoolGaugeRacesWithDeactivation(t *testing.T) {
 // Close unregisters the gauge callback; it is idempotent and nil-safe.
 func TestClient_CloseUnregistersPoolGauge(t *testing.T) {
 	f := newMetricsFixture(t, func(http.ResponseWriter, *http.Request) {}, "close_acc")
-	_, ok := f.collect(t)[metricPoolAccounts]
+	_, ok := f.collect(t)[telemetry.MetricPoolAccounts]
 	require.True(t, ok, "gauge present before Close")
 
 	require.NoError(t, f.c.Close())
 	require.NoError(t, f.c.Close(), "Close must be idempotent")
-	_, ok = f.collect(t)[metricPoolAccounts]
+	_, ok = f.collect(t)[telemetry.MetricPoolAccounts]
 	assert.False(t, ok, "gauge must stop reporting after Close")
 
 	var nilClient *Client
@@ -672,8 +673,8 @@ func TestNewClient_WiresMetrics(t *testing.T) {
 			got[m.Name] = m
 		}
 	}
-	assert.Len(t, histPoints(t, got, metricRequestDuration), 1)
-	assert.Len(t, histPoints(t, got, metricFreshness), 1)
-	_, ok := got[metricPoolAccounts]
+	assert.Len(t, histPoints(t, got, telemetry.MetricRequestDuration), 1)
+	assert.Len(t, histPoints(t, got, telemetry.MetricFreshness), 1)
+	_, ok := got[telemetry.MetricPoolAccounts]
 	assert.True(t, ok, "NewClient must register the pool.accounts gauge")
 }

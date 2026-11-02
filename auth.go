@@ -10,6 +10,7 @@ import (
 
 	stealth "github.com/anatolykoptev/go-stealth"
 	"github.com/anatolykoptev/go-twitter/captcha"
+	"github.com/anatolykoptev/go-twitter/internal/telemetry"
 	"github.com/pquerna/otp/totp"
 )
 
@@ -35,7 +36,7 @@ func (c *Client) relogin(acc *Account) error {
 		if ok, reason := c.reloginGate.Allowed(context.Background(), acc.Username); !ok {
 			slog.Warn("twitter: auto-relogin blocked by gate",
 				slog.String("user", acc.Username), slog.String("reason", reason))
-			c.metrics.recordRelogin(outcomeBreakerOpen)
+			c.metrics.recordRelogin(telemetry.OutcomeBreakerOpen)
 			return fmt.Errorf("relogin blocked: %s", reason)
 		}
 	}
@@ -58,7 +59,7 @@ func (c *Client) relogin(acc *Account) error {
 		if rec != nil {
 			rec.RecordFailure(acc.Username)
 		}
-		c.metrics.recordRelogin(outcomeFailed)
+		c.metrics.recordRelogin(telemetry.OutcomeFailed)
 		return fmt.Errorf("relogin %s: %w", acc.Username, err)
 	}
 
@@ -66,7 +67,7 @@ func (c *Client) relogin(acc *Account) error {
 		rec.RecordSuccess(acc.Username)
 	}
 	acc.Reset()
-	c.metrics.recordRelogin(outcomeOK)
+	c.metrics.recordRelogin(telemetry.OutcomeOK)
 	slog.Info("relogin succeeded", slog.String("user", acc.Username))
 	return nil
 }
