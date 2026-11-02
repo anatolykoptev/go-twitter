@@ -27,7 +27,7 @@ func renderQueryIDs(ids map[string]string, date string) ([]byte, error) {
 		b.WriteString(date)
 		b.WriteString("\n")
 	}
-	b.WriteString("\npackage twitter\n\nvar generatedQueryIDs = map[string]string{\n")
+	b.WriteString("\npackage operations\n\nvar GeneratedQueryIDs = map[string]string{\n")
 
 	names := make([]string, 0, len(ids))
 	for name := range ids {

@@ -104,7 +104,7 @@ func TestParseFlags_Defaults(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parseFlags: %v", err)
 	}
-	if cfg.out != "." || cfg.proxy != "" || cfg.fixtures != "" || cfg.date != "" || cfg.failOnEmpty {
+	if cfg.out != defaultOutDir || cfg.proxy != "" || cfg.fixtures != "" || cfg.date != "" || cfg.failOnEmpty {
 		t.Fatalf("unexpected defaults: %+v", cfg)
 	}
 }
