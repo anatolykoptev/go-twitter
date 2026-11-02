@@ -86,15 +86,22 @@ func NewClient(cfg ClientConfig, clientOpts ...ClientOption) (*Client, error) {
 	if cfg.DefaultProxy != "" {
 		opts = append(opts, stealth.WithProxy(cfg.DefaultProxy))
 	}
-	bc, err := stealth.NewClient(opts...)
+	bc, err := stealth.NewClient(append(opts, cfg.stealthOpts...)...)
 	if err != nil {
 		return nil, fmt.Errorf("stealth client: %w", err)
 	}
 
-	// Per-account transports for accounts pinned to their own proxy. A build
-	// failure disables only that account (a pooled consumer's shared client
-	// must survive one malformed proxy row) and NewClient fails only when no
-	// account is usable. Fail-closed is kept: the failed account is marked
+	// One transport per account. Every account owns its own stealth client, and
+	// with it its own cookie jar: a set-cookie on a response to account A can
+	// never ride on account B's next request (fhttp appends jar cookies to the
+	// explicit cookie header). An account without its own Proxy gets
+	// cfg.DefaultProxy, so its egress is unchanged. The shared client above
+	// serves only the account-less paths (guest token, warm fetches without an
+	// account).
+	//
+	// A build failure disables only that account (a pooled consumer's shared
+	// client must survive one malformed proxy row) and NewClient fails only when
+	// no account is usable. Fail-closed is kept: the failed account is marked
 	// permanently unselectable (IsActive) and clientForAccount refuses to lend
 	// it the shared client, which may be direct (the *WithSocial path sets no
 	// DefaultProxy) and would send its auth_token/ct0 from this host's IP.
@@ -105,27 +112,11 @@ func NewClient(cfg ClientConfig, clientOpts ...ClientOption) (*Client, error) {
 	var buildErrs []error
 	usable := 0
 	for _, acc := range cfg.Accounts {
-		if acc.Proxy == "" {
-			usable++
-			continue
-		}
-		accClient, err := stealth.NewClient(
-			stealth.WithProxy(acc.Proxy),
-			stealth.WithProfile(acc.Profile.TLSProfile),
-			stealth.WithHeaderOrder(twitterHeaderOrder),
-		)
+		accClient, accProxy, err := buildAccountClient(cfg, acc)
 		if err != nil {
 			acc.markProxyClientFailed()
-			label, reason := proxyBuildFailure(acc.Proxy)
+			reason := reportClientBuildFailure(acc, accProxy, m, alertHook)
 			buildErrs = append(buildErrs, fmt.Errorf("per-account client for %s: %s", acc.Username, reason))
-			slog.Warn("per-account proxy client build failed, account disabled",
-				slog.String("user", acc.Username), slog.String("proxy", label), slog.String("error", reason))
-			m.recordProxyClientFailure()
-			alertHook("account.proxy_client_failed", map[string]any{
-				"user":  acc.Username,
-				"proxy": label,
-				"error": reason,
-			})
 			continue
 		}
 		acc.client = accClient
@@ -272,17 +263,83 @@ func proxyBuildFailure(proxy string) (label, reason string) {
 	return u.Scheme + "://" + u.Host, reason
 }
 
-// clientForAccount returns the per-account client if available, otherwise the
-// shared client. An account pinned to its own proxy with no per-account client
-// never gets the shared one (it may be direct): ErrProxyClientUnavailable.
+// buildAccountClient builds the account's own stealth client: its Proxy, else
+// cfg.DefaultProxy, else direct, with the account's TLS profile. NewClient and
+// the lazy path in clientForAccount both build through it, so they cannot
+// drift. It returns the proxy URL the client was built for ("" = direct).
+func buildAccountClient(cfg ClientConfig, acc *Account) (*stealth.BrowserClient, string, error) {
+	proxy := acc.Proxy
+	if proxy == "" {
+		proxy = cfg.DefaultProxy
+	}
+	opts := []stealth.ClientOption{
+		stealth.WithProfile(acc.Profile.TLSProfile),
+		stealth.WithHeaderOrder(twitterHeaderOrder),
+	}
+	if proxy != "" {
+		opts = append(opts, stealth.WithProxy(proxy))
+	}
+	bc, err := stealth.NewClient(append(opts, cfg.stealthOpts...)...)
+	return bc, proxy, err
+}
+
+// reportClientBuildFailure logs, counts and alerts one failed per-account
+// client build and returns the fixed, log-safe reason. The alert topic is API
+// and keeps its name; the payload says "direct" when the client had no proxy.
+// The raw proxy string and the build error never leave: both may carry
+// credentials.
+func reportClientBuildFailure(acc *Account, proxy string, m *clientMetrics, alertHook func(string, any)) string {
+	label, reason := "direct", "per-account client build failed"
+	if proxy != "" {
+		label, reason = proxyBuildFailure(proxy)
+	}
+	slog.Warn("per-account client build failed, account disabled",
+		slog.String("user", acc.Username), slog.String("proxy", label), slog.String("error", reason))
+	m.recordProxyClientFailure()
+	if alertHook != nil {
+		alertHook("account.proxy_client_failed", map[string]any{
+			"user":  acc.Username,
+			"proxy": label,
+			"error": reason,
+		})
+	}
+	return reason
+}
+
+// clientForAccount returns the account's own client, building it on first use
+// for an account NewClient never saw (loginOpenAccount accounts, anything added
+// through Pool().Add). The build is serialised on the account, so concurrent
+// first uses build one client. It never lends the shared client to an account:
+// that client's cookie jar also serves the guest paths, and for a proxy-pinned
+// account it may be direct. A failed build marks only this account failed and
+// returns ErrProxyClientUnavailable. Only the account-less paths use c.client.
 func (c *Client) clientForAccount(acc *Account) (*stealth.BrowserClient, error) {
+	acc.mu.Lock()
+	defer acc.mu.Unlock()
 	if acc.client != nil {
 		return acc.client, nil
 	}
-	if acc.Proxy != "" {
+	if acc.proxyClientFailed {
 		return nil, fmt.Errorf("%w: %s", ErrProxyClientUnavailable, acc.Username)
 	}
-	return c.client, nil
+	bc, proxy, err := buildAccountClient(c.cfg, acc)
+	if err != nil {
+		acc.proxyClientFailed = true
+		reportClientBuildFailure(acc, proxy, c.metrics, c.alertHook)
+		return nil, fmt.Errorf("%w: %s", ErrProxyClientUnavailable, acc.Username)
+	}
+	acc.client = bc
+	return bc, nil
+}
+
+// usesOwnProxy reports whether an attempt served by acc went through the
+// account's own pinned proxy. Every account owns a client, so client identity
+// no longer says anything about the proxy; the account's Proxy field does, the
+// same gate attributeTransportError and the proxy-backoff paths use. nil (a
+// guest-token attempt) and an account on the shared DefaultProxy are not
+// proxied in this sense: their transport failures are not proxy-attributable.
+func usesOwnProxy(acc *Account) bool {
+	return acc != nil && acc.Proxy != ""
 }
 
 // flightCap returns the per-account in-flight cap (ClientConfig
@@ -364,7 +421,7 @@ func (c *Client) observedPoolReq(ctx context.Context, acc *Account, endpoint str
 	start := time.Now()
 	body, hdrs, status, err := c.doPoolReq(ctx, bc, method, urlStr, payload, headers)
 	currentCall(ctx).done(status, len(body))
-	outcome := attemptOutcome(status, body, hdrs, err, bc != c.client)
+	outcome := attemptOutcome(status, body, hdrs, err, usesOwnProxy(acc))
 	c.metrics.recordRequest(endpoint, time.Since(start), outcome)
 	c.emitRequestEvent(acc, endpoint, status, outcome, hdrs)
 	return body, hdrs, status, err
@@ -375,7 +432,7 @@ func (c *Client) observedPoolReq(ctx context.Context, acc *Account, endpoint str
 func (c *Client) observedRequestWithBody(ctx context.Context, acc *Account, endpoint string, bc *stealth.BrowserClient, method, urlStr string, headers map[string]string, body io.Reader) ([]byte, map[string]string, int, error) {
 	start := time.Now()
 	respBody, hdrs, status, err := c.doRequestWithBody(ctx, bc, method, urlStr, headers, body)
-	outcome := attemptOutcome(status, respBody, hdrs, err, bc != c.client)
+	outcome := attemptOutcome(status, respBody, hdrs, err, usesOwnProxy(acc))
 	c.metrics.recordRequest(endpoint, time.Since(start), outcome)
 	c.emitRequestEvent(acc, endpoint, status, outcome, hdrs)
 	return respBody, hdrs, status, err
@@ -394,7 +451,7 @@ func (c *Client) observedRequest(ctx context.Context, acc *Account, endpoint str
 func (c *Client) observedMediaReq(ctx context.Context, acc *Account, bc *stealth.BrowserClient, method, urlStr string, payload []byte, headers map[string]string) ([]byte, map[string]string, int, error) {
 	start := time.Now()
 	body, hdrs, status, err := c.doPoolReq(ctx, bc, method, urlStr, payload, headers)
-	outcome := attemptOutcome(status, body, hdrs, err, bc != c.client)
+	outcome := attemptOutcome(status, body, hdrs, err, usesOwnProxy(acc))
 	c.metrics.recordRequest(epUploadMedia, time.Since(start), outcome)
 	c.emitRequestEvent(acc, epUploadMedia, status, outcome, hdrs)
 	return body, hdrs, status, err

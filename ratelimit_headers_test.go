@@ -123,6 +123,7 @@ func newRLClient(t *testing.T, n, perEndpointCap int, clk *rlFakeClock) (*Client
 			seedRateLimits(accs[i]) // re-prime the measured caps on the clock-driven limiter
 		}
 		accs[i].AuthToken, accs[i].CT0 = "tok"+name, "ct0"
+		accs[i].client = bc
 	}
 	return &Client{
 		client:  bc,

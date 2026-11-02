@@ -122,7 +122,7 @@ func newRotatingClient(t *testing.T, cfg ClientConfig, accSpec string) *Client {
 	c, err := NewClient(cfg)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
-	c.client = startFakeX(t, rotatingFakeX)
+	adoptFakeX(c, startFakeX(t, rotatingFakeX))
 	c.xtidMgr = xtid.NewManager(failFetcher{})
 	c.cfg.DisableGuestFallback = true
 	return c
@@ -184,7 +184,7 @@ func TestSessionStore_WithSocialMakesZeroStoreCalls(t *testing.T) {
 	rec := newRecordingStore()
 	bc := startFakeX(t, rotatingFakeX)
 	testHookSocialClient = func(c *Client) {
-		c.client = bc
+		adoptFakeX(c, bc)
 		c.xtidMgr = xtid.NewManager(failFetcher{})
 		c.accountPacer = nil
 		c.cfg.SessionStore = rec
@@ -219,7 +219,8 @@ func TestSessionStore_ReloginDeletesStoredSession(t *testing.T) {
 	})}
 	acc := &Account{Username: "u4", Password: "pw"}
 
-	_ = c.relogin(acc) // the login itself fails against the fake; only the delete matters
+	acc.client = c.client // NewClient gives every account one; the shared fake stands in
+	_ = c.relogin(acc)    // the login itself fails against the fake; only the delete matters
 	assert.Equal(t, []string{"u4"}, rec.deletes, "relogin must delete the stored session")
 }
 
@@ -298,6 +299,7 @@ func TestSessionStore_ReloginDeletesBeforeLoad(t *testing.T) {
 	c := failingClient(t, rec)
 	acc := &Account{Username: "u", Password: "pw"}
 
+	acc.client = c.client // NewClient gives every account one; the shared fake stands in
 	_ = c.relogin(acc)
 	require.GreaterOrEqual(t, len(rec.ops), 1)
 	assert.Equal(t, "delete:u", rec.ops[0], "Delete must precede any Load; got %v", rec.ops)
@@ -314,6 +316,7 @@ func TestSessionStore_ReloginAfterFailedDeleteSkipsLoad(t *testing.T) {
 	c := failingClient(t, rec)
 	acc := &Account{Username: "u", Password: "pw"}
 
+	acc.client = c.client // NewClient gives every account one; the shared fake stands in
 	_ = c.relogin(acc)
 	assert.Equal(t, []string{"delete:u"}, rec.ops, "no Load may follow a failed Delete")
 	tok, _, _ := acc.Credentials()
@@ -326,6 +329,7 @@ func TestSessionStore_LeasedReloginMakesZeroStoreCalls(t *testing.T) {
 	c := failingClient(t, rec)
 	acc := &Account{Username: "leased", Password: "pw", AuthToken: "t", CT0: "c", credsAuthoritative: true}
 
+	acc.client = c.client // NewClient gives every account one; the shared fake stands in
 	_ = c.relogin(acc)
 	assert.Empty(t, rec.ops, "leased account relogin touched the store: %v", rec.ops)
 }

@@ -363,7 +363,7 @@ func newSocialRigX(t *testing.T, xHandler http.HandlerFunc) *socialRig {
 	socialXtidMgr = nil
 	socialXtidMu.Unlock()
 	testHookSocialClient = func(c *Client) {
-		c.client = bc
+		adoptFakeX(c, bc)
 		c.warmDoerOverride = r.warm
 		if !r.keepPacer {
 			c.accountPacer = nil

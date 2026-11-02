@@ -79,6 +79,7 @@ func newMetricsFixture(t *testing.T, handler http.HandlerFunc, username string) 
 	acc.active = true
 	acc.installRateLimiter(ratelimit.DefaultConfig)
 	acc.HealthTracker = pool.DefaultHealthTracker()
+	acc.client = bc
 
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
@@ -117,6 +118,19 @@ func startFakeX(t *testing.T, handler http.HandlerFunc) *stealth.BrowserClient {
 	bc, err := stealth.NewClient(stealth.WithoutSSRFGuard()) // test-only: the fake x.com is loopback
 	require.NoError(t, err)
 	return bc
+}
+
+// adoptFakeX points a NewClient-built Client at a fake-X transport: the shared
+// client and every account's own client (NewClient gives each account one, and
+// those carry the SSRF guard, so loopback fake servers are unreachable through
+// them). Accounts without a client of their own stay that way.
+func adoptFakeX(c *Client, bc *stealth.BrowserClient) {
+	c.client = bc
+	for _, acc := range c.cfg.Accounts {
+		if acc.client != nil {
+			acc.client = bc
+		}
+	}
 }
 
 func (f *metricsFixture) collect(t *testing.T) map[string]metricdata.Metrics {
@@ -624,7 +638,7 @@ func TestNewClient_WiresMetrics(t *testing.T) {
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })
-	c.client = bc
+	adoptFakeX(c, bc)
 	c.xtidMgr = xtid.NewManager(failFetcher{})
 
 	_, err = c.GetUserTweets(context.Background(), "999", 20)

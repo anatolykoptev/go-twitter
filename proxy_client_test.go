@@ -88,7 +88,7 @@ func newBadProxyClient(t *testing.T, cfgMut func(*ClientConfig)) (*Client, *toke
 	c, err := NewClient(cfg)
 	require.NoError(t, err, "one bad proxy must not take the whole Client down")
 	t.Cleanup(func() { _ = c.Close() })
-	c.client = bc
+	adoptFakeX(c, bc)
 	c.cfg.DisableGuestFallback = true
 	return c, rec
 }
