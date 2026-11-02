@@ -226,6 +226,9 @@ func (c *Client) nextUsableAt(endpoint string) (at time.Time, ok bool) {
 			ready = acc.proxyBackoff
 		}
 		acc.mu.Unlock()
+		if iv := acc.intervalReadyAt(); iv.After(ready) {
+			ready = iv // minimum-interval wake: the waiter sleeps to exactly this moment
+		}
 		consider(ready)
 	}
 	return earliest, anyActive && !earliest.IsZero()
@@ -270,10 +273,23 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 		if endpointFaulted[a.ID()] || !time.Now().After(a.proxyBackoff) || !a.tryAcquireFlight(flightLimit) {
 			return false
 		}
+		// The minimum-interval check+stamp (Account.SetMinInterval) sits
+		// BEFORE the consuming AllowRequest, so an account refused for being
+		// too soon never spends rate-limit budget (#129); the in-flight slot
+		// is returned on that refusal.
+		rsv, ok := a.tryReserveInterval()
+		if !ok {
+			if flightLimit > 0 {
+				a.releaseFlight()
+			}
+			return false
+		}
 		// The slot is taken BEFORE the consuming AllowRequest, so a refused
 		// slot never burns a rate-limit slot; a refused AllowRequest returns
-		// the slot it just took.
+		// the slot it just took and the interval stamp (a pick that was not
+		// made must not delay the next one).
 		if !a.AllowRequest(endpoint) {
+			a.unreserveInterval(rsv)
 			if flightLimit > 0 {
 				a.releaseFlight()
 			}

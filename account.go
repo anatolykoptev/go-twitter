@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	stealth "github.com/anatolykoptev/go-stealth"
@@ -64,6 +65,14 @@ type Account struct {
 	// not lift a hold, and the pool's deactivation alert must not fire). The
 	// eligibility methods consult it via endpointGate.
 	heldUntil time.Time
+
+	// Minimum interval between two pool picks of this account (see
+	// SetMinInterval). minIntervalNs mirrors the setter value atomically so the
+	// disabled default (0) costs one atomic load on the pick path and no lock;
+	// lastPick is the stamp of the previous pick, guarded by mu together with
+	// the check that reads it.
+	minIntervalNs atomic.Int64
+	lastPick      time.Time
 
 	// Header-derived rate-limit state (see ratelimit_state.go), per endpoint.
 	// rlState is the last known X window; blockedUntil is every PERSISTED
@@ -192,6 +201,83 @@ func (a *Account) noteRateLimited88(respHdrs map[string]string) int {
 	defer a.mu.Unlock()
 	a.consecHeaderless88++
 	return a.consecHeaderless88
+}
+
+// SetMinInterval sets the minimum time between two pool picks of this account:
+// the pool skips the account until d has passed since its previous pick, and a
+// call that has no other account waits (ctx-bounded) for exactly that moment.
+// d <= 0 turns it off, which is the default. It is safe to call at runtime on a
+// live pooled account — the next pick sees the new value, and a lower or zero d
+// releases the account at once. Pool picks only: account-pinned writes and
+// media uploads never consult it (like Client.HoldAccount).
+func (a *Account) SetMinInterval(d time.Duration) {
+	if d < 0 {
+		d = 0
+	}
+	a.minIntervalNs.Store(int64(d))
+}
+
+// MinInterval returns the SetMinInterval value; 0 means off.
+func (a *Account) MinInterval() time.Duration {
+	return time.Duration(a.minIntervalNs.Load())
+}
+
+// intervalStamp is a successful interval reservation: stamp is the new
+// lastPick, prev what it replaced, so a pick refused by a later filter can
+// give the reservation back.
+type intervalStamp struct{ prev, stamp time.Time }
+
+// tryReserveInterval is the interval filter: it reports whether the account
+// may be picked now and, in the same critical section, stamps the pick — so two
+// concurrent picks cannot both pass. Off (the default) it is one atomic load.
+// A pick refused by a later filter must give the stamp back via
+// unreserveInterval.
+func (a *Account) tryReserveInterval() (intervalStamp, bool) {
+	if a.minIntervalNs.Load() <= 0 {
+		return intervalStamp{}, true
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	d := time.Duration(a.minIntervalNs.Load()) // re-read under mu: a lowered value applies at once
+	if d <= 0 {
+		return intervalStamp{}, true
+	}
+	now := a.nowLocked()
+	if now.Before(a.lastPick.Add(d)) {
+		return intervalStamp{}, false
+	}
+	r := intervalStamp{prev: a.lastPick, stamp: now}
+	a.lastPick = now
+	return r, true
+}
+
+// unreserveInterval undoes tryReserveInterval for a pick that a later filter
+// refused. It restores the previous stamp only if no later pick has stamped
+// since (a zero reservation — interval off — is a no-op).
+func (a *Account) unreserveInterval(r intervalStamp) {
+	if r.stamp.IsZero() {
+		return
+	}
+	a.mu.Lock()
+	if a.lastPick.Equal(r.stamp) {
+		a.lastPick = r.prev
+	}
+	a.mu.Unlock()
+}
+
+// intervalReadyAt returns when the interval lets this account be picked again,
+// or the zero time when it is off or already elapsed. Read-only.
+func (a *Account) intervalReadyAt() time.Time {
+	d := time.Duration(a.minIntervalNs.Load())
+	if d <= 0 {
+		return time.Time{}
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if ready := a.lastPick.Add(d); ready.After(a.nowLocked()) {
+		return ready
+	}
+	return time.Time{}
 }
 
 // tryAcquireFlight takes one in-flight slot when the account is below limit.
