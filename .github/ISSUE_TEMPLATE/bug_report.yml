@@ -1,0 +1,40 @@
+name: Bug report
+description: Something does not work as documented
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: Do not paste cookies, tokens, passwords or proxy credentials. Remove them from logs and responses first.
+  - type: input
+    id: version
+    attributes:
+      label: go-twitter version
+      placeholder: v0.7.2
+    validations:
+      required: true
+  - type: input
+    id: go-version
+    attributes:
+      label: Go version
+      placeholder: go1.26.3
+    validations:
+      required: true
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: The method you called, what you expected and what you got.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: A short code sample if you can.
+      render: go
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error output
+      description: The error text, with its HTTP status and X error code if present.
+      render: text
