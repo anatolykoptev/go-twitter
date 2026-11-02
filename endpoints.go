@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"github.com/anatolykoptev/go-twitter/internal/operations"
+	"github.com/anatolykoptev/go-twitter/internal/queryid"
 )
 
 // twitterBase is the GraphQL root. A var (not const) only so tests can point the
@@ -127,10 +128,10 @@ func init() {
 // the committed literal when generation has not run (or produced nothing). The
 // returned map is always a fresh COPY so a caller mutating per-op features can
 // never corrupt the shared package-level source. A runtime-refreshed baseline
-// (queryid_refresh.go) takes precedence over the compiled one.
+// (internal/queryid) takes precedence over the compiled one.
 func gqlFeatures() map[string]any {
-	if snap := activeQID.Load(); snap != nil && snap.features != nil {
-		return maps.Clone(snap.features)
+	if snap := queryid.Active.Load(); snap != nil && snap.Features != nil {
+		return maps.Clone(snap.Features)
 	}
 	return compiledGQLFeatures()
 }

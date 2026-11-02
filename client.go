@@ -17,6 +17,7 @@ import (
 	"github.com/anatolykoptev/go-stealth/pool"
 	"github.com/anatolykoptev/go-stealth/ratelimit"
 	"github.com/anatolykoptev/go-twitter/internal/bundle"
+	"github.com/anatolykoptev/go-twitter/internal/queryid"
 	"github.com/anatolykoptev/go-twitter/xpff"
 	"github.com/anatolykoptev/go-twitter/xtid"
 	"go.opentelemetry.io/otel/metric"
@@ -38,7 +39,7 @@ type Client struct {
 	poolGaugeReg         metric.Registration                              // pool.accounts callback; unregistered by Close (guarded by mu)
 	owned                *clientSet                                       // every BrowserClient this Client built; Close releases their idle connections (nil-safe)
 	warmDoerOverride     warmDoer                                         // test seam: replaces the account client for xtid warm-page fetches
-	qid                  *qidRefresher                                    // nil = the process-wide queryId refresher; only tests set it
+	qid                  *queryid.Refresher                               // nil = the process-wide queryId refresher; only tests set it
 	requestJitter        *stealth.Jitter                                  // pre-request jitter for pool requests (opt-in); nil = none
 	deviceWarn           warnLimiter                                      // rate-limits the both-sources-failed warning of GetDeviceNotifications
 	jitterSleep          func(ctx context.Context, d time.Duration) error // test seam: replaces the real sleep in preRequestJitter
@@ -150,7 +151,7 @@ func NewClient(cfg ClientConfig, clientOpts ...ClientOption) (*Client, error) {
 	if cfg.PoolAlertHook != nil {
 		// The queryId refresh is process-wide; only an explicitly supplied hook
 		// may own its failure alert (the *WithSocial path supplies none).
-		processQID().setAlertHook(cfg.PoolAlertHook)
+		processQID().SetAlertHook(cfg.PoolAlertHook)
 	}
 
 	nonResponsiveBackoff := pool.BackoffConfig{
@@ -569,7 +570,7 @@ func (c *Client) doRequestWithBody(ctx context.Context, bc *stealth.BrowserClien
 		urlPath = u.Path
 	}
 	qid := c.qidRefresh()
-	wf := qid.shared(warmFetcher(c.warmClient(bc), headers))
+	wf := qid.Shared(warmFetcher(c.warmClient(bc), headers))
 	if txID, txErr := c.xtidMgr.GenerateIDWith(context.Background(), method, urlPath, wf); txErr == nil {
 		headers["x-client-transaction-id"] = txID
 		c.xtidFail.onSuccess()
@@ -580,7 +581,7 @@ func (c *Client) doRequestWithBody(ctx context.Context, bc *stealth.BrowserClien
 	}
 	// First/TTL queryId refresh rides the same authenticated fetcher (and, after
 	// an xtid init, the page it just fetched); it runs in the background.
-	qid.onAuthedRequest(wf, c.metrics)
+	qid.OnAuthedRequest(wf, c.metrics.instruments())
 
 	if xpffVal, xpffErr := c.xpffGen.Generate(); xpffErr == nil {
 		headers["x-xp-forwarded-for"] = xpffVal

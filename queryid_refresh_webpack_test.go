@@ -3,6 +3,7 @@ package twitter
 import (
 	"context"
 	"fmt"
+	"github.com/anatolykoptev/go-twitter/internal/queryid"
 	"io"
 	"net/http"
 	"sort"
@@ -141,11 +142,11 @@ func TestQIDRefresh_WebpackF1_AuthedWebpackPageRefreshes(t *testing.T) {
 	require.NotEqual(t, Endpoints["SearchTimeline"].ID, newSearch, "SearchTimeline must be among the retired ops")
 
 	_ = c.search(ctx) // 404 on the compiled id; the first-trigger refresh reads the webpack bundles
-	r.wg.Wait()
+	r.WG.Wait()
 
-	snap := activeQID.Load()
+	snap := queryid.Active.Load()
 	require.NotNil(t, snap, "the webpack page must yield a snapshot")
-	assert.GreaterOrEqual(t, snap.changed, wpRetireOps)
+	assert.GreaterOrEqual(t, snap.Changed, wpRetireOps)
 	assert.True(t, w.wasFetched(wpMainURL), "main.<hash>a.js must be walked")
 	assert.True(t, w.wasFetched(wpEndptURL), "the endpoint chunk from the chunk map must be walked")
 
@@ -164,13 +165,13 @@ func TestQIDRefresh_WebpackF3_ZeroScriptsErrorNamesLayoutAndSize(t *testing.T) {
 	page := []byte(`<html><body>login wall, no scripts at all</body></html>`)
 	f := &recordingFetcher{pages: map[string][]byte{xtid.AuthedWarmPageURL: page}}
 
-	var seen pageSeen
-	_, err := r.build(context.Background(), f, &seen)
+	var seen queryid.PageSeen
+	_, err := r.Build(context.Background(), f, &seen)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "layout=unknown")
 	assert.Contains(t, err.Error(), fmt.Sprintf("page_bytes=%d", len(page)))
-	assert.Equal(t, qidLayoutUnknown, seen.layout)
-	assert.Zero(t, seen.scripts)
+	assert.Equal(t, queryid.LayoutUnknown, seen.Layout)
+	assert.Zero(t, seen.Scripts)
 }
 
 // parseWarmPage reports the detected layout and the start-script count that the
@@ -182,15 +183,15 @@ func TestQIDRefresh_ParseWarmPageLayouts(t *testing.T) {
 		name, page, layout string
 		scripts            int
 	}{
-		{"vite", vite, qidLayoutVite, 1},
-		{"webpack", web, qidLayoutWebpack, 1},
-		{"both", vite + web, qidLayoutBoth, 2},
-		{"unknown", `<html></html>`, qidLayoutUnknown, 0},
+		{"vite", vite, queryid.LayoutVite, 1},
+		{"webpack", web, queryid.LayoutWebpack, 1},
+		{"both", vite + web, queryid.LayoutBoth, 2},
+		{"unknown", `<html></html>`, queryid.LayoutUnknown, 0},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			p := parseWarmPage([]byte(tc.page), time.Now())
-			assert.Equal(t, tc.layout, p.layout)
-			assert.Len(t, p.scripts, tc.scripts)
+			p := queryid.ParseWarmPage([]byte(tc.page), time.Now())
+			assert.Equal(t, tc.layout, p.Layout)
+			assert.Len(t, p.Scripts, tc.scripts)
 		})
 	}
 }
@@ -206,7 +207,7 @@ func TestQIDRefresh_WebpackF4_NonAllowlistedHostIsNotFetched(t *testing.T) {
 		`<script src="http://abs.twimg.com/responsive-web/client-web/main.8888888a.js"></script>`
 	f := &recordingFetcher{pages: map[string][]byte{xtid.AuthedWarmPageURL: []byte(page)}}
 
-	_, _ = r.build(context.Background(), f, &pageSeen{}) // the bundles carry no ops: rejected, which is fine here
+	_, _ = r.Build(context.Background(), f, &queryid.PageSeen{}) // the bundles carry no ops: rejected, which is fine here
 
 	assert.NotContains(t, f.urls(), wpEvilURL, "an off-allowlist host must never be fetched")
 	assert.NotContains(t, f.urls(), "http://abs.twimg.com/responsive-web/client-web/main.8888888a.js", "http must never be fetched")

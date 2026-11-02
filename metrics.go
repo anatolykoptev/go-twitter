@@ -170,37 +170,13 @@ func (m *clientMetrics) recordHold(endpoint string) {
 	m.t.RecordHold(endpoint)
 }
 
-// recordQIDRefresh counts one refresh attempt (see docs/metrics.md).
-func (m *clientMetrics) recordQIDRefresh(trigger, result string) {
+// instruments returns the telemetry handle the queryId refresher reports to;
+// nil (valid, records nothing) when m is nil.
+func (m *clientMetrics) instruments() *telemetry.Metrics {
 	if m == nil {
-		return
+		return nil
 	}
-	m.t.RecordQIDRefresh(trigger, result)
-}
-
-// recordQIDRefreshDuration records how long one refresh attempt took.
-func (m *clientMetrics) recordQIDRefreshDuration(trigger, result string, d time.Duration) {
-	if m == nil {
-		return
-	}
-	m.t.RecordQIDRefreshDuration(trigger, result, d)
-}
-
-// recordQIDChanged records how many ids the last successful refresh changed
-// against the compiled set.
-func (m *clientMetrics) recordQIDChanged(n int) {
-	if m == nil {
-		return
-	}
-	m.t.RecordQIDChanged(n)
-}
-
-// recordQIDAge samples the age of the active queryId map (seconds).
-func (m *clientMetrics) recordQIDAge(seconds float64) {
-	if m == nil {
-		return
-	}
-	m.t.RecordQIDAge(seconds)
+	return m.t
 }
 
 func (m *clientMetrics) recordRelogin(outcome string) {
