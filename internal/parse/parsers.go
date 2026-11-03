@@ -5,7 +5,6 @@ package parse
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -16,13 +15,6 @@ import (
 
 	"github.com/anatolykoptev/go-twitter/model"
 )
-
-// ErrNotFound marks deterministic "the resource does not exist" outcomes —
-// deleted tweets, suspended/unavailable handles. Pool callers treat it as a
-// healthy-account response (no retry, no auth_error report): the credential
-// worked; the thing asked for simply isn't there. The root package re-exports
-// it as twitter.ErrNotFound.
-var ErrNotFound = errors.New("twitter: resource not found")
 
 // TruncateBytes returns b as a string cut to n bytes with a "..." marker.
 func TruncateBytes(b []byte, n int) string {
@@ -187,7 +179,7 @@ func TweetDetail(body []byte, focalID string) ([]*model.Tweet, error) {
 				return tweets, nil
 			}
 		}
-		return nil, fmt.Errorf("%w: tweet %s absent from conversation page", ErrNotFound, focalID)
+		return nil, fmt.Errorf("%w: tweet %s absent from conversation page", model.ErrNotFound, focalID)
 	}
 	return tweets, nil
 }
@@ -769,10 +761,10 @@ func parseTwitterTime(raw, site string) time.Time {
 
 func parseUserResult(r userResult) (*model.TwitterUser, error) {
 	if r.TypeName == "UserUnavailable" {
-		return nil, fmt.Errorf("%w: user unavailable (suspended or restricted)", ErrNotFound)
+		return nil, fmt.Errorf("%w: user unavailable (suspended or restricted)", model.ErrNotFound)
 	}
 	if r.RestID == "" {
-		return nil, fmt.Errorf("%w: empty user rest_id (typename=%s)", ErrNotFound, r.TypeName)
+		return nil, fmt.Errorf("%w: empty user rest_id (typename=%s)", model.ErrNotFound, r.TypeName)
 	}
 	createdAt := parseTwitterTime(r.createdAtRaw(), "user")
 	bio := strings.TrimSpace(r.bio())

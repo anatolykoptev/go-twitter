@@ -78,7 +78,7 @@ func TestParseUserByScreenName_Unavailable(t *testing.T) {
 	}`
 
 	_, err := UserByScreenName([]byte(body))
-	require.ErrorIs(t, err, ErrNotFound, "unavailable user is a deterministic miss")
+	require.ErrorIs(t, err, model.ErrNotFound, "unavailable user is a deterministic miss")
 }
 
 // TestParseUserByScreenName_ErrorsWithData: a partial response carrying both
@@ -90,7 +90,7 @@ func TestParseUserByScreenName_ErrorsWithData(t *testing.T) {
 		"errors": [{"message": "UserUnavailable"}]
 	}`
 	_, err := UserByScreenName([]byte(body))
-	require.ErrorIs(t, err, ErrNotFound)
+	require.ErrorIs(t, err, model.ErrNotFound)
 }
 
 func TestParseUserByScreenName_ErrorsOnly(t *testing.T) {
@@ -98,7 +98,7 @@ func TestParseUserByScreenName_ErrorsOnly(t *testing.T) {
 	_, err := UserByScreenName([]byte(body))
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "bad query")
-	assert.NotErrorIs(t, err, ErrNotFound)
+	assert.NotErrorIs(t, err, model.ErrNotFound)
 }
 
 func TestParseSearchUsersTimeline(t *testing.T) {
@@ -304,7 +304,7 @@ func TestParseTweetDetail_FocalAbsent(t *testing.T) {
 		]}
 	]}}}`
 	_, err := TweetDetail([]byte(body), "100")
-	require.ErrorIs(t, err, ErrNotFound)
+	require.ErrorIs(t, err, model.ErrNotFound)
 }
 
 // TestParseTweetDetail_Errors: a 200 response carrying GraphQL errors[] must

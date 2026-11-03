@@ -3,7 +3,17 @@
 // package directly is optional.
 package model
 
-import "time"
+import (
+	"errors"
+	"time"
+)
+
+// ErrNotFound marks deterministic "the resource does not exist" outcomes —
+// deleted tweets, suspended/unavailable handles. Pool callers treat it as a
+// healthy-account response (no retry, no auth_error report): the credential
+// worked; the thing asked for simply isn't there. The root package re-exports
+// it as twitter.ErrNotFound.
+var ErrNotFound = errors.New("twitter: resource not found")
 
 // TwitterUser represents a Twitter/X account profile.
 type TwitterUser struct {
@@ -36,9 +46,8 @@ type Tweet struct {
 	ReplyCount    int
 	TokenMentions []string // extracted $TICKER patterns, e.g. ["BTC", "ETH"]
 
-	// Promoted is true for an entry X marks as promoted (a timeline ad). Ad IDs
-	// are minted at serve time, so the freshness metric ignores them; consumers
-	// filtering a timeline can drop them the same way.
+	// Promoted is true for an entry X marks as promoted (an ad), so a timeline
+	// reader can skip it.
 	Promoted bool
 }
 
