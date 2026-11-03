@@ -75,7 +75,7 @@ func (c *Client) GetDMInbox(ctx context.Context) ([]*DMConversation, error) {
 //
 // FAIL-CLOSED: a 200 response with no usable message id (empty body, a DM
 // validation failure, or a surfaced API error) returns an error — never a silent
-// "sent". Mirrors parseCreateTweet's empty-result guard.
+// "sent". Mirrors parse.CreateTweet's empty-result guard.
 // conversationID is a CONVERSATION id (1:1 form "<recipientID>-<selfID>", per
 // twikit), NOT a user id; there is no derive helper — the caller forms it.
 func (c *Client) SendDM(ctx context.Context, acc *Account, conversationID, text string) (string, error) {

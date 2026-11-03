@@ -91,6 +91,8 @@ A caller-side cancellation or deadline (`context.Canceled`, `context.DeadlineExc
 
 ## Types
 
+The response types are defined in package `model` (`github.com/anatolykoptev/go-twitter/model`) and aliased in the root package, so `twitter.Tweet` and `model.Tweet` are the same type.
+
 ```go
 type TwitterUser struct {
     ID, Handle, DisplayName, Bio string
@@ -104,6 +106,7 @@ type Tweet struct {
     CreatedAt                                    time.Time
     Views, Likes, Retweets, Quotes, ReplyCount   int
     TokenMentions                                []string // extracted $TICKER mentions
+    Promoted                                     bool     // X marked the entry as promoted (an ad); skip it when reading a timeline
 }
 
 type DMConversation struct {

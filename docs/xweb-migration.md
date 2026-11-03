@@ -19,26 +19,26 @@ The logged-out build is one audience's view: the authenticated build can carry d
 
 | Operation | Legacy id | x-web operation | x-web id | Provided vars | Verdict | Parser |
 |---|---|---|---|---|---|---|
-| `UserByScreenName` | `IGgvgiOx4QZndDHuD3x9TQ` | `UserByScreenName` | `MyoLREkUGIBW4cYH2v8g1w` | 1 | new-shape | `parseUserByScreenName` |
+| `UserByScreenName` | `IGgvgiOx4QZndDHuD3x9TQ` | `UserByScreenName` | `MyoLREkUGIBW4cYH2v8g1w` | 1 | new-shape | `parse.UserByScreenName` |
 | `UserByRestId` | `VQfQ9wwYdk6j_u2O4vt64Q` | - | - | - | not-found-in-x-web | `(declared; no call site in v0.7.0)` |
-| `Followers` | `9jsVJ9l2uXUIKslHvJqIhw` | `followersQuery` | `o0WH4pn2DlVABYq1-PYq_w` | 6 | new-shape | `parseUserList` |
-| `Following` | `OLm4oHZBfqWx8jbcEhWoFw` | `followingQuery` | `eM2O3yAUKLe5zfl_v3ZGyQ` | 6 | new-shape | `parseUserList` |
-| `UserTweets` | `FOlovQsiHGDls3c0Q_HaSQ` | `UserTweets` | `iZqjc5hRNt2d2a2l6TV2ag` | 6 | new-shape | `parseTweetTimeline` |
-| `SearchTimeline` | `GcXk9vN_d1jUfHNqLacXQA` | `SearchByRawQuery` | `r6d_9D364TUg6uhLpDuR8A` | 6 | new-shape | `parseSearchTimeline` |
-| `TweetDetail` | `VWFGPVAGkZMGRKGe3GFFnA` | `TweetDetail` | `XIVsoIc-xD6lUw47j5vrIw` | 6 | new-shape | `parseTweetDetail` |
-| `Retweeters` | `FeoLYPQ-q4bmjGLTZTGs0g` | `tweetRetweetersQuery` | `b-ivAMOQv_bOWACfNovyZw` | 6 | new-shape | `parseRetweeterList` |
-| `CreateTweet` | `7TKRKCPuAGsmYde0CudbVg` | `createTweetMutation` | `XcFPus-jnu76BFbq9D6dSQ` | 6 | same-shape | `parseCreateTweet` |
-| `Bookmarks` | `i8QZ1qqy36ffA3bxfTaf7w` | `bookmarksQuery` | `qu7eYMxeoPHYHPkl8yxq0w` | 6 | new-shape | `parseBookmarks` |
-| `HomeTimeline` | `HCosKfLNW1AcOo3la3mMgg` | `HomeTimelineQuery` | `Ike-gclv_nOnB3NbcDsLjA` | 6 | new-shape | `parseHomeTimeline` |
-| `HomeLatestTimeline` | `zhX91JE87mWvfprhYE97xA` | `HomeLatestTimelineQuery` | `A2Mz89dkCmyP-0QZdWv6nQ` | 6 | new-shape | `parseHomeTimeline` |
-| `ListLatestTweetsTimeline` | `27HKUy8ulrflZ9Tole038g` | `listTweetsQuery` | `vnfyA-Zus4nf-ud4g57PYQ` | 6 | new-shape | `parseListTweets` |
-| `CommunityTweetsTimeline` | `Mvs5UOOEkpXVMDZtUcxR-Q` | `communityTimelineQuery` | `Z-R6chMcwYNzBzlc-iAeqQ` | 6 | new-shape | `parseCommunityTweets` |
-| `BlueVerifiedFollowers` | `OBBd6Dw-4qEYbsu3hGkyxg` | `verifiedFollowersQuery` | `AUr6h_sztDUcI7kIMX_gXA` | 6 | new-shape | `parseUserList (via fetchUserList)` |
-| `tweetNotificationsQuery` | `tNwvgqJyhttOF1-7q_v3qA` | `tweetNotificationsQuery` | `VcNhzcrF-pRo8nSftDQThA` | 6 | new-shape | `parseTweetNotifications` |
-| `FavoriteTweet` | `lI07N6Otwv1PhnEgXILM7A` | `likeButtonFavoriteMutation` | `i9VOuSqJJf59jkZ0zVNZMQ` | 0 | same-shape | `parseAck(favorite_tweet)` |
-| `UnfavoriteTweet` | `ZYKSe-w7KEslx3JhSIk5LA` | `likeButtonUnfavoriteMutation` | `w8z7av_jrLvW_Ty559qjVg` | 0 | same-shape | `parseAck(unfavorite_tweet)` |
-| `CreateRetweet` | `mbRO74GrOvSfRcJnlMapnQ` | `retweetButtonRetweetMutation` | `6uvqjlPaij9o7Ce15XW4sA` | 0 | same-shape | `parseCreateRetweet` |
-| `DeleteRetweet` | `ZyZigVsNiFO6v1dEks1eWg` | `retweetButtonUnretweetMutation` | `TSIYEnua4u_yleM5nrWzFw` | 0 | same-shape | `parseDeleteRetweet` |
+| `Followers` | `9jsVJ9l2uXUIKslHvJqIhw` | `followersQuery` | `o0WH4pn2DlVABYq1-PYq_w` | 6 | new-shape | `parse.UserList` |
+| `Following` | `OLm4oHZBfqWx8jbcEhWoFw` | `followingQuery` | `eM2O3yAUKLe5zfl_v3ZGyQ` | 6 | new-shape | `parse.UserList` |
+| `UserTweets` | `FOlovQsiHGDls3c0Q_HaSQ` | `UserTweets` | `iZqjc5hRNt2d2a2l6TV2ag` | 6 | new-shape | `parse.TweetTimeline` |
+| `SearchTimeline` | `GcXk9vN_d1jUfHNqLacXQA` | `SearchByRawQuery` | `r6d_9D364TUg6uhLpDuR8A` | 6 | new-shape | `parse.SearchTimeline` |
+| `TweetDetail` | `VWFGPVAGkZMGRKGe3GFFnA` | `TweetDetail` | `XIVsoIc-xD6lUw47j5vrIw` | 6 | new-shape | `parse.TweetDetail` |
+| `Retweeters` | `FeoLYPQ-q4bmjGLTZTGs0g` | `tweetRetweetersQuery` | `b-ivAMOQv_bOWACfNovyZw` | 6 | new-shape | `parse.RetweeterList` |
+| `CreateTweet` | `7TKRKCPuAGsmYde0CudbVg` | `createTweetMutation` | `XcFPus-jnu76BFbq9D6dSQ` | 6 | same-shape | `parse.CreateTweet` |
+| `Bookmarks` | `i8QZ1qqy36ffA3bxfTaf7w` | `bookmarksQuery` | `qu7eYMxeoPHYHPkl8yxq0w` | 6 | new-shape | `parse.Bookmarks` |
+| `HomeTimeline` | `HCosKfLNW1AcOo3la3mMgg` | `HomeTimelineQuery` | `Ike-gclv_nOnB3NbcDsLjA` | 6 | new-shape | `parse.HomeTimeline` |
+| `HomeLatestTimeline` | `zhX91JE87mWvfprhYE97xA` | `HomeLatestTimelineQuery` | `A2Mz89dkCmyP-0QZdWv6nQ` | 6 | new-shape | `parse.HomeTimeline` |
+| `ListLatestTweetsTimeline` | `27HKUy8ulrflZ9Tole038g` | `listTweetsQuery` | `vnfyA-Zus4nf-ud4g57PYQ` | 6 | new-shape | `parse.ListTweets` |
+| `CommunityTweetsTimeline` | `Mvs5UOOEkpXVMDZtUcxR-Q` | `communityTimelineQuery` | `Z-R6chMcwYNzBzlc-iAeqQ` | 6 | new-shape | `parse.CommunityTweets` |
+| `BlueVerifiedFollowers` | `OBBd6Dw-4qEYbsu3hGkyxg` | `verifiedFollowersQuery` | `AUr6h_sztDUcI7kIMX_gXA` | 6 | new-shape | `parse.UserList (via fetchUserList)` |
+| `tweetNotificationsQuery` | `tNwvgqJyhttOF1-7q_v3qA` | `tweetNotificationsQuery` | `VcNhzcrF-pRo8nSftDQThA` | 6 | new-shape | `parse.TweetNotifications` |
+| `FavoriteTweet` | `lI07N6Otwv1PhnEgXILM7A` | `likeButtonFavoriteMutation` | `i9VOuSqJJf59jkZ0zVNZMQ` | 0 | same-shape | `parse.Ack(favorite_tweet)` |
+| `UnfavoriteTweet` | `ZYKSe-w7KEslx3JhSIk5LA` | `likeButtonUnfavoriteMutation` | `w8z7av_jrLvW_Ty559qjVg` | 0 | same-shape | `parse.Ack(unfavorite_tweet)` |
+| `CreateRetweet` | `mbRO74GrOvSfRcJnlMapnQ` | `retweetButtonRetweetMutation` | `6uvqjlPaij9o7Ce15XW4sA` | 0 | same-shape | `parse.CreateRetweet` |
+| `DeleteRetweet` | `ZyZigVsNiFO6v1dEks1eWg` | `retweetButtonUnretweetMutation` | `TSIYEnua4u_yleM5nrWzFw` | 0 | same-shape | `parse.DeleteRetweet` |
 
 ## Findings
 

@@ -410,7 +410,7 @@ func (c *Client) Unretweet(ctx context.Context, acc *Account, tweetID string) (s
 
 // ReplyTweet posts a reply to tweetID from a specific account. Returns the reply
 // tweet ID. It routes through the CreateTweet op (reply.in_reply_to_tweet_id set)
-// and reuses parseCreateTweet for the result.
+// and reuses parse.CreateTweet for the result.
 func (c *Client) ReplyTweet(ctx context.Context, acc *Account, tweetID, text string) (string, error) {
 	body, err := c.postMutation(ctx, acc, "CreateTweet", replyTweetVariables(text, tweetID, nil))
 	if err != nil {
@@ -540,7 +540,7 @@ func (c *Client) GetCommunityTweets(ctx context.Context, communityID string, max
 // GetVerifiedFollowers fetches a user's blue-verified followers (paginated up to
 // maxCount). The response shares the followers shape
 // (data.user.result.timeline.timeline), so it reuses the existing fetchUserList
-// helper + parseUserList parser.
+// helper + parse.UserList parser.
 func (c *Client) GetVerifiedFollowers(ctx context.Context, userID string, maxCount int) ([]*TwitterUser, error) {
 	return c.fetchUserList(ctx, "BlueVerifiedFollowers", userID, maxCount)
 }
