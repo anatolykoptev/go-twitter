@@ -119,3 +119,15 @@ func TestRegression_NoProactiveAgeRotation(t *testing.T) {
 		}
 	}
 }
+
+func TestCT0(t *testing.T) {
+	ct0 := GenerateCT0()
+	if len(ct0) != 64 {
+		t.Fatalf("expected 64 char hex, got %d chars", len(ct0))
+	}
+	// Should be different each time
+	ct02 := GenerateCT0()
+	if ct0 == ct02 {
+		t.Fatal("expected different ct0 values")
+	}
+}
