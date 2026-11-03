@@ -7,7 +7,6 @@ import (
 
 	"github.com/anatolykoptev/go-twitter/internal/parse"
 	"github.com/anatolykoptev/go-twitter/internal/telemetry"
-	"github.com/anatolykoptev/go-twitter/internal/tweetflag"
 )
 
 // Metrics: see docs/metrics.md. The instruments, metric names and label values
@@ -122,7 +121,7 @@ func (m *clientMetrics) recordFreshness(endpoint string, tweets []*Tweet) {
 	}
 	var newest time.Time
 	for _, t := range tweets {
-		if t == nil || tweetflag.Promoted(t) {
+		if t == nil || t.Promoted {
 			continue
 		}
 		ts, err := SnowflakeTime(t.ID)

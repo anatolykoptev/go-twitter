@@ -14,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/anatolykoptev/go-twitter/internal/tweetflag"
 	"github.com/anatolykoptev/go-twitter/model"
 )
 
@@ -740,7 +739,7 @@ func extractTweetsFromTimeline(tl timelineObj, defaultAuthorID string) ([]*model
 				slog.Debug("skip tweet parse error", slog.Any("error", err))
 				continue
 			}
-			tweetflag.Set(t, isPromotedItem(entry.EntryID, entry.Content.ItemContent))
+			t.Promoted = isPromotedItem(entry.EntryID, entry.Content.ItemContent)
 			tweets = append(tweets, t)
 		}
 	}

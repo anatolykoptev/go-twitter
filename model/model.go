@@ -3,11 +3,7 @@
 // package directly is optional.
 package model
 
-import (
-	"time"
-
-	"github.com/anatolykoptev/go-twitter/internal/tweetflag"
-)
+import "time"
 
 // TwitterUser represents a Twitter/X account profile.
 type TwitterUser struct {
@@ -40,9 +36,10 @@ type Tweet struct {
 	ReplyCount    int
 	TokenMentions []string // extracted $TICKER patterns, e.g. ["BTC", "ETH"]
 
-	// promoted marks a timeline ad. Unexported: it only lets the freshness metric
-	// ignore ads (their IDs are minted at serve time and would mask staleness).
-	promoted bool
+	// Promoted is true for an entry X marks as promoted (a timeline ad). Ad IDs
+	// are minted at serve time, so the freshness metric ignores them; consumers
+	// filtering a timeline can drop them the same way.
+	Promoted bool
 }
 
 // DMConversation is a single direct-message conversation from the 1.1 inbox.
@@ -63,13 +60,4 @@ type DMMessage struct {
 	SenderID       string
 	Text           string
 	CreatedAt      time.Time
-}
-
-// promoted is unexported so a consumer cannot set or read it. The parsers and
-// the client, which live in other packages, reach it through internal/tweetflag.
-func init() {
-	tweetflag.Install(
-		func(t any, v bool) { t.(*Tweet).promoted = v },
-		func(t any) bool { return t.(*Tweet).promoted },
-	)
 }
