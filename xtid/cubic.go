@@ -33,11 +33,11 @@ const (
 func newCubic(curves []float64) *Cubic {
 	x1, y1, x2, y2 := curves[0], curves[1], curves[2], curves[3]
 	c := &Cubic{}
-	c.cx = 3.0 * x1
-	c.bx = 3.0*(x2-x1) - c.cx
+	c.cx = float64(3.0 * x1)
+	c.bx = float64(3.0*(x2-x1)) - c.cx
 	c.ax = 1.0 - c.cx - c.bx
-	c.cy = 3.0 * y1
-	c.by = 3.0*(y2-y1) - c.cy
+	c.cy = float64(3.0 * y1)
+	c.by = float64(3.0*(y2-y1)) - c.cy
 	c.ay = 1.0 - c.cy - c.by
 
 	switch {
@@ -59,24 +59,34 @@ func newCubic(curves []float64) *Cubic {
 
 	deltaT := 1.0 / (cubicSplineSamples - 1)
 	for i := range c.splineSamples {
-		c.splineSamples[i] = c.sampleX(float64(i) * deltaT)
+		c.splineSamples[i] = c.sampleX(float64(float64(i) * deltaT))
 	}
 	return c
 }
 
-// sampleX and sampleY evaluate ((a*t + b)*t + c)*t. Every product is wrapped in
-// a float64 conversion so no compiler fuses it into a multiply-add (see #131):
-// the result is the same on every architecture.
-func (c *Cubic) sampleX(t float64) float64 {
-	return float64(float64(float64(c.ax*t)+c.bx)*t+c.cx) * t
+// horner evaluates ((a*t + b)*t + c)*t. Every product is rounded by an explicit
+// float64 conversion before it is added, which the Go spec guarantees stops a
+// compiler from fusing it into a multiply-add (arm64 would, amd64 does not).
+// Chromium's C++ is not written this way, so this is not bit-equal to it in
+// general; what is established is that arm64 and amd64 give the same bits here
+// (TestCubicArchIndependent) and that the animation keys match the browser's on
+// every key tried (TestBrowserGolden).
+func horner(a, b, c, t float64) float64 {
+	p := float64(a * t)
+	p = float64(p + b)
+	p = float64(p * t)
+	p = float64(p + c)
+	return float64(p * t)
 }
 
-func (c *Cubic) sampleY(t float64) float64 {
-	return float64(float64(float64(c.ay*t)+c.by)*t+c.cy) * t
-}
+func (c *Cubic) sampleX(t float64) float64 { return horner(c.ax, c.bx, c.cx, t) }
+func (c *Cubic) sampleY(t float64) float64 { return horner(c.ay, c.by, c.cy, t) }
 
 func (c *Cubic) sampleDerivativeX(t float64) float64 {
-	return float64(float64(float64(3.0*c.ax)*t)+float64(2.0*c.bx))*t + c.cx
+	p := float64(float64(3.0*c.ax) * t)
+	p = float64(p + float64(2.0*c.bx))
+	p = float64(p * t)
+	return float64(p + c.cx)
 }
 
 // solveCurveX finds t with sampleX(t) ~= x (gfx::CubicBezier::SolveCurveX).
@@ -85,9 +95,9 @@ func (c *Cubic) solveCurveX(x, epsilon float64) float64 {
 	deltaT := 1.0 / (cubicSplineSamples - 1)
 	for i := 1; i < cubicSplineSamples; i++ {
 		if x <= c.splineSamples[i] {
-			t1 = deltaT * float64(i)
+			t1 = float64(deltaT * float64(i))
 			t0 = t1 - deltaT
-			t2 = t0 + float64((t1-t0)*(x-c.splineSamples[i-1]))/(c.splineSamples[i]-c.splineSamples[i-1])
+			t2 = t0 + float64(float64((t1-t0)*(x-c.splineSamples[i-1]))/(c.splineSamples[i]-c.splineSamples[i-1]))
 			break
 		}
 	}
@@ -122,7 +132,7 @@ func (c *Cubic) solveCurveX(x, epsilon float64) float64 {
 		} else {
 			t1 = t2
 		}
-		t2 = (t1 + t0) * 0.5
+		t2 = float64((t1 + t0) * 0.5)
 	}
 	return t2
 }

@@ -98,3 +98,19 @@ func TestGenerateIDWith_ShortKeyRefreshKeepsPreviousKeys(t *testing.T) {
 		t.Fatalf("id after the failed refresh built on %v, want the previous keys", got)
 	}
 }
+
+// A page whose animation row is too short used to give an empty animation key
+// with no error: a well-formed id that X rejects.
+func TestNewClientTransaction_ShortAnimationRowFails(t *testing.T) {
+	short := strings.Replace(string(legacyHTML(fixtureKey)), "7 8 9 10 11 12", "7 8 9", 1)
+	if short == string(legacyHTML(fixtureKey)) {
+		t.Fatal("fixture row not shortened")
+	}
+	ct, err := newClientTransaction(short, ondemandJS)
+	if err == nil || !strings.Contains(err.Error(), "animation row has 9 numbers, want at least 11") {
+		t.Fatalf("newClientTransaction = (%v, %v), want an animation-row error", ct, err)
+	}
+	if _, err := newClientTransaction(string(legacyHTML(fixtureKey)), ondemandJS); err != nil {
+		t.Fatalf("the full row must still build: %v", err)
+	}
+}

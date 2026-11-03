@@ -130,6 +130,26 @@ func TestBrowserGolden(t *testing.T) {
 		t.Fatalf("keys.json changed (sha256 %s) since the vectors were recorded (%s): regenerate them", got, p.KeysSHA256)
 	}
 
+	// The vectors answer exactly the keys in keys.json, in order.
+	var kf struct {
+		Keys []string `json:"keys"`
+	}
+	kraw, err := os.ReadFile(filepath.Join(browserDir, "keys.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(kraw, &kf); err != nil {
+		t.Fatal(err)
+	}
+	if len(kf.Keys) != len(v.Keys) {
+		t.Fatalf("keys.json has %d keys, vectors.json %d", len(kf.Keys), len(v.Keys))
+	}
+	for i := range kf.Keys {
+		if kf.Keys[i] != v.Keys[i][0] {
+			t.Fatalf("vector %d answers key %s..., keys.json has %s...", i, v.Keys[i][0][:8], kf.Keys[i][:8])
+		}
+	}
+
 	var bad []string
 	got := map[string]int{}
 	pinned := false

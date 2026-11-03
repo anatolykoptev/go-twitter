@@ -109,23 +109,48 @@ func matrixNumbers(v float64) []float64 {
 }
 
 // toFixed2 is JavaScript's Number(x.toFixed(2)): the decimal expansion of the
-// double is rounded to two places and an exact tie goes to the larger
-// magnitude, where Go's formatting rounds a tie to even. Only multiples of 1/8
-// can tie.
+// double is rounded to two places, and an exact tie goes to the larger
+// magnitude where Go's formatting rounds a tie to even. Only odd multiples of
+// 1/8 tie; their expansion has exactly three decimals ("0.125"), so a tie is
+// rounded up by incrementing the two-decimal prefix, exactly at any magnitude.
+// A zero result is returned as +0: JavaScript keeps the sign of a small
+// negative ("-0"), but both print as "0".
 func toFixed2(x float64) float64 {
 	ax := math.Abs(x)
 	s := strconv.FormatFloat(ax, 'f', 2, 64)
 	if e := ax * 8; e == math.Floor(e) && math.Mod(e, 2) == 1 {
-		n := int64(ax*100 + 0.5)
-		s = fmt.Sprintf("%d.%02d", n/100, n%100)
+		s3 := strconv.FormatFloat(ax, 'f', 3, 64)
+		s = incrementDecimal(s3[:len(s3)-1])
 	}
 	v, _ := strconv.ParseFloat(s, 64)
+	if v == 0 {
+		return 0
+	}
 	return math.Copysign(v, x)
 }
 
-func (ct *ClientTransaction) animate(frames []int, targetTime float64) string {
+// incrementDecimal adds one unit in the last place to a non-negative decimal
+// string such as "12.99".
+func incrementDecimal(s string) string {
+	b := []byte(s)
+	for i := len(b) - 1; i >= 0; i-- {
+		switch b[i] {
+		case '.':
+			continue
+		case '9':
+			b[i] = '0'
+		default:
+			b[i]++
+			return string(b)
+		}
+	}
+	return "1" + string(b)
+}
+
+func (ct *ClientTransaction) animate(frames []int, targetTime float64) (string, error) {
+	// Colours (6), rotation (1) and the four control values of the easing curve.
 	if len(frames) < 11 {
-		return ""
+		return "", fmt.Errorf("animation row has %d numbers, want at least 11", len(frames))
 	}
 	curveFrames := frames[7:]
 	curves := make([]float64, len(curveFrames))
@@ -133,7 +158,7 @@ func (ct *ClientTransaction) animate(frames []int, targetTime float64) string {
 		curves[i] = ct.solve(float64(item), isOdd(i), 1.0, false)
 	}
 
-	return ct.render(frames, newCubic(curves).getValue(targetTime))
+	return ct.render(frames, newCubic(curves).getValue(targetTime)), nil
 }
 
 // render prints the animation key for the eased value val: the colour and the
@@ -213,7 +238,7 @@ func (ct *ClientTransaction) buildAnimationKey(homePageHTML string) (string, err
 	}
 
 	targetTime := frameTime / totalTime
-	return ct.animate(arr[rowIndex], targetTime), nil
+	return ct.animate(arr[rowIndex], targetTime)
 }
 
 // nowFn returns the injected clock, defaulting to time.Now so a zero-value

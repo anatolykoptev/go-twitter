@@ -34,9 +34,10 @@ SHA-256 of `live_page.html`, `live_ondemand.js`, `run.mjs` and `keys.json`, and 
 class counts of the keys. `TestBrowserGolden` fails if any of those files has
 changed since, so the vectors cannot silently drift from their inputs.
 
-Recorded with Chromium 148.0.7778.96 (headless shell, `playwright-core` 1.60.0) on
-darwin-arm64. Chromium 156.0.8078.4 gave identical answers for all 1000 keys, and
-for 4000 further random keys that are not committed.
+Recorded with Chromium 156.0.8078.4 (headless shell, `playwright-core` 1.64.1) on
+darwin-arm64. Chromium 148.0.7778.96 (`playwright-core` 1.60.0) gave identical
+answers for all 1000 keys, and both builds for 4000 further random keys that are
+not committed.
 
 ## The keys
 
