@@ -195,8 +195,14 @@ func findStringKey(v any, key string) string {
 		if s, ok := t[key].(string); ok && s != "" {
 			return s
 		}
-		for _, child := range t {
-			if r := findStringKey(child, key); r != "" {
+		// Sorted keys: the first hit must not depend on map iteration order.
+		keys := make([]string, 0, len(t))
+		for k := range t {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if r := findStringKey(t[k], key); r != "" {
 				return r
 			}
 		}
