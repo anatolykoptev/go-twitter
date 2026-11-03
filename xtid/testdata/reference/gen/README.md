@@ -4,6 +4,14 @@
 implementation**, not by this repository, so `xtid` is tested bit-for-bit against
 an oracle it did not write. CI needs no Node: only the regeneration does.
 
+The reference is the oracle for what it is good for: the transaction id's hash
+format (`ids`), the `ondemand.s` URL (`runtimes`), the rounding helper (`round2`)
+and page parsing. It is **not** the oracle for the animation key: it does not
+cap a colour channel at 255 (about 5% of keys print three hex digits where X
+expects `ff`, and X answers 404) and it solves the easing curve by plain
+bisection where Chromium uses Newton steps from a sampled first guess. The
+animation key is held to a real browser instead, see `../../browser/README.md`.
+
 | | |
 |---|---|
 | Reference | `x-client-transaction-id` (npm; source: Lqm1/x-client-transaction-id) |
@@ -35,18 +43,8 @@ Two data sets, each a page plus the script that carries the key-byte indices:
 
 ## What the vectors cover
 
-- `animate`: `animate(row, t)` for every frame x row, with random times, times
-  where the 255 colour clamp or the 1e-6 epsilon changes the result, and `t >= 1`.
-- `keys`: random 48-byte verification keys through the whole animation-key path
-  (frame, row, frameTime including rounding ties), plus keys chosen so the clamp,
-  the epsilon and a `frameTime/10` tie each change the result if mishandled.
 - `ids`: full transaction ids with a fixed time and random byte. `xtid` signs the
   path without its query string, so the reference is fed the query-free path.
 - `round2`: exact ties of `Math.round(x*100)/100` (JS rounds them toward +Inf).
 - `runtimes`: `ondemand.s` URL resolution from an inline webpack runtime for
   several chunk-hash shapes.
-
-The generator also contains copies of the reference's cubic/animate code with the
-epsilon and clamp as parameters. They are used only to *select* interesting
-vectors, and a self-check asserts they equal the reference when parameterised
-like it, so a stale copy fails generation instead of skewing the sample.

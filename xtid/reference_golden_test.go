@@ -2,7 +2,6 @@ package xtid
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -14,30 +13,25 @@ import (
 )
 
 // Golden vectors produced by the reference implementation
-// (testdata/reference/gen/README.md): every value below was computed by
-// x-client-transaction-id, not by this package, and each must match byte for
-// byte. Regenerate with `node gen.mjs` in testdata/reference/gen.
+// (testdata/reference/gen/README.md): the transaction id's hash format, the
+// rounding helpers and the ondemand.s URL. Each value was computed by
+// x-client-transaction-id, not by this package, and must match byte for byte.
+// Regenerate with `node gen.mjs` in testdata/reference/gen.
+//
+// The reference is NOT the oracle for the animation key, which it computes
+// differently from the browser X runs in (no 255 cap on a colour channel, a
+// different easing solver): TestBrowserGolden compares those with a real browser.
 
 type goldenMeta struct {
-	Name             string `json:"name"`
-	Page             string `json:"page"`
-	Ondemand         string `json:"ondemand"`
-	OndemandURL      string `json:"ondemandUrl"`
-	RealAnimationKey string `json:"realAnimationKey"`
-	Stats            struct {
-		ClampCases      int `json:"clampCases"`
-		EpsilonCases    int `json:"epsilonCases"`
-		KeyClampCases   int `json:"keyClampCases"`
-		KeyEpsilonCases int `json:"keyEpsilonCases"`
-		KeyTieCases     int `json:"keyTieCases"`
-	} `json:"stats"`
+	Name        string `json:"name"`
+	Page        string `json:"page"`
+	Ondemand    string `json:"ondemand"`
+	OndemandURL string `json:"ondemandUrl"`
 }
 
 type goldenSet struct {
-	Meta    goldenMeta  `json:"meta"`
-	Animate [][]any     `json:"animate"` // [frame, row, t, key]
-	Keys    [][2]string `json:"keys"`    // [key bytes (base64), animation key]
-	IDs     [][]any     `json:"ids"`     // [method, path, timeNow, randomByte, id]
+	Meta goldenMeta `json:"meta"`
+	IDs  [][]any    `json:"ids"` // [method, path, timeNow, randomByte, id]
 }
 
 type goldenFile struct {
@@ -108,14 +102,6 @@ func TestReferenceGolden(t *testing.T) {
 		report(t, "runtimes", len(g.Runtimes), bad)
 	})
 
-	totalKeys := 0
-	for _, set := range g.Sets {
-		totalKeys += len(set.Keys)
-	}
-	if totalKeys < 1000 {
-		t.Fatalf("golden file holds %d end-to-end keys, want >= 1000", totalKeys)
-	}
-
 	for _, set := range g.Sets {
 		set := set
 		t.Run(set.Meta.Name, func(t *testing.T) {
@@ -125,45 +111,6 @@ func TestReferenceGolden(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			frames := getSVGFrames(page)
-			s := set.Meta.Stats
-			if s.ClampCases == 0 || s.EpsilonCases == 0 || s.KeyClampCases == 0 || s.KeyEpsilonCases == 0 || s.KeyTieCases == 0 {
-				t.Fatalf("vector sample lost a case class: %+v", s)
-			}
-
-			t.Run("real_key", func(t *testing.T) {
-				if ct.animationKey != set.Meta.RealAnimationKey {
-					t.Fatalf("animation key = %q, want %q", ct.animationKey, set.Meta.RealAnimationKey)
-				}
-			})
-
-			t.Run("animate", func(t *testing.T) {
-				var bad []string
-				for _, v := range set.Animate {
-					f, r, tt, want := int(v[0].(float64)), int(v[1].(float64)), v[2].(float64), v[3].(string)
-					if got := ct.animate(frames[f].data[r], tt); got != want {
-						bad = append(bad, fmt.Sprintf("animate(frame %d, row %d, t=%v) = %q, want %q", f, r, tt, got, want))
-					}
-				}
-				report(t, "animate", len(set.Animate), bad)
-			})
-
-			t.Run("keys", func(t *testing.T) {
-				var bad []string
-				for _, v := range set.Keys {
-					kb, err := base64.StdEncoding.DecodeString(v[0])
-					if err != nil {
-						t.Fatal(err)
-					}
-					ct.keyBytes = kb
-					got, err := ct.buildAnimationKey(page)
-					if err != nil || got != v[1] {
-						bad = append(bad, fmt.Sprintf("key %s... = %q (err %v), want %q", v[0][:8], got, err, v[1]))
-					}
-				}
-				report(t, "keys", len(set.Keys), bad)
-			})
-
 			t.Run("ids", func(t *testing.T) {
 				ct2, err := newClientTransaction(page, js)
 				if err != nil {
@@ -192,8 +139,8 @@ func TestReferenceGolden(t *testing.T) {
 					if len(f.seen) != 2 || f.seen[0] != LoggedOutPageURL || f.seen[1] != set.Meta.OndemandURL {
 						t.Fatalf("fetched %v, want [%s %s]", f.seen, LoggedOutPageURL, set.Meta.OndemandURL)
 					}
-					if m.ct.animationKey != set.Meta.RealAnimationKey {
-						t.Fatalf("manager animation key = %q, want %q", m.ct.animationKey, set.Meta.RealAnimationKey)
+					if m.ct.animationKey != ct.animationKey {
+						t.Fatalf("manager animation key = %q, want %q", m.ct.animationKey, ct.animationKey)
 					}
 				})
 			}
