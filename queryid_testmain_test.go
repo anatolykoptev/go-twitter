@@ -1,6 +1,7 @@
 package twitter
 
 import (
+	"github.com/anatolykoptev/go-twitter/internal/queryid"
 	"os"
 	"testing"
 )
@@ -10,6 +11,6 @@ import (
 // otherwise start a background refresh against the real x.com. The refresh's own
 // tests install an enabled refresher with useQIDRefresher.
 func TestMain(m *testing.M) {
-	processQIDPtr.Store(newQIDRefresher(qidConfig{disabled: true}))
+	processQIDPtr.Store(newQIDRefresher(queryid.Config{Disabled: true}))
 	os.Exit(m.Run())
 }

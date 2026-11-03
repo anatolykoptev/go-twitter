@@ -1,11 +1,11 @@
 package twitter
 
 import (
-	"strconv"
 	"time"
 
 	"go.opentelemetry.io/otel/metric"
 
+	"github.com/anatolykoptev/go-twitter/internal/parse"
 	"github.com/anatolykoptev/go-twitter/internal/telemetry"
 )
 
@@ -121,7 +121,7 @@ func (m *clientMetrics) recordFreshness(endpoint string, tweets []*Tweet) {
 	}
 	var newest time.Time
 	for _, t := range tweets {
-		if t == nil || t.promoted {
+		if t == nil || t.Promoted {
 			continue
 		}
 		ts, err := SnowflakeTime(t.ID)
@@ -170,37 +170,13 @@ func (m *clientMetrics) recordHold(endpoint string) {
 	m.t.RecordHold(endpoint)
 }
 
-// recordQIDRefresh counts one refresh attempt (see docs/metrics.md).
-func (m *clientMetrics) recordQIDRefresh(trigger, result string) {
+// instruments returns the telemetry handle the queryId refresher reports to;
+// nil (valid, records nothing) when m is nil.
+func (m *clientMetrics) instruments() *telemetry.Metrics {
 	if m == nil {
-		return
+		return nil
 	}
-	m.t.RecordQIDRefresh(trigger, result)
-}
-
-// recordQIDRefreshDuration records how long one refresh attempt took.
-func (m *clientMetrics) recordQIDRefreshDuration(trigger, result string, d time.Duration) {
-	if m == nil {
-		return
-	}
-	m.t.RecordQIDRefreshDuration(trigger, result, d)
-}
-
-// recordQIDChanged records how many ids the last successful refresh changed
-// against the compiled set.
-func (m *clientMetrics) recordQIDChanged(n int) {
-	if m == nil {
-		return
-	}
-	m.t.RecordQIDChanged(n)
-}
-
-// recordQIDAge samples the age of the active queryId map (seconds).
-func (m *clientMetrics) recordQIDAge(seconds float64) {
-	if m == nil {
-		return
-	}
-	m.t.RecordQIDAge(seconds)
+	return m.t
 }
 
 func (m *clientMetrics) recordRelogin(outcome string) {
@@ -233,29 +209,12 @@ func (m *clientMetrics) recordProxyFailure() {
 }
 
 // twitterEpochMs is the Twitter snowflake epoch (2010-11-04T01:42:54.657Z).
-const twitterEpochMs = 1288834974657
+const twitterEpochMs = parse.TwitterEpochMs
 
 // SnowflakeTime returns the creation time encoded in a Twitter/X snowflake ID
 // (a tweet ID): (id >> 22) + 1288834974657 ms. Consumers use it to compute
 // their own publication-to-first-seen lag.
-func SnowflakeTime(id string) (time.Time, error) {
-	n, err := strconv.ParseUint(id, 10, 64)
-	if err != nil {
-		return time.Time{}, &snowflakeError{id: id, err: err}
-	}
-	return time.UnixMilli(int64(n>>22) + twitterEpochMs).UTC(), nil
-}
-
-type snowflakeError struct {
-	id  string
-	err error
-}
-
-func (e *snowflakeError) Error() string {
-	return "twitter: invalid snowflake id " + strconv.Quote(e.id) + ": " + e.err.Error()
-}
-
-func (e *snowflakeError) Unwrap() error { return e.err }
+func SnowflakeTime(id string) (time.Time, error) { return parse.SnowflakeTime(id) }
 
 // attemptOutcome classifies (proxied: the attempt went through a per-account
 // proxy; only then can a transport failure be attributed to the proxy, the same

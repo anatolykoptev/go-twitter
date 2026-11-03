@@ -3,6 +3,7 @@ package twitter
 import (
 	"bytes"
 	"context"
+	"github.com/anatolykoptev/go-twitter/internal/queryid"
 	"io"
 	"os"
 	"path/filepath"
@@ -75,13 +76,13 @@ func newXWebClient(t *testing.T, chunk []byte) (*Client, *xwWorld) {
 
 func TestQIDRefresh_XWeb_FlagOnAppliesRotatedNativeID(t *testing.T) {
 	r, _ := useQIDRefresher(t)
-	r.cfg.xweb = true
+	r.Cfg.XWeb = true
 	c, w := newXWebClient(t, xwFixtureChunk(t, xwNewID))
 
 	_ = c.search(ctxTimeout(t))
-	r.wg.Wait()
+	r.WG.Wait()
 
-	require.NotNil(t, activeQID.Load(), "refresh must have applied")
+	require.NotNil(t, queryid.Active.Load(), "refresh must have applied")
 	assert.Equal(t, xwNewID, endpointFor(tweetNotificationsOp).ID)
 	assert.Equal(t, Endpoints["SearchTimeline"].ID, endpointFor("SearchTimeline").ID, "legacy ops are untouched")
 	assert.Equal(t, 1, w.hits[xwChunkURL])
@@ -93,22 +94,22 @@ func TestQIDRefresh_XWeb_FlagOnAppliesRotatedNativeID(t *testing.T) {
 // unconditional => RED.
 func TestQIDRefresh_XWeb_DefaultOffNeverCrawls(t *testing.T) {
 	r, _ := useQIDRefresher(t)
-	require.False(t, r.cfg.xweb, "the shipped default must be off")
-	require.False(t, defaultQIDConfig().xweb)
+	require.False(t, r.Cfg.XWeb, "the shipped default must be off")
+	require.False(t, defaultQIDConfig().XWeb)
 	c, w := newXWebClient(t, xwFixtureChunk(t, xwNewID))
 
 	_ = c.search(ctxTimeout(t))
-	r.wg.Wait()
+	r.WG.Wait()
 
 	assert.Zero(t, w.hits[xwChunkURL], "x-web chunk fetched with the flag off")
 	assert.Equal(t, Endpoints[tweetNotificationsOp].ID, endpointFor(tweetNotificationsOp).ID)
 }
 
 func TestDefaultQIDConfig_XWebFollowsEnv(t *testing.T) {
-	t.Setenv(envQIDXWeb, "on")
-	assert.True(t, defaultQIDConfig().xweb)
-	t.Setenv(envQIDXWeb, "")
-	assert.False(t, defaultQIDConfig().xweb)
+	t.Setenv(queryid.EnvXWeb, "on")
+	assert.True(t, defaultQIDConfig().XWeb)
+	t.Setenv(queryid.EnvXWeb, "")
+	assert.False(t, defaultQIDConfig().XWeb)
 }
 
 // An x-web-only bundle (the legacy walk finds none of the known ops) is still
@@ -119,18 +120,18 @@ func TestQIDRefresh_XWeb_OnlyBundleAppliesNativeIDAlone(t *testing.T) {
 	for _, on := range []bool{false, true} {
 		t.Run(map[bool]string{false: "flag off", true: "flag on"}[on], func(t *testing.T) {
 			r, _ := useQIDRefresher(t)
-			r.cfg.xweb = on
+			r.Cfg.XWeb = on
 			c, w := newXWebClient(t, xwFixtureChunk(t, xwNewID))
 			w.set(func(w *qidWorld) { w.advertised = map[string]string{} })
 
 			_ = c.search(ctxTimeout(t))
-			r.wg.Wait()
+			r.WG.Wait()
 
 			if !on {
-				assert.Nil(t, activeQID.Load(), "partial legacy bundle without x-web must change nothing")
+				assert.Nil(t, queryid.Active.Load(), "partial legacy bundle without x-web must change nothing")
 				return
 			}
-			require.NotNil(t, activeQID.Load())
+			require.NotNil(t, queryid.Active.Load())
 			assert.Equal(t, xwNewID, endpointFor(tweetNotificationsOp).ID)
 			assert.Equal(t, Endpoints["SearchTimeline"].ID, endpointFor("SearchTimeline").ID)
 		})
@@ -140,26 +141,26 @@ func TestQIDRefresh_XWeb_OnlyBundleAppliesNativeIDAlone(t *testing.T) {
 // A malformed legacy id stays fatal even when x-web ids are available.
 func TestQIDRefresh_XWeb_MalformedLegacyIDStillRejects(t *testing.T) {
 	r, _ := useQIDRefresher(t)
-	r.cfg.xweb = true
+	r.Cfg.XWeb = true
 	c, w := newXWebClient(t, xwFixtureChunk(t, xwNewID))
 	w.set(func(w *qidWorld) { w.extraJS += `{queryId:"BAD/ID",operationName:"UserTweets"},` })
 
 	_ = c.search(ctxTimeout(t))
-	r.wg.Wait()
+	r.WG.Wait()
 
-	assert.Nil(t, activeQID.Load())
+	assert.Nil(t, queryid.Active.Load())
 }
 
 // Only native ops of the right kind take an x-web id; a mutation artifact
 // carrying the native name is ignored.
 func TestQIDRefresh_XWeb_WrongKindIgnored(t *testing.T) {
 	r, _ := useQIDRefresher(t)
-	r.cfg.xweb = true
+	r.Cfg.XWeb = true
 	chunk := bytes.ReplaceAll(xwFixtureChunk(t, xwNewID), []byte("operationKind:`query`"), []byte("operationKind:`mutation`"))
 	c, _ := newXWebClient(t, chunk)
 
 	_ = c.search(ctxTimeout(t))
-	r.wg.Wait()
+	r.WG.Wait()
 
 	assert.Equal(t, Endpoints[tweetNotificationsOp].ID, endpointFor(tweetNotificationsOp).ID)
 }
@@ -167,17 +168,17 @@ func TestQIDRefresh_XWeb_WrongKindIgnored(t *testing.T) {
 // A panic on a hostile x-web chunk must not take the legacy result down.
 func TestQIDRefresh_XWeb_PanicKeepsLegacyRefresh(t *testing.T) {
 	r, _ := useQIDRefresher(t)
-	r.cfg.xweb = true
-	orig := qidConsumeXWeb
-	qidConsumeXWeb = func(context.Context, *gqlextract.XWebExtractor, string, []byte) { panic("hostile chunk") }
-	t.Cleanup(func() { qidConsumeXWeb = orig })
+	r.Cfg.XWeb = true
+	orig := queryid.ConsumeXWeb
+	queryid.ConsumeXWeb = func(context.Context, *gqlextract.XWebExtractor, string, []byte) { panic("hostile chunk") }
+	t.Cleanup(func() { queryid.ConsumeXWeb = orig })
 	c, w := newXWebClient(t, xwFixtureChunk(t, xwNewID))
 	w.retire("SearchTimeline", qidNewSearch)
 
 	_ = c.search(ctxTimeout(t))
-	r.wg.Wait()
+	r.WG.Wait()
 
-	require.NotNil(t, activeQID.Load(), "legacy refresh must survive an x-web panic")
+	require.NotNil(t, queryid.Active.Load(), "legacy refresh must survive an x-web panic")
 	assert.Equal(t, qidNewSearch, endpointFor("SearchTimeline").ID)
 	assert.Equal(t, Endpoints[tweetNotificationsOp].ID, endpointFor(tweetNotificationsOp).ID)
 }
@@ -188,8 +189,8 @@ func TestQIDRefresh_XWeb_PanicKeepsLegacyRefresh(t *testing.T) {
 //
 // Mutation: add "SearchTimeline" to internal/xwebnative Ops() => RED.
 func TestXWebNativeOps_AreExactlyTheMigratedOnes(t *testing.T) {
-	assert.Equal(t, map[string]string{tweetNotificationsOp: "query"}, xwebNativeOps)
-	for op := range xwebNativeOps {
+	assert.Equal(t, map[string]string{tweetNotificationsOp: "query"}, queryid.XWebNativeOps)
+	for op := range queryid.XWebNativeOps {
 		ep, ok := Endpoints[op]
 		require.True(t, ok, "%s must be a known operation", op)
 		assert.Equal(t, op, ep.Name, "a native op is requested under its Relay name")
@@ -223,21 +224,21 @@ func qidSeries(t *testing.T, reader sdkmetric.Reader) map[string]int64 {
 // outcome label and no alert.
 func TestQIDRefresh_XWeb_OnlyPageReportsDistinctOutcome(t *testing.T) {
 	r, _ := useQIDRefresher(t)
-	r.cfg.xweb = true
+	r.Cfg.XWeb = true
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
 	var alerts atomic.Int32
-	r.setAlertHook(func(string, any) { alerts.Add(1) })
+	r.SetAlertHook(func(string, any) { alerts.Add(1) })
 	c, w := newXWebClient(t, xwFixtureChunk(t, xwNewID))
 	c.metrics = newClientMetrics(mp)
 	w.set(func(w *qidWorld) { w.advertised = map[string]string{} })
 
 	_ = c.search(ctxTimeout(t))
-	r.wg.Wait()
+	r.WG.Wait()
 
-	require.NotNil(t, activeQID.Load())
-	assert.Equal(t, map[string]int64{"first/" + qidResultOKXWebOnly: 1}, qidSeries(t, reader))
+	require.NotNil(t, queryid.Active.Load())
+	assert.Equal(t, map[string]int64{"first/" + queryid.ResultOKXWebOnly: 1}, qidSeries(t, reader))
 	assert.Zero(t, alerts.Load(), "a genuine x-web-only page is not a failure")
 }
 
@@ -249,12 +250,12 @@ func TestQIDRefresh_XWeb_OnlyPageReportsDistinctOutcome(t *testing.T) {
 // from the xwebOnly condition => RED.
 func TestQIDRefresh_XWeb_FlakyLegacyWalkStillFails(t *testing.T) {
 	r, _ := useQIDRefresher(t)
-	r.cfg.xweb = true
+	r.Cfg.XWeb = true
 	reader := sdkmetric.NewManualReader()
 	mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
 	t.Cleanup(func() { _ = mp.Shutdown(context.Background()) })
 	var alerts atomic.Int32
-	r.setAlertHook(func(topic string, _ any) {
+	r.SetAlertHook(func(topic string, _ any) {
 		if topic == "queryid.refresh_failed" {
 			alerts.Add(1)
 		}
@@ -268,10 +269,10 @@ func TestQIDRefresh_XWeb_FlakyLegacyWalkStillFails(t *testing.T) {
 	})
 
 	_ = c.search(ctxTimeout(t))
-	r.wg.Wait()
+	r.WG.Wait()
 
-	assert.Nil(t, activeQID.Load(), "a partial legacy walk must not apply, x-web id or not")
-	assert.Equal(t, map[string]int64{"first/" + qidResultRejected: 1}, qidSeries(t, reader))
+	assert.Nil(t, queryid.Active.Load(), "a partial legacy walk must not apply, x-web id or not")
+	assert.Equal(t, map[string]int64{"first/" + queryid.ResultRejected: 1}, qidSeries(t, reader))
 	assert.EqualValues(t, 1, alerts.Load(), "the failure must alert")
 }
 
@@ -280,7 +281,7 @@ func TestQIDRefresh_XWeb_FlakyLegacyWalkStillFails(t *testing.T) {
 // Mutation: in walkXWeb delete the `len(conflicts[op]) > 0` case => RED.
 func TestQIDRefresh_XWeb_ConflictingNativeIDsAreDropped(t *testing.T) {
 	r, _ := useQIDRefresher(t)
-	r.cfg.xweb = true
+	r.Cfg.XWeb = true
 	c, w := newXWebClient(t, xwFixtureChunk(t, xwNewID))
 	const second = testViteBase + "assets/tweet-notifications-T2.js"
 	w.more = map[string][]byte{second: xwFixtureChunk(t, "XWebOtherID_0002")}
@@ -290,9 +291,9 @@ func TestQIDRefresh_XWeb_ConflictingNativeIDsAreDropped(t *testing.T) {
 	w.retire("SearchTimeline", qidNewSearch) // a legacy change keeps the refresh observable
 
 	_ = c.search(ctxTimeout(t))
-	r.wg.Wait()
+	r.WG.Wait()
 
-	require.NotNil(t, activeQID.Load())
+	require.NotNil(t, queryid.Active.Load())
 	assert.Positive(t, w.hits[xwChunkURL], "first chunk fetched")
 	assert.Positive(t, w.hits[second], "both conflicting chunks must have been read")
 	assert.Equal(t, Endpoints[tweetNotificationsOp].ID, endpointFor(tweetNotificationsOp).ID,
@@ -326,11 +327,11 @@ func (f *stampFetcher) Fetch(_ context.Context, u string) ([]byte, error) {
 func TestQIDRefresh_XWeb_CrawlIsPaced(t *testing.T) {
 	r, _ := useQIDRefresher(t)
 	f := &stampFetcher{}
-	r.walkXWeb(context.Background(), f, &warmPage{vite: []string{testViteBase + "entry.js"}})
+	r.WalkXWeb(context.Background(), f, &queryid.WarmPage{Vite: []string{testViteBase + "entry.js"}})
 
 	require.Len(t, f.starts, 3)
 	for i := 1; i < len(f.starts); i++ {
-		assert.GreaterOrEqual(t, f.starts[i].Sub(f.starts[i-1]), qidXWebGap-10*time.Millisecond,
+		assert.GreaterOrEqual(t, f.starts[i].Sub(f.starts[i-1]), queryid.XWebGap-10*time.Millisecond,
 			"fetch %d started too soon after fetch %d", i, i-1)
 	}
 }

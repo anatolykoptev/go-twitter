@@ -17,6 +17,7 @@ import (
 	"time"
 
 	stealth "github.com/anatolykoptev/go-stealth"
+	"github.com/anatolykoptev/go-twitter/internal/parse"
 )
 
 const (
@@ -43,16 +44,7 @@ const (
 
 // processingInfo mirrors Twitter's async media processing state returned by
 // FINALIZE and STATUS. Images return no processing_info; video/gif do.
-type processingInfo struct {
-	State      string `json:"state"`
-	CheckAfter int    `json:"check_after_secs"`
-	Progress   int    `json:"progress_percent"`
-	Error      *struct {
-		Code    int    `json:"code"`
-		Name    string `json:"name"`
-		Message string `json:"message"`
-	} `json:"error"`
-}
+type processingInfo = parse.ProcessingInfo
 
 // uploadDoFunc performs a single media-endpoint request and returns the raw
 // response body. It is injected so the upload state machine can be tested
@@ -114,7 +106,7 @@ func runMediaUpload(ctx context.Context, do uploadDoFunc, sleep func(context.Con
 	if err != nil {
 		return "", fmt.Errorf("media INIT: %w", err)
 	}
-	mediaID, err := parseMediaInit(initBody)
+	mediaID, err := parse.MediaInit(initBody)
 	if err != nil {
 		return "", fmt.Errorf("media INIT: %w", err)
 	}
@@ -143,7 +135,7 @@ func runMediaUpload(ctx context.Context, do uploadDoFunc, sleep func(context.Con
 	if err != nil {
 		return "", fmt.Errorf("media FINALIZE: %w", err)
 	}
-	info, err := parseProcessingInfo(finBody)
+	info, err := parse.MediaProcessing(finBody)
 	if err != nil {
 		return "", fmt.Errorf("media FINALIZE: %w", err)
 	}
@@ -179,7 +171,7 @@ func runMediaUpload(ctx context.Context, do uploadDoFunc, sleep func(context.Con
 		if err != nil {
 			return "", fmt.Errorf("media STATUS: %w", err)
 		}
-		info, err = parseProcessingInfo(stBody)
+		info, err = parse.MediaProcessing(stBody)
 		if err != nil {
 			return "", fmt.Errorf("media STATUS: %w", err)
 		}
@@ -236,49 +228,6 @@ func buildAppendMultipart(chunk []byte) ([]byte, string, error) {
 	return buf.Bytes(), w.FormDataContentType(), nil
 }
 
-// parseMediaInit extracts media_id_string from an INIT response.
-func parseMediaInit(body []byte) (string, error) {
-	var raw struct {
-		MediaIDString string          `json:"media_id_string"`
-		Errors        []mediaAPIError `json:"errors"`
-	}
-	if err := json.Unmarshal(body, &raw); err != nil {
-		return "", fmt.Errorf("unmarshal media INIT: %w", err)
-	}
-	if len(raw.Errors) > 0 {
-		return "", fmt.Errorf("media INIT API error %d: %s", raw.Errors[0].Code, raw.Errors[0].Message)
-	}
-	if raw.MediaIDString == "" {
-		return "", fmt.Errorf("media INIT returned empty media_id: %s", truncateBytes(body, 200))
-	}
-	return raw.MediaIDString, nil
-}
-
-// parseProcessingInfo extracts processing_info from a FINALIZE/STATUS response.
-// Returns (nil, nil) when no processing_info is present (e.g. images, or 204).
-func parseProcessingInfo(body []byte) (*processingInfo, error) {
-	if len(body) == 0 {
-		return nil, nil
-	}
-	var raw struct {
-		ProcessingInfo *processingInfo `json:"processing_info"`
-		Errors         []mediaAPIError `json:"errors"`
-	}
-	if err := json.Unmarshal(body, &raw); err != nil {
-		return nil, fmt.Errorf("unmarshal processing_info: %w", err)
-	}
-	if len(raw.Errors) > 0 {
-		return nil, fmt.Errorf("media API error %d: %s", raw.Errors[0].Code, raw.Errors[0].Message)
-	}
-	return raw.ProcessingInfo, nil
-}
-
-// mediaAPIError is the shared shape of a Twitter media-endpoint error entry.
-type mediaAPIError struct {
-	Code    int    `json:"code"`
-	Message string `json:"message"`
-}
-
 // processingDone reports whether async media processing is complete. A nil
 // processingInfo (image, or absent) counts as done. A "failed" state is an error.
 func processingDone(p *processingInfo) (bool, error) {
@@ -333,7 +282,7 @@ func (c *Client) CreateTweetWithMedia(ctx context.Context, acc *Account, text st
 	if err != nil {
 		return "", fmt.Errorf("CreateTweetWithMedia: %w", err)
 	}
-	return parseCreateTweet(body)
+	return parse.CreateTweet(body)
 }
 
 // PostWithMedia uploads the given files and posts a tweet attaching them, from a

@@ -55,7 +55,7 @@ func compare(spec opSpec, legacyID string, byName map[string]gqlextract.Op) row 
 //   - A `__…` segment in the x-web root is the client's own normalised timeline
 //     connection (the artifact imports timeline_normalization / create-urt): the
 //     wire timeline is not the legacy URT, so it is new-shape whatever the root
-//     says (this is the shape devicefollow.go's xwebTimeline parser already
+//     says (this is the shape internal/parse's xwebTimeline parser already
 //     handles: entry_id, content.content, details.full_text, created_at_ms).
 //   - Otherwise the legacy root path must be a prefix-compatible walk of the
 //     x-web chain; a `{a,b}` sibling set matches when it contains the legacy
@@ -173,7 +173,7 @@ func render(rows []row, m meta) string {
 	b.WriteString("## Verdicts\n\n")
 	b.WriteString("- **same-shape**: the response root the go-twitter parser reads is unchanged. Inner tweet/user objects are not diffed.\n")
 	b.WriteString("- **new-shape**: the root moved, or the artifact normalises the timeline through the client's own URT layer " +
-		"(entries arrive as `entry_id` / `content.content` / `details.full_text` / `created_at_ms`, see `xwebTimeline` in `devicefollow.go`), " +
+		"(entries arrive as `entry_id` / `content.content` / `details.full_text` / `created_at_ms`, see `xwebTimeline` in `internal/parse/devicefollow.go`), " +
 		"so the legacy timeline parser cannot read it.\n")
 	b.WriteString("- **not-found-in-x-web**: no artifact under any candidate name in the crawled graph.\n")
 	b.WriteString("- **undetermined**: the artifact was found but its response selection could not be read from the chunk.\n\n")

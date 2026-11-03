@@ -6,6 +6,9 @@
 // follows the rate limits X reports per account and endpoint, and failures
 // surface as [*APIError] values with predicates such as [IsRateLimited].
 //
+// The response types ([Tweet], [TwitterUser], [DMConversation], [DMMessage]) are
+// defined in package model and aliased here, so either import path works.
+//
 // Accounts authenticate with the auth_token and ct0 cookies of a logged-in
 // x.com session. Treat both as passwords.
 //

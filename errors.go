@@ -7,13 +7,15 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/anatolykoptev/go-twitter/model"
 )
 
 // ErrNotFound marks deterministic "the resource does not exist" outcomes —
 // deleted tweets, suspended/unavailable handles. Pool callers treat it as a
 // healthy-account response (no retry, no auth_error report): the credential
 // worked; the thing asked for simply isn't there.
-var ErrNotFound = errors.New("twitter: resource not found")
+var ErrNotFound = model.ErrNotFound
 
 // ErrProxyClientUnavailable is returned when an account is pinned to its own
 // proxy (Account.Proxy != "") but its per-account transport could not be built.
