@@ -12,14 +12,23 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/anatolykoptev/go-twitter/model"
 )
 
-// TruncateBytes returns b as a string cut to n bytes with a "..." marker.
+// TruncateBytes returns b as a string cut to at most n bytes with a "..."
+// marker. The cut backs off to a rune boundary, so valid UTF-8 input never
+// yields a string ending in half a rune.
 func TruncateBytes(b []byte, n int) string {
 	if len(b) <= n {
 		return string(b)
+	}
+	if n < 0 {
+		n = 0
+	}
+	for n > 0 && !utf8.RuneStart(b[n]) {
+		n--
 	}
 	return string(b[:n]) + "..."
 }
@@ -188,13 +197,21 @@ func TweetDetail(body []byte, focalID string) ([]*model.Tweet, error) {
 // carry promotedMetadata inside itemContent and/or a promoted-* entryId.
 // Promoted tweets must not surface as conversation replies.
 func isPromotedItem(entryID string, itemContent json.RawMessage) bool {
-	if strings.HasPrefix(entryID, "promoted-") || strings.Contains(entryID, "-promoted-") {
+	if isPromotedEntryID(entryID) {
 		return true
 	}
 	var probe struct {
 		Promoted json.RawMessage `json:"promotedMetadata"`
 	}
-	return json.Unmarshal(itemContent, &probe) == nil && probe.Promoted != nil
+	// A JSON null is "no metadata", not an ad: RawMessage keeps the literal.
+	return json.Unmarshal(itemContent, &probe) == nil && hasJSONValue(probe.Promoted)
+}
+
+// isPromotedEntryID matches the promoted entry-id shapes: "promoted-tweet-…",
+// the camel-case "promotedTweet-…" and a promoted segment inside a longer id.
+func isPromotedEntryID(entryID string) bool {
+	id := strings.ToLower(entryID)
+	return strings.HasPrefix(id, "promoted") || strings.Contains(id, "-promoted")
 }
 
 // TweetTimeline parses UserTweets timeline response.
@@ -476,7 +493,23 @@ type timelineObj struct {
 type timelineInstruction struct {
 	Type    string          `json:"type"`
 	Entries []timelineEntry `json:"entries"`
-	Entry   *timelineEntry  `json:"entry"`
+	// Entry carries the single entry of TimelinePinEntry and
+	// TimelineReplaceEntry instructions.
+	Entry *timelineEntry `json:"entry"`
+	// EntryIDToReplace names the entry a TimelineReplaceEntry supersedes.
+	EntryIDToReplace string `json:"entry_id_to_replace"`
+	// ModuleEntryID and ModuleItems carry a TimelineAddToModule instruction:
+	// items appended to a module delivered earlier.
+	ModuleEntryID string               `json:"moduleEntryId"`
+	ModuleItems   []timelineModuleItem `json:"moduleItems"`
+}
+
+// timelineModuleItem is one item inside a timeline module.
+type timelineModuleItem struct {
+	EntryID string `json:"entryId"`
+	Item    struct {
+		ItemContent json.RawMessage `json:"itemContent"`
+	} `json:"item"`
 }
 
 type timelineEntry struct {
@@ -489,8 +522,11 @@ type timelineContent struct {
 	EntryType   string          `json:"entryType"`
 	TypeName    string          `json:"__typename"`
 	ItemContent json.RawMessage `json:"itemContent"`
-	Value       string          `json:"value"`
-	CursorType  string          `json:"cursorType"`
+	// Items holds the members of a TimelineTimelineModule entry (profile
+	// conversation threads and similar).
+	Items      []timelineModuleItem `json:"items"`
+	Value      string               `json:"value"`
+	CursorType string               `json:"cursorType"`
 }
 
 type userResult struct {
@@ -653,9 +689,38 @@ type tweetResult struct {
 		QuoteCount    int    `json:"quote_count"`
 		ReplyCount    int    `json:"reply_count"`
 		UserIDStr     string `json:"user_id_str"`
+		// InReplyToStatusID, QuotedStatusID: relationship markers.
+		InReplyToStatusID string `json:"in_reply_to_status_id_str"`
+		QuotedStatusID    string `json:"quoted_status_id_str"`
+		// RetweetedStatus is the original of a retweet; full_text of the
+		// retweet itself is the "RT @user: …" form X cuts short.
+		RetweetedStatus struct {
+			Result *tweetResult `json:"result"`
+		} `json:"retweeted_status_result"`
 	} `json:"legacy"`
+	// NoteTweet holds the untruncated text of a long tweet; legacy.full_text
+	// is cut at ~280 characters for those.
+	NoteTweet struct {
+		Results struct {
+			Result struct {
+				Text string `json:"text"`
+			} `json:"result"`
+		} `json:"note_tweet_results"`
+	} `json:"note_tweet"`
+	QuotedStatus struct {
+		Result *tweetResult `json:"result"`
+	} `json:"quoted_status_result"`
+	// EditControl: a later edit carries initial_tweet_id (and the id list
+	// under edit_control_initial); a first version carries the id list flat.
+	EditControl struct {
+		InitialTweetID     string   `json:"initial_tweet_id"`
+		EditTweetIDs       []string `json:"edit_tweet_ids"`
+		EditControlInitial struct {
+			EditTweetIDs []string `json:"edit_tweet_ids"`
+		} `json:"edit_control_initial"`
+	} `json:"edit_control"`
 	Views struct {
-		Count string `json:"count"`
+		Count flexCount `json:"count"`
 	} `json:"views"`
 	// TweetWithVisibilityResults nests the real tweet under "tweet";
 	// any future *Results wrapper would land in the same field.
@@ -706,12 +771,59 @@ func extractUsersFromTimeline(tl timelineObj) ([]*model.TwitterUser, string, err
 	return users, nextCursor, nil
 }
 
+// timelineItem is one tweet-bearing item located inside a timeline: a plain
+// entry, a member of a module, or the single entry of a pin/replace
+// instruction.
+type timelineItem struct {
+	entryID     string
+	itemContent json.RawMessage
+	pinned      bool
+	// parentPromoted is set when the module holding the item is promoted.
+	parentPromoted bool
+}
+
+// items lists every item of an instruction in delivery order: the single
+// entry first (a pinned tweet leads its page), then the entries and their
+// module members, then TimelineAddToModule members.
+func (ins timelineInstruction) items() []timelineItem {
+	var out []timelineItem
+	add := func(e timelineEntry, pinned bool) {
+		if e.Content.ItemContent != nil {
+			out = append(out, timelineItem{entryID: e.EntryID, itemContent: e.Content.ItemContent, pinned: pinned})
+		}
+		promoted := isPromotedEntryID(e.EntryID)
+		for _, mi := range e.Content.Items {
+			out = append(out, timelineItem{entryID: mi.EntryID, itemContent: mi.Item.ItemContent, parentPromoted: promoted})
+		}
+	}
+	if ins.Entry != nil {
+		add(*ins.Entry, ins.Type == "TimelinePinEntry")
+	}
+	for _, e := range ins.Entries {
+		add(e, false)
+	}
+	promoted := isPromotedEntryID(ins.ModuleEntryID)
+	for _, mi := range ins.ModuleItems {
+		out = append(out, timelineItem{entryID: mi.EntryID, itemContent: mi.Item.ItemContent, parentPromoted: promoted})
+	}
+	return out
+}
+
 func extractTweetsFromTimeline(tl timelineObj, defaultAuthorID string) ([]*model.Tweet, error) {
 	var tweets []*model.Tweet
+	byEntry := map[string]int{} // entryId -> index in tweets, for TimelineReplaceEntry
 
 	for _, instruction := range tl.Instructions {
-		for _, entry := range instruction.Entries {
-			if entry.Content.ItemContent == nil {
+		// A replace instruction supersedes the tweet delivered under the
+		// named entry: drop it so the page does not carry both versions.
+		if instruction.Type == "TimelineReplaceEntry" && instruction.EntryIDToReplace != "" {
+			if idx, ok := byEntry[instruction.EntryIDToReplace]; ok {
+				tweets[idx] = nil
+				delete(byEntry, instruction.EntryIDToReplace)
+			}
+		}
+		for _, it := range instruction.items() {
+			if it.itemContent == nil {
 				continue
 			}
 			var item struct {
@@ -720,22 +832,36 @@ func extractTweetsFromTimeline(tl timelineObj, defaultAuthorID string) ([]*model
 					Result tweetResult `json:"result"`
 				} `json:"tweet_results"`
 			}
-			if err := json.Unmarshal(entry.Content.ItemContent, &item); err != nil {
+			if err := json.Unmarshal(it.itemContent, &item); err != nil {
+				slog.Debug("skip timeline item that does not decode", slog.String("entry", it.entryID), slog.Any("error", err))
 				continue
 			}
 			if item.TypeName != "TimelineTweet" {
+				switch item.TypeName {
+				case "TimelineUser", "TimelinePrompt", "TimelineMessagePrompt", "TimelineTimelineCursor":
+				default:
+					slog.Debug("skip timeline item of unhandled type", slog.String("entry", it.entryID), slog.String("type", item.TypeName))
+				}
 				continue
 			}
 			t, err := parseTweetResult(item.TweetResults.Result, defaultAuthorID)
 			if err != nil {
-				slog.Debug("skip tweet parse error", slog.Any("error", err))
+				slog.Debug("skip tweet parse error", slog.String("entry", it.entryID), slog.Any("error", err))
 				continue
 			}
-			t.Promoted = isPromotedItem(entry.EntryID, entry.Content.ItemContent)
+			t.Promoted = it.parentPromoted || isPromotedItem(it.entryID, it.itemContent)
+			t.Pinned = it.pinned
+			byEntry[it.entryID] = len(tweets)
 			tweets = append(tweets, t)
 		}
 	}
-	return tweets, nil
+	kept := tweets[:0]
+	for _, t := range tweets {
+		if t != nil {
+			kept = append(kept, t)
+		}
+	}
+	return kept, nil
 }
 
 // parseTwitterTime parses X's created_at format. An empty input yields the zero
@@ -805,27 +931,103 @@ func parseTweetResult(r tweetResult, defaultAuthorID string) (*model.Tweet, erro
 
 	views := 0
 	if r.Views.Count != "" {
-		views, _ = strconv.Atoi(r.Views.Count)
+		var err error
+		if views, err = strconv.Atoi(string(r.Views.Count)); err != nil {
+			slog.Debug("views.count is not an integer; field zeroed", slog.String("raw", string(r.Views.Count)))
+		}
 	}
 
+	// legacy.full_text is cut for long tweets; note_tweet holds the whole text.
 	text := r.Legacy.FullText
-	mentions := extractTokenMentions(text)
+	if nt := r.NoteTweet.Results.Result.Text; nt != "" {
+		text = nt
+	}
 
 	author := r.Core.UserResults.Result
-	return &model.Tweet{
-		ID:            r.RestID,
-		AuthorID:      authorID,
-		AuthorHandle:  author.screenName(),
-		AuthorName:    author.displayName(),
-		Text:          text,
-		CreatedAt:     createdAt,
-		Views:         views,
-		Likes:         r.Legacy.FavoriteCount,
-		Retweets:      r.Legacy.RetweetCount,
-		Quotes:        r.Legacy.QuoteCount,
-		ReplyCount:    r.Legacy.ReplyCount,
-		TokenMentions: mentions,
-	}, nil
+	t := &model.Tweet{
+		ID:           r.RestID,
+		AuthorID:     authorID,
+		AuthorHandle: author.screenName(),
+		AuthorName:   author.displayName(),
+		Text:         text,
+		CreatedAt:    createdAt,
+		Views:        views,
+		Likes:        r.Legacy.FavoriteCount,
+		Retweets:     r.Legacy.RetweetCount,
+		Quotes:       r.Legacy.QuoteCount,
+		ReplyCount:   r.Legacy.ReplyCount,
+		InReplyToID:  r.Legacy.InReplyToStatusID,
+		QuotedID:     r.Legacy.QuotedStatusID,
+		EditOf:       r.editOf(),
+	}
+	if t.QuotedID == "" && r.QuotedStatus.Result != nil {
+		t.QuotedID = innerRestID(r.QuotedStatus.Result)
+	}
+	if rs := r.Legacy.RetweetedStatus.Result; rs != nil {
+		t.RetweetOfID = innerRestID(rs)
+		if orig, err := parseTweetResult(*rs, ""); err == nil {
+			t.RetweetOf = orig
+			t.RetweetOfID = orig.ID
+			// The retweet's own full_text is the "RT @user: …" form X cuts
+			// short; rebuild it from the untruncated original.
+			if orig.AuthorHandle != "" {
+				t.Text = "RT @" + orig.AuthorHandle + ": " + orig.Text
+			}
+		} else {
+			slog.Debug("retweet original not decodable", slog.String("retweet", t.ID), slog.Any("error", err))
+		}
+	}
+	t.TokenMentions = extractTokenMentions(t.Text)
+	return t, nil
+}
+
+// innerRestID returns the rest_id of a result after unwrapping *Results
+// shells, "" for a tombstone or unavailable result.
+func innerRestID(r *tweetResult) string {
+	for r != nil && r.RestID == "" {
+		r = r.Tweet
+	}
+	if r == nil {
+		return ""
+	}
+	return r.RestID
+}
+
+// editOf returns the first version's id when this tweet is a later edit of it.
+func (r tweetResult) editOf() string {
+	initial := r.EditControl.InitialTweetID
+	if initial == "" && len(r.EditControl.EditControlInitial.EditTweetIDs) > 0 {
+		initial = r.EditControl.EditControlInitial.EditTweetIDs[0]
+	}
+	if initial == "" && len(r.EditControl.EditTweetIDs) > 0 {
+		initial = r.EditControl.EditTweetIDs[0]
+	}
+	if initial == r.RestID {
+		return ""
+	}
+	return initial
+}
+
+// flexCount is a counter X ships as a numeric string ("147516") but that must
+// not fail the whole tweet when it arrives as a bare number or is absent.
+type flexCount string
+
+func (c *flexCount) UnmarshalJSON(b []byte) error {
+	s := strings.TrimSpace(string(b))
+	switch {
+	case strings.HasPrefix(s, `"`):
+		var v string
+		if err := json.Unmarshal(b, &v); err != nil {
+			return nil
+		}
+		*c = flexCount(v)
+	case s == "null" || s == "":
+	default:
+		if _, err := strconv.ParseFloat(s, 64); err == nil {
+			*c = flexCount(s)
+		}
+	}
+	return nil
 }
 
 // CreateTweet extracts the tweet ID from a CreateTweet mutation response.
