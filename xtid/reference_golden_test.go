@@ -2,7 +2,6 @@ package xtid
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -14,36 +13,25 @@ import (
 )
 
 // Golden vectors produced by the reference implementation
-// (testdata/reference/gen/README.md): every value below was computed by
-// x-client-transaction-id, not by this package, and each must match byte for
-// byte. Regenerate with `node gen.mjs` in testdata/reference/gen.
+// (testdata/reference/gen/README.md): the transaction id's hash format, the
+// rounding helpers and the ondemand.s URL. Each value was computed by
+// x-client-transaction-id, not by this package, and must match byte for byte.
+// Regenerate with `node gen.mjs` in testdata/reference/gen.
 //
-// The one known divergence: the reference does not cap a colour channel at 255,
-// X rejects the resulting key, and xtid caps it. Each animate and keys vector
-// therefore holds the reference's output AND the expectation xtid is held to
-// (the reference with the cap, see gen.mjs xExpected); live X is the oracle for
-// the difference. Everything else is compared with the reference as is.
+// The reference is NOT the oracle for the animation key, which it computes
+// differently from the browser X runs in (no 255 cap on a colour channel, a
+// different easing solver): TestBrowserGolden compares those with a real browser.
 
 type goldenMeta struct {
-	Name             string `json:"name"`
-	Page             string `json:"page"`
-	Ondemand         string `json:"ondemand"`
-	OndemandURL      string `json:"ondemandUrl"`
-	RealAnimationKey string `json:"realAnimationKey"`
-	Stats            struct {
-		ClampCases      int `json:"clampCases"`
-		EpsilonCases    int `json:"epsilonCases"`
-		KeyClampCases   int `json:"keyClampCases"`
-		KeyEpsilonCases int `json:"keyEpsilonCases"`
-		KeyTieCases     int `json:"keyTieCases"`
-	} `json:"stats"`
+	Name        string `json:"name"`
+	Page        string `json:"page"`
+	Ondemand    string `json:"ondemand"`
+	OndemandURL string `json:"ondemandUrl"`
 }
 
 type goldenSet struct {
-	Meta    goldenMeta  `json:"meta"`
-	Animate [][]any     `json:"animate"` // [frame, row, t, reference key, expected key]
-	Keys    [][3]string `json:"keys"`    // [key bytes (base64), reference key, expected key]
-	IDs     [][]any     `json:"ids"`     // [method, path, timeNow, randomByte, id]
+	Meta goldenMeta `json:"meta"`
+	IDs  [][]any    `json:"ids"` // [method, path, timeNow, randomByte, id]
 }
 
 type goldenFile struct {
@@ -81,23 +69,6 @@ func report(t *testing.T, what string, n int, bad []string) {
 	t.Fatalf("%s: %d of %d vectors differ from the reference:\n  %s", what, len(bad), n, strings.Join(bad, "\n  "))
 }
 
-// capOnly fails unless want is ref with only the colour channels at its start
-// shortened: the matrix fields after the channels must be identical, so the cap
-// is the sole divergence from the reference.
-func capOnly(ref, want string) error {
-	if ref == want {
-		return nil
-	}
-	const maxChannels = 6 // three channels of at most two hex digits
-	if len(want) <= maxChannels || len(ref) <= len(want) {
-		return fmt.Errorf("reference %q and expected %q differ by more than a capped channel", ref, want)
-	}
-	if ref[len(ref)-(len(want)-maxChannels):] != want[maxChannels:] {
-		return fmt.Errorf("reference %q and expected %q differ beyond the colour channels", ref, want)
-	}
-	return nil
-}
-
 func TestReferenceGolden(t *testing.T) {
 	g, dir := loadGolden(t)
 	if g.Reference.Package != "x-client-transaction-id" || g.Reference.Integrity == "" {
@@ -131,14 +102,6 @@ func TestReferenceGolden(t *testing.T) {
 		report(t, "runtimes", len(g.Runtimes), bad)
 	})
 
-	totalKeys := 0
-	for _, set := range g.Sets {
-		totalKeys += len(set.Keys)
-	}
-	if totalKeys < 1000 {
-		t.Fatalf("golden file holds %d end-to-end keys, want >= 1000", totalKeys)
-	}
-
 	for _, set := range g.Sets {
 		set := set
 		t.Run(set.Meta.Name, func(t *testing.T) {
@@ -148,65 +111,6 @@ func TestReferenceGolden(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			frames := getSVGFrames(page)
-			s := set.Meta.Stats
-			if s.ClampCases == 0 || s.EpsilonCases == 0 || s.KeyClampCases == 0 || s.KeyEpsilonCases == 0 || s.KeyTieCases == 0 {
-				t.Fatalf("vector sample lost a case class: %+v", s)
-			}
-
-			t.Run("real_key", func(t *testing.T) {
-				if ct.animationKey != set.Meta.RealAnimationKey {
-					t.Fatalf("animation key = %q, want %q", ct.animationKey, set.Meta.RealAnimationKey)
-				}
-			})
-
-			t.Run("animate", func(t *testing.T) {
-				var bad []string
-				capped := 0
-				for _, v := range set.Animate {
-					f, r, tt, ref, want := int(v[0].(float64)), int(v[1].(float64)), v[2].(float64), v[3].(string), v[4].(string)
-					if err := capOnly(ref, want); err != nil {
-						t.Fatal(err)
-					}
-					if ref != want {
-						capped++
-					}
-					if got := ct.animate(frames[f].data[r], tt); got != want {
-						bad = append(bad, fmt.Sprintf("animate(frame %d, row %d, t=%v) = %q, want %q", f, r, tt, got, want))
-					}
-				}
-				report(t, "animate", len(set.Animate), bad)
-				if capped < s.ClampCases {
-					t.Fatalf("only %d animate vectors need the cap, the sample holds %d clamp cases", capped, s.ClampCases)
-				}
-			})
-
-			t.Run("keys", func(t *testing.T) {
-				var bad []string
-				capped := 0
-				for _, v := range set.Keys {
-					if err := capOnly(v[1], v[2]); err != nil {
-						t.Fatal(err)
-					}
-					if v[1] != v[2] {
-						capped++
-					}
-					kb, err := base64.StdEncoding.DecodeString(v[0])
-					if err != nil {
-						t.Fatal(err)
-					}
-					ct.keyBytes = kb
-					got, err := ct.buildAnimationKey(page)
-					if err != nil || got != v[2] {
-						bad = append(bad, fmt.Sprintf("key %s... = %q (err %v), want %q", v[0][:8], got, err, v[2]))
-					}
-				}
-				report(t, "keys", len(set.Keys), bad)
-				if capped < s.KeyClampCases {
-					t.Fatalf("only %d keys need the cap, the sample holds %d clamp cases", capped, s.KeyClampCases)
-				}
-			})
-
 			t.Run("ids", func(t *testing.T) {
 				ct2, err := newClientTransaction(page, js)
 				if err != nil {
@@ -235,8 +139,8 @@ func TestReferenceGolden(t *testing.T) {
 					if len(f.seen) != 2 || f.seen[0] != LoggedOutPageURL || f.seen[1] != set.Meta.OndemandURL {
 						t.Fatalf("fetched %v, want [%s %s]", f.seen, LoggedOutPageURL, set.Meta.OndemandURL)
 					}
-					if m.ct.animationKey != set.Meta.RealAnimationKey {
-						t.Fatalf("manager animation key = %q, want %q", m.ct.animationKey, set.Meta.RealAnimationKey)
+					if m.ct.animationKey != ct.animationKey {
+						t.Fatalf("manager animation key = %q, want %q", m.ct.animationKey, ct.animationKey)
 					}
 				})
 			}

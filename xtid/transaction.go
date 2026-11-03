@@ -7,6 +7,7 @@ import (
 	"math"
 	"math/rand"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -87,31 +88,70 @@ func round2(v float64) float64 {
 	return jsRound(float64(v*100)) / 100
 }
 
+// matrixNumberRe is the pattern X's script uses to pull the numbers out of the
+// computed `matrix(a, b, c, d, 0, 0)` string.
+var matrixNumberRe = regexp.MustCompile(`[\d.-]+`)
+
+// matrixNumbers returns the number tokens X's script reads from one matrix
+// entry. X reads the entry from getComputedStyle, where Chromium prints it with
+// six significant digits ("0.719009", and "5.68575e-05" for small values), then
+// matches /[\d.-]+/g over that string: the exponent of "5.68575e-05" therefore
+// comes out as a second number, "-05". Both effects change the key: 0.69499999
+// reads as "0.695", and a value below 1e-4 yields two numbers.
+func matrixNumbers(v float64) []float64 {
+	var out []float64
+	for _, tok := range matrixNumberRe.FindAllString(strconv.FormatFloat(v, 'g', 6, 64), -1) {
+		if n, err := strconv.ParseFloat(tok, 64); err == nil {
+			out = append(out, n)
+		}
+	}
+	return out
+}
+
+// toFixed2 is JavaScript's Number(x.toFixed(2)): the decimal expansion of the
+// double is rounded to two places and an exact tie goes to the larger
+// magnitude, where Go's formatting rounds a tie to even. Only multiples of 1/8
+// can tie.
+func toFixed2(x float64) float64 {
+	ax := math.Abs(x)
+	s := strconv.FormatFloat(ax, 'f', 2, 64)
+	if e := ax * 8; e == math.Floor(e) && math.Mod(e, 2) == 1 {
+		n := int64(ax*100 + 0.5)
+		s = fmt.Sprintf("%d.%02d", n/100, n%100)
+	}
+	v, _ := strconv.ParseFloat(s, 64)
+	return math.Copysign(v, x)
+}
+
 func (ct *ClientTransaction) animate(frames []int, targetTime float64) string {
 	if len(frames) < 11 {
 		return ""
 	}
-	fromColor := []float64{float64(frames[0]), float64(frames[1]), float64(frames[2]), 1}
-	toColor := []float64{float64(frames[3]), float64(frames[4]), float64(frames[5]), 1}
-	fromRotation := []float64{0.0}
-	toRotation := []float64{ct.solve(float64(frames[6]), 60.0, 360.0, true)}
-
 	curveFrames := frames[7:]
 	curves := make([]float64, len(curveFrames))
 	for i, item := range curveFrames {
 		curves[i] = ct.solve(float64(item), isOdd(i), 1.0, false)
 	}
 
-	c := newCubic(curves)
-	val := c.getValue(targetTime)
+	return ct.render(frames, newCubic(curves).getValue(targetTime))
+}
 
+// render prints the animation key for the eased value val: the colour and the
+// rotation matrix X reads back from the browser after setting the animation to
+// that point.
+func (ct *ClientTransaction) render(frames []int, val float64) string {
+	fromColor := []float64{float64(frames[0]), float64(frames[1]), float64(frames[2]), 1}
+	toColor := []float64{float64(frames[3]), float64(frames[4]), float64(frames[5]), 1}
+	fromRotation := []float64{0.0}
+	toRotation := []float64{ct.solve(float64(frames[6]), 60.0, 360.0, true)}
 	color := interpolate(fromColor, toColor, val)
-	// Cap every channel to 0..255. The cubic overshoots [0,1] (its y control
-	// values lie in [-1,1]), so a channel can reach ~285; it would print as three
-	// hex digits ("112") where X expects "ff", and X rejects the id with a 404.
-	// That is about 4% of verification keys. The reference implementation
-	// (Lqm1/x-client-transaction-id) floors at 0 but does not cap, so it shares
-	// the defect: for these keys live X, not the reference, is the oracle.
+	// Cap every channel to 0..255, as the browser does when it serialises the
+	// computed colour ("rgb(152, 2, 33)"). The eased value overshoots [0,1] (the
+	// curve's y control values lie in [-1,1]), so a raw channel can reach ~300 in
+	// about 5% of verification keys (219 of 4001 on the live page). Printed
+	// unclamped it is three hex digits ("125" instead of "ff") and X answers 404
+	// to the id. The Lqm1 reference floors at 0 but does not cap, so it cannot
+	// tell: testdata/browser holds the browser's own answers.
 	for i := range color {
 		color[i] = math.Max(0, math.Min(255, color[i]))
 	}
@@ -124,17 +164,15 @@ func (ct *ClientTransaction) animate(frames []int, targetTime float64) string {
 		strArr = append(strArr, fmt.Sprintf("%x", int(math.Round(color[i]))))
 	}
 	for _, value := range matrix {
-		rounded := round2(value)
-		if rounded < 0 {
-			rounded = -rounded
-		}
-		hexValue := floatToHex(rounded)
-		if strings.HasPrefix(hexValue, ".") {
-			strArr = append(strArr, "0"+strings.ToLower(hexValue))
-		} else if hexValue == "" {
-			strArr = append(strArr, "0")
-		} else {
-			strArr = append(strArr, hexValue)
+		for _, token := range matrixNumbers(value) {
+			hexValue := floatToHex(math.Abs(toFixed2(token)))
+			if strings.HasPrefix(hexValue, ".") {
+				strArr = append(strArr, "0"+strings.ToLower(hexValue))
+			} else if hexValue == "" {
+				strArr = append(strArr, "0")
+			} else {
+				strArr = append(strArr, hexValue)
+			}
 		}
 	}
 	strArr = append(strArr, "0", "0")
@@ -151,16 +189,21 @@ func (ct *ClientTransaction) buildAnimationKey(homePageHTML string) (string, err
 		return "", fmt.Errorf("no key byte indices")
 	}
 
-	rowIndex := 0
-	if ct.rowIndex < len(ct.keyBytes) {
-		rowIndex = int(ct.keyBytes[ct.rowIndex]) % 16
+	// An index outside the key means the page and the script do not belong
+	// together (or the key is truncated). Building from a different byte than X
+	// would give a well-formed id that X rejects, silently, for the whole life of
+	// the keys; failing here makes the manager keep its previous keys and retry.
+	if ct.rowIndex >= len(ct.keyBytes) {
+		return "", fmt.Errorf("row index %d outside the %d-byte verification key", ct.rowIndex, len(ct.keyBytes))
 	}
+	rowIndex := int(ct.keyBytes[ct.rowIndex]) % 16
 
 	frameTime := 1.0
 	for _, idx := range ct.keyBytesIndices {
-		if idx < len(ct.keyBytes) {
-			frameTime *= float64(int(ct.keyBytes[idx]) % 16)
+		if idx >= len(ct.keyBytes) {
+			return "", fmt.Errorf("key byte index %d outside the %d-byte verification key", idx, len(ct.keyBytes))
 		}
+		frameTime *= float64(int(ct.keyBytes[idx]) % 16)
 	}
 	frameTime = jsRound(frameTime/10) * 10
 
