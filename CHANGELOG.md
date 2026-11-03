@@ -1,5 +1,24 @@
 # Changelog
 
+## [0.8.2](https://github.com/anatolykoptev/go-twitter/compare/v0.8.1...v0.8.2) (2026-11-03)
+
+
+### Features
+
+* add package model and move response parsing to internal/parse ([#149](https://github.com/anatolykoptev/go-twitter/issues/149)) ([0d5ca72](https://github.com/anatolykoptev/go-twitter/commit/0d5ca72cdba42f0a0014c0336128e8dee70daa6e))
+
+
+### Bug Fixes
+
+* **xtid:** match the browser animation key ([#146](https://github.com/anatolykoptev/go-twitter/issues/146)) ([f1ed952](https://github.com/anatolykoptev/go-twitter/commit/f1ed952e4f734137048cdc352e48c087c9bf0e52))
+
+
+### Refactoring
+
+* move endpoint data to internal/operations ([#143](https://github.com/anatolykoptev/go-twitter/issues/143)) ([cd49fd0](https://github.com/anatolykoptev/go-twitter/commit/cd49fd06c0c80e8a5a4a6ced7d8d2488895423ef))
+* move metric instruments to internal/telemetry ([#145](https://github.com/anatolykoptev/go-twitter/issues/145)) ([e7b7dad](https://github.com/anatolykoptev/go-twitter/commit/e7b7dad6c1351ba33cd4981ceacac2de86733a4e))
+* move the query-ID refresher to internal/queryid ([#147](https://github.com/anatolykoptev/go-twitter/issues/147)) ([889c9a1](https://github.com/anatolykoptev/go-twitter/commit/889c9a18d27e0198f50b53a0094d527480f6dc52))
+
 ## [0.8.1](https://github.com/anatolykoptev/go-twitter/compare/v0.8.0...v0.8.1) (2026-11-02)
 
 
