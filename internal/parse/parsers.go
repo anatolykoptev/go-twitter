@@ -178,7 +178,7 @@ func TweetDetail(body []byte, focalID string) ([]*model.Tweet, error) {
 		}
 		tl.Instructions = append(tl.Instructions, ti)
 	}
-	tweets, err := extractTweetsFromTimeline(tl, "")
+	tweets, err := extractTweets(tl, "", false)
 	if err != nil {
 		return nil, err
 	}
@@ -778,7 +778,9 @@ type timelineItem struct {
 	entryID     string
 	itemContent json.RawMessage
 	pinned      bool
-	// parentPromoted is set when the module holding the item is promoted.
+	// moduleID is the entry id of the module holding the item, "" for a plain
+	// entry; parentPromoted is set when that module is promoted.
+	moduleID       string
 	parentPromoted bool
 }
 
@@ -793,7 +795,7 @@ func (ins timelineInstruction) items() []timelineItem {
 		}
 		promoted := isPromotedEntryID(e.EntryID)
 		for _, mi := range e.Content.Items {
-			out = append(out, timelineItem{entryID: mi.EntryID, itemContent: mi.Item.ItemContent, parentPromoted: promoted})
+			out = append(out, timelineItem{entryID: mi.EntryID, itemContent: mi.Item.ItemContent, moduleID: e.EntryID, parentPromoted: promoted})
 		}
 	}
 	if ins.Entry != nil {
@@ -804,23 +806,32 @@ func (ins timelineInstruction) items() []timelineItem {
 	}
 	promoted := isPromotedEntryID(ins.ModuleEntryID)
 	for _, mi := range ins.ModuleItems {
-		out = append(out, timelineItem{entryID: mi.EntryID, itemContent: mi.Item.ItemContent, parentPromoted: promoted})
+		out = append(out, timelineItem{entryID: mi.EntryID, itemContent: mi.Item.ItemContent, moduleID: ins.ModuleEntryID, parentPromoted: promoted})
 	}
 	return out
 }
 
 func extractTweetsFromTimeline(tl timelineObj, defaultAuthorID string) ([]*model.Tweet, error) {
+	return extractTweets(tl, defaultAuthorID, true)
+}
+
+// extractTweets walks the timeline. dedupe collapses repeated ids; TweetDetail
+// turns it off because the focal tweet legitimately reappears as the anchor of
+// its own conversation module (see SplitConversation).
+func extractTweets(tl timelineObj, defaultAuthorID string, dedupe bool) ([]*model.Tweet, error) {
 	var tweets []*model.Tweet
-	byEntry := map[string]int{} // entryId -> index in tweets, for TimelineReplaceEntry
+	// entryId (and module entry id) -> indexes in tweets, for TimelineReplaceEntry.
+	byEntry := map[string][]int{}
 
 	for _, instruction := range tl.Instructions {
 		// A replace instruction supersedes the tweet delivered under the
-		// named entry: drop it so the page does not carry both versions.
+		// named entry (a module's items included): drop them so the page does
+		// not carry both versions.
 		if instruction.Type == "TimelineReplaceEntry" && instruction.EntryIDToReplace != "" {
-			if idx, ok := byEntry[instruction.EntryIDToReplace]; ok {
+			for _, idx := range byEntry[instruction.EntryIDToReplace] {
 				tweets[idx] = nil
-				delete(byEntry, instruction.EntryIDToReplace)
 			}
+			delete(byEntry, instruction.EntryIDToReplace)
 		}
 		for _, it := range instruction.items() {
 			if it.itemContent == nil {
@@ -851,15 +862,28 @@ func extractTweetsFromTimeline(tl timelineObj, defaultAuthorID string) ([]*model
 			}
 			t.Promoted = it.parentPromoted || isPromotedItem(it.entryID, it.itemContent)
 			t.Pinned = it.pinned
-			byEntry[it.entryID] = len(tweets)
+			byEntry[it.entryID] = append(byEntry[it.entryID], len(tweets))
+			if it.moduleID != "" {
+				byEntry[it.moduleID] = append(byEntry[it.moduleID], len(tweets))
+			}
 			tweets = append(tweets, t)
 		}
 	}
-	kept := tweets[:0]
+	// Drop superseded tweets and later copies of an id already seen (a pinned
+	// tweet is usually delivered again among the entries). The first copy
+	// stays, and keeps Pinned if any copy was pinned.
+	var kept []*model.Tweet
+	seen := map[string]*model.Tweet{}
 	for _, t := range tweets {
-		if t != nil {
-			kept = append(kept, t)
+		if t == nil {
+			continue
 		}
+		if first, dup := seen[t.ID]; dedupe && dup {
+			first.Pinned = first.Pinned || t.Pinned
+			continue
+		}
+		seen[t.ID] = t
+		kept = append(kept, t)
 	}
 	return kept, nil
 }
@@ -922,8 +946,12 @@ func parseTweetResult(r tweetResult, defaultAuthorID string) (*model.Tweet, erro
 		return nil, fmt.Errorf("empty tweet rest_id (typename=%s)", r.TypeName)
 	}
 
+	// The tweet's own author wins over the profile owner the caller passed in:
+	// a module can carry other authors' tweets.
 	authorID := defaultAuthorID
-	if r.Legacy.UserIDStr != "" {
+	if id := r.Core.UserResults.Result.RestID; id != "" {
+		authorID = id
+	} else if r.Legacy.UserIDStr != "" {
 		authorID = r.Legacy.UserIDStr
 	}
 

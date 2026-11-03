@@ -57,7 +57,9 @@ func entEntry(id string, ic m) m {
 func entModule(id string, items ...m) m {
 	var its []m
 	for i, ic := range items {
-		its = append(its, m{"entryId": id + "-item-" + string(rune('0'+i)), "item": m{"itemContent": ic}})
+		// Item ids deliberately do not echo the module id, so a promoted
+		// module is only recognised through its parent.
+		its = append(its, m{"entryId": "item-" + string(rune('0'+i)), "item": m{"itemContent": ic}})
 	}
 	return m{"entryId": id, "sortIndex": "1", "content": m{"entryType": "TimelineTimelineModule", "items": its}}
 }
@@ -198,12 +200,16 @@ func TestParseTweet_RetweetQuoteReplyMarkers(t *testing.T) {
 		"quoted_status_result": m{"result": orig}})
 	reply := entTweet("903", "@bob yes", m{"legacy": m{"in_reply_to_status_id_str": "900"}})
 	plain := entTweet("904", "original post", nil)
+	quoteOnlyResult := entTweet("905", "no id field", m{"quoted_status_result": m{"result": orig}})
 	body := entBody(t, entAdd(
+		entEntry("tweet-905", entItemContent(quoteOnlyResult, nil)),
 		entEntry("tweet-901", entItemContent(rt, nil)), entEntry("tweet-902", entItemContent(quote, nil)),
 		entEntry("tweet-903", entItemContent(reply, nil)), entEntry("tweet-904", entItemContent(plain, nil))))
 	tweets, err := TweetTimeline(body, "")
 	require.NoError(t, err)
-	require.Len(t, tweets, 4)
+	require.Len(t, tweets, 5)
+	assert.Equal(t, "900", tweets[0].QuotedID, "a quote carrying only quoted_status_result still names its target")
+	tweets = tweets[1:]
 	require.NotNil(t, tweets[0].RetweetOf, "retweet original must decode")
 
 	assert.Equal(t, "900", tweets[0].RetweetOfID, "a retweet must not look like an original")
@@ -226,14 +232,21 @@ func TestTweetTimeline_PromotedShapes(t *testing.T) {
 		entEntry("tweet-3", entItemContent(tw("3"), m{"promotedMetadata": m{"adId": "a"}})),
 		entEntry("tweet-4", entItemContent(tw("4"), m{"promotedMetadata": nil})),
 		entEntry("tweet-5", entItemContent(tw("5"), nil)),
-		entModule("promoted-module-6", entItemContent(tw("6"), nil))))
+		entModule("promoted-module-6", entItemContent(tw("6"), nil)),
+		entEntry("tweet-promoted-7", entItemContent(tw("7"), nil)),
+		entModule("profile-conversation-9", entItemContent(tw("9"), nil))),
+		m{"type": "TimelineAddToModule", "moduleEntryId": "promoted-module-6", "moduleItems": []m{
+			{"entryId": "item-late", "item": m{"itemContent": entItemContent(tw("8"), nil)}}}},
+		m{"type": "TimelineAddToModule", "moduleEntryId": "profile-conversation-9", "moduleItems": []m{
+			{"entryId": "item-late", "item": m{"itemContent": entItemContent(tw("10"), nil)}}}})
 	tweets, err := TweetTimeline(body, "")
 	require.NoError(t, err)
 	got := map[string]bool{}
 	for _, x := range tweets {
 		got[x.ID] = x.Promoted
 	}
-	assert.Equal(t, map[string]bool{"1": true, "2": true, "3": true, "4": false, "5": false, "6": true}, got)
+	assert.Equal(t, map[string]bool{"1": true, "2": true, "3": true, "4": false, "5": false, "6": true,
+		"7": true, "8": true, "9": false, "10": false}, got)
 }
 
 // Nit: views.count as a bare JSON number used to fail the whole tweet's decode,
@@ -248,7 +261,6 @@ func TestParseTweet_ViewsTolerant(t *testing.T) {
 	tweets, err := TweetTimeline(body, "")
 	require.NoError(t, err)
 	require.Len(t, tweets, 4, "a numeric views.count must not drop the tweet")
-	require.Len(t, tweets, 4)
 	assert.Equal(t, []int{55, 0, 0, 147516}, []int{tweets[0].Views, tweets[1].Views, tweets[2].Views, tweets[3].Views})
 }
 
@@ -268,4 +280,46 @@ func TestFindStringKey_DeterministicAcrossSiblings(t *testing.T) {
 	for i := 0; i < 200; i++ {
 		require.Equal(t, "A", findStringKey(v, "k"), "iteration %d", i)
 	}
+}
+
+// A module can carry another author's tweet; with no legacy.user_id_str the
+// profile owner passed by the caller must not be stamped on it.
+func TestTweetTimeline_ModuleTweetKeepsOwnAuthor(t *testing.T) {
+	other := entTweet("801", "from carol", m{"core": m{"user_results": entUser("U7", "carol")}, "legacy": m{"user_id_str": ""}})
+	own := entTweet("802", "from owner", m{"legacy": m{"user_id_str": ""}, "core": m{"user_results": m{"result": m{"__typename": "User"}}}})
+	body := entBody(t, entAdd(entModule("profile-conversation-8",
+		entItemContent(other, nil), entItemContent(own, nil))))
+	tweets, err := TweetTimeline(body, "OWNER")
+	require.NoError(t, err)
+	require.Len(t, tweets, 2)
+	assert.Equal(t, "U7", tweets[0].AuthorID)
+	assert.Equal(t, "OWNER", tweets[1].AuthorID, "no author information at all falls back to the caller's id")
+}
+
+// The pinned tweet is delivered again among the entries; the page carries it
+// once, first, and marked.
+func TestTweetTimeline_PinnedDuplicateCollapsed(t *testing.T) {
+	pinned := entTweet("100", "pinned", nil)
+	body := entBody(t,
+		entAdd(entEntry("tweet-200", entItemContent(entTweet("200", "fresh", nil), nil)),
+			entEntry("tweet-100", entItemContent(pinned, nil))),
+		m{"type": "TimelinePinEntry", "entry": entEntry("tweet-100", entItemContent(pinned, nil))})
+	tweets, err := TweetTimeline(body, "")
+	require.NoError(t, err)
+	require.Len(t, tweets, 2)
+	assert.Equal(t, "200", tweets[0].ID)
+	assert.Equal(t, "100", tweets[1].ID)
+	assert.True(t, tweets[1].Pinned, "the surviving copy keeps Pinned")
+	assert.False(t, tweets[0].Pinned)
+}
+
+// Replacing a module entry supersedes the module's items.
+func TestTweetTimeline_ReplaceModuleSupersedesItems(t *testing.T) {
+	body := entBody(t,
+		entAdd(entModule("profile-conversation-9",
+			entItemContent(entTweet("901", "old a", nil), nil), entItemContent(entTweet("902", "old b", nil), nil))),
+		m{"type": "TimelineReplaceEntry", "entry_id_to_replace": "profile-conversation-9",
+			"entry": entModule("profile-conversation-9", entItemContent(entTweet("903", "new", nil), nil))})
+	idx := byID(t, body)
+	assert.Equal(t, map[string]int{"903": 0}, idx)
 }
