@@ -26,6 +26,7 @@ import (
 
 // Client is the top-level Twitter scraping client.
 type Client struct {
+	cookieSeen           sync.Map // *Account -> *cookieState: the session cookies each Account sent last (singleSourceCookies)
 	client               *stealth.BrowserClient
 	pool                 *pool.Pool[*Account]
 	xtidMgr              *xtid.Manager
@@ -743,7 +744,7 @@ func (c *Client) doRequestWithBody(ctx context.Context, acc *Account, bc *stealt
 
 	currentCall(ctx).ready()
 	if c.wireFor(acc, bc) == wireChrome {
-		singleSourceCookies(bc, urlStr, headers)
+		singleSourceCookies(bc, urlStr, headers, c.cookieStateFor(acc))
 	}
 	order := c.wireFor(acc, bc).shapeFor(method, urlStr, headers, c.pageSourceFor(acc, bc, method, body))
 	return bc.DoWithHeaderOrderCtx(ctx, method, urlStr, headers, body, order)

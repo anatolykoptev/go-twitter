@@ -200,7 +200,7 @@ func TestLive_CookiesEachNameOnce(t *testing.T) {
 	require.Equal(t, "ROTATED", bc.GetCookieValue(base+"/headers", "ct0"), "the jar holds the server's ct0")
 
 	h := twitterHeaders("dummyauth", "OLDCT0", p.UserAgent)
-	singleSourceCookies(bc, base+"/headers", h)
+	singleSourceCookies(bc, base+"/headers", h, nil)
 	order := wireChrome.shape("GET", base+"/headers", h)
 	body, _, status, err := bc.DoWithHeaderOrder("GET", base+"/headers", h, nil, order)
 	require.NoError(t, err)

@@ -61,7 +61,7 @@ func TestSingleSourceCookies_JarHoldsNameSentFromJarOnly(t *testing.T) {
 			if strings.Contains(tc.in, "ct0=C") {
 				h["x-csrf-token"] = "C"
 			}
-			singleSourceCookies(tc.jar, "https://api.x.com/i/api/graphql/q/Op", h)
+			singleSourceCookies(tc.jar, "https://api.x.com/i/api/graphql/q/Op", h, nil)
 			if tc.wantCookie == "" {
 				assert.NotContains(t, h, "cookie")
 			} else {
@@ -75,7 +75,7 @@ func TestSingleSourceCookies_JarHoldsNameSentFromJarOnly(t *testing.T) {
 // A request without a cookie header is left alone (guest paths).
 func TestSingleSourceCookies_NoHeaderNoChange(t *testing.T) {
 	h := map[string]string{"x-guest-token": "g"}
-	singleSourceCookies(mapJar{"ct0": "NEW"}, "https://api.x.com/1.1/x.json", h)
+	singleSourceCookies(mapJar{"ct0": "NEW"}, "https://api.x.com/1.1/x.json", h, nil)
 	assert.Equal(t, map[string]string{"x-guest-token": "g"}, h)
 }
 
@@ -196,7 +196,54 @@ func TestSingleSourceCookies_RealJarEachNameOnce(t *testing.T) {
 	assert.ElementsMatch(t, []string{"auth_token", "ct0", "ct0", "guest_id"}, sentCookieNames(t, send(raw)), "premise: the jar is appended to the explicit header")
 
 	h := twitterHeaders("AUTH", "OLDCT0", p.UserAgent)
-	singleSourceCookies(bc, srv.URL+"/x", h)
+	singleSourceCookies(bc, srv.URL+"/x", h, nil)
 	assert.ElementsMatch(t, []string{"auth_token", "ct0", "guest_id"}, sentCookieNames(t, send(h)))
 	assert.Equal(t, "ROTATED", h["x-csrf-token"])
+}
+
+// A warm document navigation never gains an x-csrf-token: Chrome sends none on
+// a navigation, so the header is synced only where the request already has it.
+//
+// Mutation: cookies.go the csrf sync — set x-csrf-token unconditionally (drop
+// the `if _, ok := h["x-csrf-token"]; ok` guard) => RED (header appears).
+func TestWarmNavigation_NoCSRFHeaderAdded(t *testing.T) {
+	nav := &pageNav{jar: mapJar{"ct0": "PAGECT0"}}
+	r := &warmRouter{page: nav}
+	_, _, _, err := r.DoCtx(context.Background(), "GET", "https://x.com/home", map[string]string{"cookie": "auth_token=T; ct0=OLD"}, nil)
+	require.NoError(t, err)
+	assert.NotContains(t, nav.headers, "x-csrf-token")
+}
+
+// An Account whose credentials were replaced while the jar still holds the old
+// ones (SetCredentials on a live Account) is the newer source: its pair is
+// sent, not the jar's stale one. Once the server rotates ct0 into the jar, the
+// jar is the newer source again.
+//
+// Mutation: cookies.go singleSourceCookies — skip the snapshot comparison (never
+// pin) => RED at "replaced credentials".
+func TestSingleSourceCookies_ReplacedAccountCredentialsWin(t *testing.T) {
+	c, bc, rec, ua := chromeClient(t)
+	acc := &Account{Username: "u", AuthToken: "OLDTOK", CT0: "OLD", Profile: chromeProfile(t, stealth.ProfileChrome152, "chrome", "macos")}
+	const u = "https://api.x.com/i/api/graphql/q/Op"
+	rec.jar = map[string]string{u + " ct0": "OLD", u + " auth_token": "OLDTOK"}
+	send := func() recordedReq {
+		tok, ct0, _ := acc.Credentials()
+		_, _, _, _ = c.doRequestWithBody(context.Background(), acc, bc, "GET", u, twitterHeaders(tok, ct0, ua), nil)
+		return rec.last()
+	}
+
+	got := send()
+	assert.NotContains(t, got.Headers, "cookie", "jar and Account agree: the jar sends both")
+
+	acc.SetCredentials("NEWTOK", "NEW")
+	got = send()
+	assert.Equal(t, "auth_token=NEWTOK; ct0=NEW", got.Headers["cookie"], "replaced credentials")
+	assert.Equal(t, "NEW", got.Headers["x-csrf-token"])
+	got = send()
+	assert.Equal(t, "auth_token=NEWTOK; ct0=NEW", got.Headers["cookie"], "still newer while the jar is unchanged")
+
+	rec.jar[u+" ct0"] = "ROTATED"
+	got = send()
+	assert.Equal(t, "auth_token=NEWTOK", got.Headers["cookie"], "the server rotated ct0 into the jar after that")
+	assert.Equal(t, "ROTATED", got.Headers["x-csrf-token"])
 }

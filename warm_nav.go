@@ -45,7 +45,7 @@ func (r *warmRouter) DoCtx(ctx context.Context, method, rawURL string, headers m
 		return r.other.DoCtx(ctx, method, rawURL, headers, body)
 	}
 	h, order := navigationRequest(r.page.ChromeHeaders(), method, headers)
-	singleSourceCookies(r.page, rawURL, h)
+	singleSourceCookies(r.page, rawURL, h, nil)
 	return r.page.DoWithHeaderOrderCtx(ctx, method, rawURL, h, body, order)
 }
 
