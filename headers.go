@@ -4,12 +4,6 @@ import (
 	stealth "github.com/anatolykoptev/go-stealth"
 )
 
-// defaultUserAgent is the fallback User-Agent where no client exists to ask.
-// It is the UA go-stealth pairs with its own default TLS profile, so it moves
-// with go-stealth's default instead of drifting from it; clients that exist
-// report their own (clientUA).
-var defaultUserAgent = stealthDefaultUserAgent()
-
 // twitterHeaders returns the base headers required by Twitter's GraphQL API.
 func twitterHeaders(authToken, ct0, userAgent string) map[string]string {
 	if userAgent == "" {

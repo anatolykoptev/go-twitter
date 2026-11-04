@@ -3,6 +3,7 @@ package twitter
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"log/slog"
 	"strings"
 
 	stealth "github.com/anatolykoptev/go-stealth"
@@ -51,7 +52,10 @@ func profileForAccountKey(key string) stealth.BrowserProfile {
 		found     bool
 	)
 	for _, p := range identityCandidates() {
-		sum := sha256.Sum256([]byte(key + "\x00" + string(p.TLSProfile) + "\x00" + p.UserAgent))
+		// The score keys on what makes a profile itself (browser, OS, TLS
+		// fingerprint), never on its UA text: go-stealth editing a UA string
+		// must not move accounts.
+		sum := sha256.Sum256([]byte(key + "\x00" + p.Browser + "\x00" + p.OS + "\x00" + string(p.TLSProfile)))
 		if score := binary.BigEndian.Uint64(sum[:8]); !found || score > bestScore {
 			best, bestScore, found = p, score, true
 		}
@@ -87,6 +91,11 @@ func (a *Account) ensureIdentityLocked() {
 				return
 			}
 		}
+		if !a.identityWarned {
+			a.identityWarned = true
+			slog.Warn("twitter: account user agent matches no built-in browser profile; its TLS fingerprint will not match it",
+				slog.String("user", a.Username))
+		}
 	case a.UserAgent == "":
 		a.UserAgent = a.Profile.UserAgent
 		if a.UserAgent == "" {
@@ -106,17 +115,22 @@ func clientUA(bc *stealth.BrowserClient) string {
 	return defaultUserAgent
 }
 
-// stealthDefaultUserAgent is the UA go-stealth reports for a client built with
-// no options, i.e. the one it pairs with its default TLS profile. It falls
-// back to the bundled constant only if such a client cannot be built.
-func stealthDefaultUserAgent() string {
+// defaultUserAgent and defaultTLSProfile are the identity go-stealth gives a
+// client built with no options. They are the fallback where no client exists to
+// ask, and the TLS half for a caller-set UA that no built-in profile presents.
+var defaultUserAgent, defaultTLSProfile = stealthDefaultIdentity()
+
+// stealthDefaultIdentity reads the identity of a default go-stealth client,
+// falling back to the bundled UA if such a client cannot be built.
+func stealthDefaultIdentity() (string, stealth.TLSProfile) {
 	bc, err := stealth.NewClient()
 	if err != nil {
-		return bundle.DefaultUserAgent
+		return bundle.DefaultUserAgent, ""
 	}
 	defer bc.CloseIdleConnections()
-	if ua := bc.Identity().UserAgent; ua != "" {
-		return ua
+	id := bc.Identity()
+	if id.UserAgent == "" {
+		return bundle.DefaultUserAgent, id.TLSProfile
 	}
-	return bundle.DefaultUserAgent
+	return id.UserAgent, id.TLSProfile
 }

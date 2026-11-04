@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -381,4 +382,134 @@ func TestNewClient_LiteralAccountWithProxyAndNoProfileBuildsAClient(t *testing.T
 	assert.Equal(t, acc.UserAgent, acc.client.Identity().UserAgent)
 	assert.Equal(t, acc.Profile.TLSProfile, acc.client.Identity().TLSProfile)
 	_ = c
+}
+
+// assignmentFor returns the (browser, OS, TLS) triple each synthetic username
+// is assigned.
+func assignmentFor(n int) []string {
+	out := make([]string, n)
+	for i := range out {
+		p := profileForAccountKey(accountKey(fmt.Sprintf("synthetic-user-%d", i)))
+		out[i] = p.Browser + "/" + p.OS + "/" + string(p.TLSProfile)
+	}
+	return out
+}
+
+func withBuiltinProfiles(t *testing.T, profiles []stealth.BrowserProfile) {
+	t.Helper()
+	orig := stealth.BuiltinProfiles
+	stealth.BuiltinProfiles = profiles
+	t.Cleanup(func() { stealth.BuiltinProfiles = orig })
+}
+
+// A profile's identity is browser + OS + TLS fingerprint, not its UA text:
+// editing UA strings in go-stealth moves no account, and adding one profile
+// moves only the accounts it wins (about 1/(n+1)).
+//
+// Mutation: identity.go profileForAccountKey — put p.UserAgent back into the
+// hashed key => RED (editing UA text reshuffles the assignment).
+func TestProfileAssignment_KeysOnProfileIdentityNotUserAgentText(t *testing.T) {
+	const users = 2000
+	base := assignmentFor(users)
+
+	edited := make([]stealth.BrowserProfile, len(stealth.BuiltinProfiles))
+	copy(edited, stealth.BuiltinProfiles)
+	for i := range edited {
+		edited[i].UserAgent += " (edited)"
+	}
+	orig := stealth.BuiltinProfiles
+	withBuiltinProfiles(t, edited)
+	assert.Equal(t, base, assignmentFor(users), "editing UA text must move no account")
+
+	n := len(identityCandidates())
+	added := append(append([]stealth.BrowserProfile(nil), orig...), stealth.BrowserProfile{
+		UserAgent: "x", TLSProfile: "chrome_999", Browser: "chrome", OS: "windows",
+	})
+	withBuiltinProfiles(t, added)
+	moved := 0
+	for i, a := range assignmentFor(users) {
+		if a != base[i] {
+			moved++
+			assert.Equal(t, "chrome/windows/chrome_999", a, "an account may only move to the newcomer")
+		}
+	}
+	want := float64(users) / float64(n+1)
+	assert.InDelta(t, want, float64(moved), want*0.4, "adding a profile should move about 1/(n+1) of accounts")
+}
+
+// Login-flow requests (guest activation, flow init, every step) go out on the
+// account's own client and must carry that account's UA and Client Hints.
+//
+// Mutation: auth.go initLoginFlowFull / submitFlowStep — pass defaultUserAgent
+// instead of clientUA(client) to loginFlowHeaders => RED.
+func TestLoginFlow_CarriesTheAccountsOwnIdentity(t *testing.T) {
+	type seen struct{ path, query, ua, hints string }
+	var (
+		mu   sync.Mutex
+		reqs []seen
+	)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		reqs = append(reqs, seen{r.URL.Path, r.URL.RawQuery, r.Header.Get("User-Agent"), r.Header.Get("Sec-Ch-Ua")})
+		mu.Unlock()
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/guest/activate.json"):
+			_, _ = w.Write([]byte(`{"guest_token":"g1"}`))
+		case strings.Contains(r.URL.RawQuery, "flow_name=login"):
+			_, _ = w.Write([]byte(`{"flow_token":"f1","subtasks":[{"subtask_id":"LoginEnterPassword"}]}`))
+		default:
+			_, _ = w.Write([]byte(`{"flow_token":"f2","subtasks":[{"subtask_id":"LoginSuccessSubtask"}]}`))
+		}
+	}))
+	t.Cleanup(srv.Close)
+	orig := twitterAPIURL
+	twitterAPIURL = srv.URL
+	t.Cleanup(func() { twitterAPIURL = orig })
+
+	var prof stealth.BrowserProfile
+	for _, p := range stealth.BuiltinProfiles {
+		if p.TLSProfile == stealth.ProfileChrome146 && p.OS == "linux" {
+			prof = p
+		}
+	}
+	require.NotEmpty(t, prof.UserAgent)
+	require.NotEqual(t, defaultUserAgent, prof.UserAgent)
+	acc := &Account{Username: "loginer", Password: "pw", AuthToken: "tokQ", CT0: "ct0Q", active: true, Profile: prof, UserAgent: prof.UserAgent}
+	c := newLoopbackClient(t, ClientConfig{Accounts: []*Account{acc}})
+
+	_ = c.login(acc, acc.client) // ends without an auth_token cookie on the loopback; only the requests matter
+
+	hints := stealth.ClientHintsHeaders(prof.UserAgent)["sec-ch-ua"]
+	require.NotEmpty(t, hints)
+	mu.Lock()
+	defer mu.Unlock()
+	var activate, initFlow, step bool
+	for _, r := range reqs {
+		switch {
+		case strings.HasSuffix(r.path, "/guest/activate.json"):
+			activate = true
+		case strings.Contains(r.query, "flow_name=login"):
+			initFlow = true
+		case strings.HasSuffix(r.path, "/onboarding/task.json"):
+			step = true
+		default:
+			continue
+		}
+		assert.Equal(t, prof.UserAgent, r.ua, "%s?%s", r.path, r.query)
+		assert.Equal(t, hints, r.hints, "%s?%s", r.path, r.query)
+	}
+	assert.True(t, activate && initFlow && step, "login flow did not reach all three request kinds: %v %v %v", activate, initFlow, step)
+}
+
+// A caller-set UA that no built-in profile presents stays the account's
+// identity everywhere, login flow included: the client reports it over
+// go-stealth's default TLS profile.
+func TestNewClient_UnmatchedCallerUserAgentIsTheClientsIdentity(t *testing.T) {
+	const ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/99.0.0.0 Safari/537.36"
+	acc := &Account{Username: "custom", AuthToken: "tokU", CT0: "ct0U", active: true, UserAgent: ua}
+	_ = newLoopbackClient(t, ClientConfig{Accounts: []*Account{acc}})
+	require.NotNil(t, acc.client)
+	assert.Equal(t, ua, acc.client.Identity().UserAgent)
+	assert.Equal(t, ua, acc.UserAgent)
+	assert.Equal(t, defaultTLSProfile, acc.client.Identity().TLSProfile)
 }

@@ -292,6 +292,14 @@ func buildAccountClient(cfg ClientConfig, acc *Account) (*stealth.BrowserClient,
 		id := stealth.BrowserIdentity{BrowserProfile: acc.Profile}
 		id.UserAgent = acc.UserAgent
 		opts = append(opts, stealth.WithIdentity(id))
+	} else {
+		// A caller-set UA that no built-in profile presents: keep it as the
+		// client's identity over go-stealth's default TLS profile, so the login
+		// flow sends the same UA as every later request. An empty profile is
+		// never passed to go-stealth.
+		opts = append(opts, stealth.WithIdentity(stealth.BrowserIdentity{
+			BrowserProfile: stealth.BrowserProfile{UserAgent: acc.UserAgent, TLSProfile: defaultTLSProfile},
+		}))
 	}
 	// An account whose UA no built-in profile presents keeps the client default;
 	// an empty profile is never passed to WithProfile.

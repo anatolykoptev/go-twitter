@@ -50,6 +50,7 @@ type Account struct {
 	xpffGen            *xpff.Generator // this account's x-xp-forwarded-for generator (see xpffGenerator)
 	xpffGuestID        string          // guest id xpffGen was built for
 	xpffUA             string          // User-Agent xpffGen embeds
+	identityWarned     bool            // the unmatched-UA warning was logged
 
 	// Budget share (see SetBudgetPct): the fraction of each endpoint window
 	// this account may spend. budgetPct is the raw setter value (0 = never
