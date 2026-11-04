@@ -43,6 +43,11 @@ const (
 	// Negative-cache backoff after an init failure: base, doubling, capped at max.
 	defaultBackoffBase = 60 * time.Second
 	defaultBackoffMax  = 15 * time.Minute
+	// defaultForcedRefreshMinAge is how old the keys must be before Refresh
+	// rebuilds them. Keys built moments ago and still rejected are not the
+	// cause of the rejection, and a dead endpoint must not turn every failing
+	// call into a page fetch.
+	defaultForcedRefreshMinAge = time.Minute
 )
 
 // KeySource selects which page the verification key, animation frames and
@@ -90,6 +95,9 @@ type Manager struct {
 	now         func() time.Time
 	backoffBase time.Duration
 	backoffMax  time.Duration
+
+	// forcedMinAge is the Refresh floor, guarded by mu.
+	forcedMinAge time.Duration
 }
 
 // attemptKind separates guest and authenticated init attempts.
@@ -129,6 +137,7 @@ func NewManager(f bundle.Fetcher) *Manager {
 		now:             time.Now,
 		backoffBase:     defaultBackoffBase,
 		backoffMax:      defaultBackoffMax,
+		forcedMinAge:    defaultForcedRefreshMinAge,
 	}
 }
 
@@ -141,6 +150,18 @@ func (m *Manager) SetRefreshInterval(d time.Duration) {
 	}
 	m.mu.Lock()
 	m.refreshInterval = d
+	m.mu.Unlock()
+}
+
+// SetForcedRefreshMinAge overrides how old the keys must be before Refresh
+// rebuilds them (default one minute). Zero disables the floor; a negative d is
+// ignored.
+func (m *Manager) SetForcedRefreshMinAge(d time.Duration) {
+	if d < 0 {
+		return
+	}
+	m.mu.Lock()
+	m.forcedMinAge = d
 	m.mu.Unlock()
 }
 
@@ -421,6 +442,48 @@ func (m *Manager) GenerateIDWith(ctx context.Context, method, path string, auth 
 		return "", fmt.Errorf("%w: %v", ErrUnavailable, m.lastErrLocked(kind))
 	}
 	return m.ct.GenerateID(method, path), nil
+}
+
+// Refresh rebuilds the ClientTransaction from freshly fetched pages ahead of
+// its normal expiry, for a caller whose request was answered as if its
+// transaction id were stale. It reports whether a rebuild this call ran or
+// joined succeeded; false means nothing was rebuilt (no keys yet, keys younger
+// than the floor, the attempt kind in backoff, or the rebuild failed — the
+// previous keys keep serving). Concurrent callers share one rebuild, and the
+// floor stops a run of failing calls from refetching the pages once each. auth
+// is as in GenerateIDWith.
+func (m *Manager) Refresh(ctx context.Context, auth bundle.Fetcher) bool {
+	kind := kindOf(auth)
+	if !m.refreshDue(kind) {
+		return false
+	}
+	ch := m.sf.DoChan(fmt.Sprintf("refresh-%d", kind), func() (any, error) {
+		// Re-check inside the flight: a caller that passed the check just as the
+		// previous flight finished must not start a second rebuild.
+		if !m.refreshDue(kind) {
+			return false, nil
+		}
+		ictx, cancel := context.WithTimeout(context.Background(), initTimeout)
+		defer cancel()
+		err := m.initialize(ictx, auth)
+		m.recordResult(kind, err)
+		return err == nil, err
+	})
+	select {
+	case res := <-ch:
+		ok, _ := res.Val.(bool)
+		return ok
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// refreshDue reports whether a forced rebuild of the given kind may run now.
+func (m *Manager) refreshDue(kind attemptKind) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	now := m.now()
+	return m.ct != nil && now.Sub(m.lastRefresh) >= m.forcedMinAge && !now.Before(m.fails[kind].until)
 }
 
 // lastErrLocked returns the most relevant recorded init error; m.mu must be held.

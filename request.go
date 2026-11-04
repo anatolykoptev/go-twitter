@@ -309,6 +309,9 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 	// the committed request shape, so it is skipped; errOverloaded keeps the
 	// bounded backoff because X shedding load may recover.
 	prevEndpointFault := errNone
+	// xtidRefreshed bounds the transaction-id refresh to once per call (see
+	// retryAfterXtidRefresh).
+	xtidRefreshed := false
 	// prevAcc is the account the previous attempt was served by; prevProxyFault
 	// records that it failed at its own per-account proxy (see skipBackoff).
 	var prevAcc *Account
@@ -651,6 +654,16 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 				// connection is X-side and stays uncharged.
 				if apiErr.Class == errOverloaded && acc.Proxy != "" {
 					c.markProxyDown(acc)
+				}
+				if c.retryAfterXtidRefresh(ctx, &xtidRefreshed, apiErr, status, acc, bc, authTok, ct0, ua) {
+					// A stale transaction id can answer 404 on a live route: with
+					// fresh keys the same request may well succeed, on any
+					// account, so nothing is marked faulted yet. A second 404
+					// takes the fault path below as before.
+					c.noteEndpointFault(endpoint, acc, bc, authTok, ct0, ua)
+					prevEndpointFault = errEndpoint
+					lastErr = apiErr
+					continue
 				}
 				endpointFaulted[acc.ID()] = true
 				prevEndpointFault = apiErr.Class
@@ -1109,6 +1122,7 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 	defer c.flightReleased(acc)
 
 	var lastErr error
+	xtidRefreshed := false // once per call (see retryAfterXtidRefresh)
 	for attempt := range maxRetries {
 		if ae := terminalVerdict(lastErr); ae != nil {
 			return nil, ae // a recovery retry answered terminally: do not retry
@@ -1213,6 +1227,12 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 			}
 			if apiErr.Class == errEndpoint {
 				c.noteEndpointFault(endpoint, acc, bc, authTok, ct0, ua) // K of these refresh the queryIds (#68)
+			}
+			// A 404 means the route did not run the write, so one more send after
+			// a transaction-id refresh cannot duplicate it.
+			if c.retryAfterXtidRefresh(ctx, &xtidRefreshed, apiErr, status, acc, bc, authTok, ct0, ua) {
+				lastErr = apiErr
+				continue
 			}
 			return nil, apiErr
 		}
