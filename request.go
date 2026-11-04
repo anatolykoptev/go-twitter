@@ -131,7 +131,7 @@ func (c *Client) nextAccountWithWait(ctx context.Context, endpoint string, filte
 		var wait time.Duration
 		timed := false
 		if !capOnly {
-			wake, ok := c.nextUsableAt(endpoint)
+			wake, ok := c.nextUsableAt(ctx, endpoint)
 			wait = time.Until(wake)
 			timed = ok && wait > 0 && wait <= time.Until(deadline)
 		} else if rem, ok := c.nextPaceWait(paceWaitable); ok {
@@ -236,7 +236,13 @@ func (c *Client) anyCapWaitable(capWaitable func(*Account) bool) bool {
 // lifting, or a soft-deactivated account's cooldown ending. ok is false when no
 // account is active (nothing to wait for beyond what NextWithWait already did)
 // or no such moment lies in the future.
-func (c *Client) nextUsableAt(endpoint string) (at time.Time, ok bool) {
+//
+// A proxy backoff that ends after ctx's deadline contributes no wake: the
+// caller's context ends first, so sleeping for it only trades the pool's own
+// error for a context error and spends the caller's whole budget (a social
+// attempt's 20 s) before the next account can be tried.
+func (c *Client) nextUsableAt(ctx context.Context, endpoint string) (at time.Time, ok bool) {
+	ctxEnd, hasDeadline := ctx.Deadline()
 	now := time.Now()
 	anyActive := false
 	var earliest time.Time
@@ -253,10 +259,14 @@ func (c *Client) nextUsableAt(endpoint string) (at time.Time, ok bool) {
 		anyActive = true
 		ready := acc.EndpointAvailableAt(endpoint)
 		acc.mu.Lock()
-		if acc.proxyBackoff.After(ready) {
-			ready = acc.proxyBackoff
-		}
+		proxyUntil := acc.proxyBackoff
 		acc.mu.Unlock()
+		if hasDeadline && proxyUntil.After(ctxEnd) {
+			continue
+		}
+		if proxyUntil.After(ready) {
+			ready = proxyUntil
+		}
 		if rem := acc.intervalRemaining(); rem > 0 {
 			// Pick-pace wake: the waiter sleeps to exactly the end of the drawn
 			// gap. rem is measured on the account clock, then placed on this
