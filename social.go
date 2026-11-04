@@ -218,9 +218,10 @@ func withSocialAccount[T any](ctx context.Context, sc *social.Client, op string,
 			}
 			return zero, err
 		}
-		if errors.Is(err, ErrNotFound) || errors.Is(err, ErrBadRequest) {
-			// Deterministic outcome: the resource is absent or the caller's
-			// input was rejected — every other lease answers identically, so a
+		if errors.Is(err, ErrNotFound) || errors.Is(err, ErrBadRequest) || errors.Is(err, ErrUnexpectedResponse) {
+			// Deterministic outcome: the resource is absent, the caller's
+			// input was rejected, or X answered with errors the library does
+			// not recognise — every other lease answers identically, so a
 			// retry only burns go-social's rate budget.
 			return zero, err
 		}
@@ -383,6 +384,16 @@ func tryWithAccount[T any](ctx context.Context, sc *social.Client, op string, fn
 			// request completed correctly) and propagate untouched so
 			// withSocialAccount does not burn another lease on an identical
 			// answer.
+			report("success")
+			return zero, fmt.Errorf("%s: %w", acc.Username, err)
+		}
+		if errors.Is(err, ErrUnexpectedResponse) {
+			// An errors-only 2xx the library cannot classify: the errors[]
+			// envelope proves the request executed, so the leased credential
+			// authenticated fine — the unrecognised answer is X-side, not
+			// the account's. Report success (the request completed) and
+			// propagate untouched so withSocialAccount does not burn another
+			// lease on an identical answer.
 			report("success")
 			return zero, fmt.Errorf("%s: %w", acc.Username, err)
 		}

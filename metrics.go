@@ -239,6 +239,16 @@ func attemptOutcome(status int, body []byte, hdrs map[string]string, err error, 
 	if ae.Class != errNone {
 		return outcomeForClass(ae.Class)
 	}
+	// An errors-only 2xx is a failed call wearing "ok": classifyError leaves
+	// codes outside its known list at errNone, so without this probe the
+	// metric records the silent failure as a healthy request. Report the
+	// same terminal class the retry loop returns for this shape — a
+	// deterministic miss is not_found, an unrecognised answer is unexpected
+	// (an errors-only body is never an endpoint fault: the errors[] envelope
+	// proves the request shape executed).
+	if status >= 200 && status < 300 && errorsOnly(body) {
+		return outcomeForClass(errorsOnlyClass(body))
+	}
 	switch {
 	case status >= 200 && status < 300:
 		return telemetry.OutcomeOK
@@ -279,6 +289,10 @@ func outcomeForClass(c errorClass) string {
 		return telemetry.OutcomeOverloaded
 	case errBadRequest:
 		return telemetry.OutcomeBadRequest
+	case errNotFound:
+		return telemetry.OutcomeNotFound
+	case errUnexpected:
+		return telemetry.OutcomeUnexpected
 	}
 	return telemetry.OutcomeOther
 }
