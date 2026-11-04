@@ -305,7 +305,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 	// increments the per-endpoint counter — so it must only run on a real pick.
 	flightLimit := c.flightCap()
 	poolFilter := func(a *Account) bool {
-		if endpointFaulted[a.ID()] || !time.Now().After(a.proxyBackoff) || !a.tryAcquireFlight(flightLimit) {
+		if endpointFaulted[a.ID()] || a.proxyBackedOff() || !a.tryAcquireFlight(flightLimit) {
 			return false
 		}
 		// The minimum-interval check+stamp (Account.SetMinInterval) sits
@@ -338,7 +338,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 		return !endpointFaulted[a.ID()] &&
 			!a.flightFull(flightLimit) &&
 			!a.IsEndpointRateLimited(endpoint) &&
-			time.Now().After(a.proxyBackoff)
+			!a.proxyBackedOff()
 	}
 	// capWaitable is the read-only twin for the wait decision: an account
 	// blocked ONLY by its in-flight cap — it can serve the moment a slot
@@ -348,7 +348,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 		return a.flightFull(flightLimit) &&
 			!endpointFaulted[a.ID()] &&
 			!a.IsEndpointRateLimited(endpoint) &&
-			time.Now().After(a.proxyBackoff)
+			!a.proxyBackedOff()
 	}
 
 	// paceWaitable is the read-only twin for the cap-only paths: an account
@@ -359,7 +359,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 		return a.intervalRemaining() > 0 &&
 			!endpointFaulted[a.ID()] &&
 			!a.IsEndpointRateLimited(endpoint) &&
-			time.Now().After(a.proxyBackoff)
+			!a.proxyBackedOff()
 	}
 
 	// heldAcc owns the in-flight slot consumed by the current pick. It is
@@ -1289,19 +1289,17 @@ func (c *Client) attributeTransportError(acc *Account, err error) {
 // go-twitter #43 field incident: 5881 consecutive failures, zero observable
 // proxy-layer signal).
 func (c *Client) markProxyDown(acc *Account) {
+	// One critical section: the failure count and the deadline derived from it
+	// change together, so no observer sees one without the other.
 	acc.mu.Lock()
 	acc.proxyConsecFails++
 	fails := acc.proxyConsecFails
-	acc.mu.Unlock()
-
 	duration := stealth.BackoffConfig{
 		InitialWait: c.cfg.ProxyBackoffInitial,
 		MaxWait:     c.cfg.ProxyBackoffMax,
 		Multiplier:  2.0,
 		JitterPct:   0.3,
 	}.Duration(fails - 1)
-
-	acc.mu.Lock()
 	acc.proxyBackoff = time.Now().Add(duration)
 	acc.mu.Unlock()
 
