@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.8.5](https://github.com/anatolykoptev/go-twitter/compare/v0.8.4...v0.8.5) (2026-11-04)
+
+
+### Bug Fixes
+
+* bump go-stealth to v1.26.0; do not wait out a proxy backoff past the caller's deadline ([#169](https://github.com/anatolykoptev/go-twitter/issues/169)) ([934febf](https://github.com/anatolykoptev/go-twitter/commit/934febf42c2e5b7167f25d4ecc5aa39e7a3a3c80))
+* **deps:** bump go-stealth to v1.26.1 ([#171](https://github.com/anatolykoptev/go-twitter/issues/171)) ([214dc42](https://github.com/anatolykoptev/go-twitter/commit/214dc42d49416e742ae22e91e8ffef0cdfc84143))
+* one stable, consistent browser identity per account ([#167](https://github.com/anatolykoptev/go-twitter/issues/167)) ([19e4bc7](https://github.com/anatolykoptev/go-twitter/commit/19e4bc77c90955013511f16a84b74d2f6013a0a1))
+* relogin follow-ups — bench on every path, single-flight, status-aware retry verdict ([#163](https://github.com/anatolykoptev/go-twitter/issues/163)) ([7e819c9](https://github.com/anatolykoptev/go-twitter/commit/7e819c94330a02874704ec7cc097d8b502e9020f))
+* review follow-ups — relogin completion, stale ct0, terminal 214, feed drop count, open-account identity, flush race ([#170](https://github.com/anatolykoptev/go-twitter/issues/170)) ([95cfaf8](https://github.com/anatolykoptev/go-twitter/commit/95cfaf8ce25d4b676fb2628e1731d8e638cf8c02))
+* tweet parsing never goes silently empty ([#165](https://github.com/anatolykoptev/go-twitter/issues/165)) ([35631b1](https://github.com/anatolykoptev/go-twitter/commit/35631b1eb362d578884877ead500ff2501ac4dd0))
+
 ## [0.8.4](https://github.com/anatolykoptev/go-twitter/compare/v0.8.3...v0.8.4) (2026-11-04)
 
 
