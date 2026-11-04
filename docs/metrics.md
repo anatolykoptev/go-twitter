@@ -175,7 +175,8 @@ view of lease health is lagging. Reported on the `SetSocialMeterProvider` provid
 One count per timeline entry the parser dropped instead of returning as a tweet,
 on the tweet-timeline reads (`UserTweets`, `SearchTimeline`, `TweetDetail`,
 `Bookmarks`, `ListLatestTweetsTimeline`, `CommunityTweetsTimeline`,
-`HomeTimeline`, `HomeLatestTimeline`). Before this counter these drops were a
+`HomeTimeline`, `HomeLatestTimeline`) and on the device-notification feeds
+(`DeviceFollow`, `tweetNotificationsQuery`, reason `no_id` only). Before this counter these drops were a
 debug log line only, so a parse that went empty looked like "no new tweets".
 
 - `twitter.operation`: the operation whose response was parsed.

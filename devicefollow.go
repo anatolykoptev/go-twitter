@@ -31,7 +31,7 @@ func (c *Client) GetDeviceFollowTweets(ctx context.Context, count int) ([]*Tweet
 	if err != nil {
 		return nil, fmt.Errorf("DeviceFollow: %w", err)
 	}
-	tweets, err := parse.DeviceFollow(body)
+	tweets, err := parse.DeviceFollow(body, c.metrics.parseDropOption(deviceFollowEndpoint))
 	if err != nil {
 		return nil, fmt.Errorf("parse DeviceFollow: %w", err)
 	}
@@ -91,7 +91,7 @@ func (c *Client) GetTweetNotifications(ctx context.Context, count int) ([]*Tweet
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", tweetNotificationsOp, err)
 	}
-	tweets, _, err := parse.TweetNotifications(body)
+	tweets, _, err := parse.TweetNotifications(body, c.metrics.parseDropOption(tweetNotificationsOp))
 	if err != nil {
 		return nil, fmt.Errorf("parse %s: %w", tweetNotificationsOp, err)
 	}

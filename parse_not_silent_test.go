@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -259,4 +260,49 @@ func TestUserTweets_UserUnavailable_IsNotFound(t *testing.T) {
 	assert.ErrorIs(t, err, ErrNotFound)
 	assert.NotErrorIs(t, err, ErrUnexpectedResponse)
 	assert.EqualValues(t, 1, fake.hits.Load())
+}
+
+// D1 — the device-notification feed (the realtime hot path): a REST entry with
+// no id_str is dropped AND counted, the good one is kept.
+//
+// Mutation: internal/parse/devicefollow.go DeviceFollow — delete
+// `o.drop(DropNoID)` in the `lt.IDStr == ""` arm => RED.
+func TestDeviceFollow_EntryWithoutID_DroppedAndCounted(t *testing.T) {
+	var f *metricsFixture
+	f = newMetricsFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		id := snowflakeAt(f.now.Add(-time.Minute))
+		_, _ = w.Write([]byte(`{"globalObjects":{"tweets":{"orphan":{"full_text":"no id","user_id_str":"9"},"` + id + `":{"id_str":"` + id + `","full_text":"ok","user_id_str":"9"}},"users":{}}}`))
+	}, "d1_acc")
+	origREST := deviceFollowURL
+	deviceFollowURL = strings.TrimSuffix(twitterBase, "/i/api/graphql") + "/i/api/2/notifications/device_follow.json"
+	t.Cleanup(func() { deviceFollowURL = origREST })
+
+	tweets, err := f.c.GetDeviceFollowTweets(context.Background(), 20)
+	require.NoError(t, err)
+	require.Len(t, tweets, 1)
+	assert.Equal(t, map[string]int64{"no_id": 1}, parseDrops(t, f, "DeviceFollow"))
+}
+
+// D2 — the x-web notifications timeline: a tweet result with no rest_id is
+// dropped AND counted.
+//
+// Mutation: internal/parse/devicefollow.go TweetNotifications — delete
+// `o.drop(DropNoID)` before "skip notification tweet without rest_id" => RED.
+func TestTweetNotifications_ResultWithoutRestID_DroppedAndCounted(t *testing.T) {
+	var f *metricsFixture
+	f = newMetricsFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		id := snowflakeAt(f.now.Add(-time.Minute))
+		entry := func(eid, result string) string {
+			return `{"entry_id":"` + eid + `","content":{"content":{"__typename":"TimelineTweet","tweet_results":{"result":` + result + `}}}}`
+		}
+		_, _ = w.Write([]byte(`{"data":{"viewer_v2":{"user_results":{"result":{"tweet_notification_timeline":{"timeline":{"instructions":[{"entries":[` +
+			entry("tweet-bad", `{"__typename":"Tweet"}`) + `,` +
+			entry("tweet-good", `{"__typename":"Tweet","rest_id":"`+id+`","details":{"full_text":"ok","created_at_ms":1790000000000}}`) +
+			`]}]}}}}}}}`))
+	}, "d2_acc")
+
+	tweets, err := f.c.GetTweetNotifications(context.Background(), 20)
+	require.NoError(t, err)
+	require.Len(t, tweets, 1)
+	assert.Equal(t, map[string]int64{"no_id": 1}, parseDrops(t, f, "tweetNotificationsQuery"))
 }

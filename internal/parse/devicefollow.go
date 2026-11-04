@@ -25,7 +25,8 @@ const TweetNotificationsOp = "tweetNotificationsQuery"
 // original behind a retweet, whose author the viewer may not follow), so when the
 // timeline lists tweet entries only those are returned. Tweets come back newest
 // first (descending snowflake id) with CreatedAt set.
-func DeviceFollow(body []byte) ([]*model.Tweet, error) {
+func DeviceFollow(body []byte, opts ...Option) ([]*model.Tweet, error) {
+	o := newOptions(opts)
 	var raw struct {
 		GlobalObjects struct {
 			Tweets map[string]struct {
@@ -69,6 +70,7 @@ func DeviceFollow(body []byte) ([]*model.Tweet, error) {
 	tweets := make([]*model.Tweet, 0, len(raw.GlobalObjects.Tweets))
 	for key, lt := range raw.GlobalObjects.Tweets {
 		if lt.IDStr == "" {
+			o.drop(DropNoID)
 			continue
 		}
 		if hasTimeline {
@@ -204,7 +206,8 @@ type xwebTimeline struct {
 // The current (x-web) answer uses snake_case entries with the item nested under
 // content.content; the earlier URT shape (entryId / itemContent) is still
 // accepted so a rollback of the server side does not blind the fallback.
-func TweetNotifications(body []byte) ([]*model.Tweet, string, error) {
+func TweetNotifications(body []byte, opts ...Option) ([]*model.Tweet, string, error) {
+	o := newOptions(opts)
 	var env struct {
 		Data struct {
 			ViewerV2 struct {
@@ -240,6 +243,7 @@ func TweetNotifications(body []byte) ([]*model.Tweet, string, error) {
 				r = *r.Tweet
 			}
 			if r.RestID == "" {
+				o.drop(DropNoID)
 				slog.Debug("skip notification tweet without rest_id", slog.String("entry", e.EntryID))
 				continue
 			}
@@ -260,14 +264,14 @@ func TweetNotifications(body []byte) ([]*model.Tweet, string, error) {
 		}
 	}
 	if len(tweets) == 0 {
-		return tweetNotificationsURT(body)
+		return tweetNotificationsURT(body, opts)
 	}
 	return tweets, "", nil
 }
 
 // tweetNotificationsURT parses the earlier URT-shaped answer through the
 // shared timeline machinery (its recursive fallback covers a rotated wrapper key).
-func tweetNotificationsURT(body []byte) ([]*model.Tweet, string, error) {
+func tweetNotificationsURT(body []byte, opts []Option) ([]*model.Tweet, string, error) {
 	return timelineTweetParse(body, TweetNotificationsOp, func(data json.RawMessage) timelineObj {
 		var r struct {
 			ViewerV2 struct {
@@ -282,5 +286,5 @@ func tweetNotificationsURT(body []byte) ([]*model.Tweet, string, error) {
 		}
 		_ = json.Unmarshal(data, &r)
 		return r.ViewerV2.UserResults.Result.TweetNotificationTimeline.Timeline
-	}, nil)
+	}, opts)
 }
