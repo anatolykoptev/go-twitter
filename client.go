@@ -661,10 +661,14 @@ func (c *Client) doRequestWithBody(ctx context.Context, acc *Account, bc *stealt
 	// an xtid init, the page it just fetched); it runs in the background.
 	qid.OnAuthedRequest(wf, c.metrics.instruments())
 
-	if xpffVal, xpffErr := c.xpffFor(acc, bc, headers["user-agent"]).Generate(); xpffErr == nil {
-		headers["x-xp-forwarded-for"] = xpffVal
-	} else {
-		slog.Debug("xpff: failed to generate header", slog.Any("error", xpffErr))
+	// The signed-in web client sends no x-xp-forwarded-for; only the frozen
+	// legacy shape does.
+	if c.owned.wireOf(bc) != wireChrome {
+		if xpffVal, xpffErr := c.xpffFor(acc, bc, headers["user-agent"]).Generate(); xpffErr == nil {
+			headers["x-xp-forwarded-for"] = xpffVal
+		} else {
+			slog.Debug("xpff: failed to generate header", slog.Any("error", xpffErr))
+		}
 	}
 
 	currentCall(ctx).ready()
