@@ -174,6 +174,15 @@ func (m *clientMetrics) parseOption(endpoint string) parse.Option {
 	})
 }
 
+// recordPagination records one finished paginated read: pages requested and the
+// reason it stopped. See docs/metrics.md.
+func (m *clientMetrics) recordPagination(endpoint string, pages int, reason string) {
+	if m == nil {
+		return
+	}
+	m.t.RecordPagination(endpoint, pages, reason)
+}
+
 // recordHold counts one proactive hold: an endpoint taken out of rotation on an
 // account because a response showed its window spent.
 func (m *clientMetrics) recordHold(endpoint string) {

@@ -27,6 +27,8 @@ All methods below are on `*twitter.Client`. Every one of them needs an authentic
 | `GetTweetNotifications(ctx, count)` | Pool | The same feed through GraphQL only. |
 | `FriendshipState(ctx, acc, userID)` | Given | Whether `acc` follows `userID` and has notifications on. |
 
+**Pagination.** `GetFollowers`, `GetFollowing`, `GetVerifiedFollowers`, `GetRetweeters`, `GetListTweets`, `GetCommunityTweets` and `GetBookmarks` page by cursor until the first of: `max` items collected; no cursor on the page; a page with no items (X can end a list with a non-empty cursor and nothing behind it); X's end-of-timeline cursor (`0|...` or a bare `0`); a cursor already followed in the call; or 5 consecutive pages that added no new item. Items are deduplicated by id within a call, so a server repeating items under fresh cursors is caught by the last rule; a list whose pages shrink but keep adding items is followed to `max`. Every one of these is a normal end: the call returns what it collected with a nil error, and logs a warning when `terminal_cursor` or `page_cap` cut it short of `max`. A page of only suspended or unavailable accounts still counts as a page with items. Users inside timeline modules are read like plain entries. The result may exceed `max` by up to one page. `ctx` ending or a request failing returns the items so far together with the error. Pages per call and the stop reason are recorded as `twitter.client.pagination.pages` and `twitter.client.pagination.stops` ([metrics](metrics.md)).
+
 ## Search
 
 | Method | Account | Description |

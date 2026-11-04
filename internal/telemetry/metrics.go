@@ -44,6 +44,8 @@ const (
 	MetricUsageReportsDropped = "twitter.client.usage_report.dropped"
 	MetricParseDropped        = "twitter.client.parse.dropped"
 	MetricCreatedAtFallbacks  = "twitter.client.parse.created_at_fallbacks"
+	MetricPaginationPages     = "twitter.client.pagination.pages"
+	MetricPaginationStops     = "twitter.client.pagination.stops"
 
 	// Attribute keys.
 	AttrOperation    = "twitter.operation"
@@ -111,6 +113,10 @@ var (
 	FreshnessBuckets = []float64{0.5, 1, 2, 3, 5, 8, 12, 20, 30, 45, 60, 120, 300, 900, 3600}
 	// PoolWaitBuckets (seconds) resolve a 50 ms - 5 min pool wait (poolWaitCap).
 	PoolWaitBuckets = []float64{0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30, 60, 120, 300}
+	// PaginationPageBuckets (pages) resolve the 1-5 pages a healthy read takes
+	// and leave room for a runaway one.
+	PaginationPageBuckets = []float64{1, 2, 3, 4, 5, 8, 13, 21, 34, 55, 89}
+
 	// rateLimitBuckets (requests) resolve X's per-endpoint windows, which run
 	// from tens to ~500 requests, with fine steps near exhaustion.
 	rateLimitBuckets = []float64{0, 1, 2, 5, 10, 25, 50, 100, 150, 200, 300, 500}
@@ -135,6 +141,8 @@ type Metrics struct {
 	reportsDropped  metric.Int64Counter
 	parseDropped    metric.Int64Counter
 	createdAtFallbk metric.Int64Counter
+	pagePages       metric.Int64Histogram
+	pageStops       metric.Int64Counter
 }
 
 // instrumentationVersion reports this module's version as seen by the
@@ -281,6 +289,19 @@ func New(mp metric.MeterProvider) *Metrics {
 		metric.WithDescription("Tweets dated from their snowflake id because no created_at field carried a time (the tweet is kept), by operation.")); err != nil {
 		fail(MetricCreatedAtFallbacks, err)
 		m.createdAtFallbk = noop.Int64Counter{}
+	}
+	if m.pagePages, err = meter.Int64Histogram(MetricPaginationPages,
+		metric.WithUnit("{page}"),
+		metric.WithDescription("Pages requested by one paginated read, by operation."),
+		metric.WithExplicitBucketBoundaries(PaginationPageBuckets...)); err != nil {
+		fail(MetricPaginationPages, err)
+		m.pagePages = noop.Int64Histogram{}
+	}
+	if m.pageStops, err = meter.Int64Counter(MetricPaginationStops,
+		metric.WithUnit("{call}"),
+		metric.WithDescription("Paginated reads by the reason they stopped paging, by operation and reason.")); err != nil {
+		fail(MetricPaginationStops, err)
+		m.pageStops = noop.Int64Counter{}
 	}
 	return m
 }
@@ -473,6 +494,32 @@ func (m *Metrics) RecordParseDrop(endpoint, reason string) {
 		return
 	}
 	m.parseDropped.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.String(AttrOperation, endpoint),
+		attribute.String(AttrReason, reason),
+	))
+}
+
+// Pagination stop reasons (twitter.reason on the stops counter). Bounded: one
+// per way a paginated read can end.
+const (
+	StopMaxCount       = "max_count"       // the requested number of items was reached
+	StopNoCursor       = "no_cursor"       // the page carried no Bottom cursor: the natural end
+	StopEmptyPage      = "empty_page"      // the page carried no items although a cursor was present
+	StopRepeatedCursor = "repeated_cursor" // the cursor was one already followed in this call
+	StopTerminalCursor = "terminal_cursor" // the cursor is X's end-of-timeline marker
+	StopPageCap        = "page_cap"        // the page budget for the requested count ran out
+	StopCtx            = "ctx"             // the caller's context ended
+	StopError          = "error"           // a request or parse failed
+)
+
+// RecordPagination records one finished paginated read: how many pages it
+// requested and why it stopped.
+func (m *Metrics) RecordPagination(endpoint string, pages int, reason string) {
+	if m == nil {
+		return
+	}
+	m.pagePages.Record(context.Background(), int64(pages), metric.WithAttributes(attribute.String(AttrOperation, endpoint)))
+	m.pageStops.Add(context.Background(), 1, metric.WithAttributes(
 		attribute.String(AttrOperation, endpoint),
 		attribute.String(AttrReason, reason),
 	))

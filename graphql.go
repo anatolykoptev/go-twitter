@@ -33,30 +33,52 @@ func (c *Client) GetUserByScreenName(ctx context.Context, handle string) (*Twitt
 }
 
 // GetFollowers fetches followers for a user (paginated).
+// Paging ends at maxCount or the end of the list. It also ends early, returning
+// what was collected with a nil error, on a page with no items, a repeated or
+// terminal ("0|...") cursor, or several consecutive pages that add nothing new; those
+// cases log a warning when they cut the read short of maxCount. The result may
+// exceed maxCount by up to one page.
 func (c *Client) GetFollowers(ctx context.Context, userID string, maxCount int) ([]*TwitterUser, error) {
 	return c.fetchUserList(ctx, "Followers", userID, maxCount)
 }
 
 // GetFollowing fetches accounts a user follows (paginated).
+// Paging ends at maxCount or the end of the list. It also ends early, returning
+// what was collected with a nil error, on a page with no items, a repeated or
+// terminal ("0|...") cursor, or several consecutive pages that add nothing new; those
+// cases log a warning when they cut the read short of maxCount. The result may
+// exceed maxCount by up to one page.
 func (c *Client) GetFollowing(ctx context.Context, userID string, maxCount int) ([]*TwitterUser, error) {
 	return c.fetchUserList(ctx, "Following", userID, maxCount)
 }
 
-// fetchUserList is a generic paginated user list fetcher.
+// userListPageSize is the per-request count of the Followers-shaped user lists.
+const userListPageSize = 100
+
+// retweeterPageSize is the per-request count of the Retweeters list.
+const retweeterPageSize = 20
+
+// fetchUserList is a generic paginated user list fetcher. It stops on the first
+// of maxCount users, no cursor, an empty page, a repeated or terminal cursor, or
+// the page budget (see pageLoop). Reaching any of those ends the call with the
+// users collected and a nil error; a request or parse failure returns the users
+// so far with the error.
 func (c *Client) fetchUserList(ctx context.Context, operation, userID string, maxCount int) ([]*TwitterUser, error) {
 	var users []*TwitterUser
 	var cursor string
+	loop := newPageLoop(maxCount)
 
 	for {
 		select {
 		case <-ctx.Done():
+			loop.ctxDone(c, operation, len(users))
 			return users, ctx.Err()
 		default:
 		}
 
 		variables := map[string]any{
 			"userId":                 userID,
-			"count":                  min(100, maxCount-len(users)),
+			"count":                  min(userListPageSize, maxCount-len(users)),
 			"includePromotedContent": false,
 		}
 		// withGrokTranslatedBio is sent by the live x.com Followers/Following
@@ -74,6 +96,7 @@ func (c *Client) fetchUserList(ctx context.Context, operation, userID string, ma
 
 		url, err := EndpointURL(operation)
 		if err != nil {
+			loop.failed(ctx, c, operation, len(users))
 			return users, err
 		}
 
@@ -87,6 +110,7 @@ func (c *Client) fetchUserList(ctx context.Context, operation, userID string, ma
 				"features":  endpointFor(operation).Features,
 			})
 			if merr != nil {
+				loop.failed(ctx, c, operation, len(users))
 				return users, fmt.Errorf("%s: marshal payload: %w", operation, merr)
 			}
 			body, _, err = c.doPoolPOST(ctx, operation, url, payload)
@@ -95,43 +119,62 @@ func (c *Client) fetchUserList(ctx context.Context, operation, userID string, ma
 			body, _, err = c.doGET(ctx, operation, url)
 		}
 		if err != nil {
+			loop.failed(ctx, c, operation, len(users))
 			return users, fmt.Errorf("%s: %w", operation, err)
 		}
 
-		batch, nextCursor, err := parse.UserList(body)
+		page, err := parse.UserListPage(body)
 		if err != nil {
+			loop.failed(ctx, c, operation, len(users))
 			return users, fmt.Errorf("parse %s: %w", operation, err)
 		}
-		users = append(users, batch...)
+		added := 0
+		for _, u := range page.Users {
+			if loop.fresh(u.ID) {
+				users = append(users, u)
+				added++
+			}
+		}
 
-		if nextCursor == "" || len(users) >= maxCount {
+		// page.Entries, not len(page.Users): a page of only suspended or
+		// unavailable accounts is not the end of the list.
+		if reason := loop.after(page.Entries, added, len(users), page.Cursor); reason != "" {
+			loop.finish(c, operation, reason, len(users))
 			break
 		}
-		cursor = nextCursor
+		cursor = page.Cursor
 	}
 	return users, nil
 }
 
 // GetRetweeters fetches users who retweeted a tweet (paginated).
+// Paging ends at maxCount or the end of the list. It also ends early, returning
+// what was collected with a nil error, on a page with no items, a repeated or
+// terminal ("0|...") cursor, or several consecutive pages that add nothing new; those
+// cases log a warning when they cut the read short of maxCount. The result may
+// exceed maxCount by up to one page.
 func (c *Client) GetRetweeters(ctx context.Context, tweetID string, maxCount int) ([]*TwitterUser, error) {
 	return c.fetchTweetUserList(ctx, "Retweeters", tweetID, maxCount)
 }
 
-// fetchTweetUserList is a paginated user list fetcher for tweet-centric endpoints.
+// fetchTweetUserList is a paginated user list fetcher for tweet-centric
+// endpoints. It stops exactly as fetchUserList does.
 func (c *Client) fetchTweetUserList(ctx context.Context, operation, tweetID string, maxCount int) ([]*TwitterUser, error) {
 	var users []*TwitterUser
 	var cursor string
+	loop := newPageLoop(maxCount)
 
 	for {
 		select {
 		case <-ctx.Done():
+			loop.ctxDone(c, operation, len(users))
 			return users, ctx.Err()
 		default:
 		}
 
 		variables := map[string]any{
 			"tweetId":                     tweetID,
-			"count":                       min(20, maxCount-len(users)),
+			"count":                       min(retweeterPageSize, maxCount-len(users)),
 			"includePromotedContent":      true,
 			"withDownvotePerspective":     false,
 			"withReactionsMetadata":       false,
@@ -148,25 +191,35 @@ func (c *Client) fetchTweetUserList(ctx context.Context, operation, tweetID stri
 
 		url, err := EndpointURL(operation)
 		if err != nil {
+			loop.failed(ctx, c, operation, len(users))
 			return users, err
 		}
 		url = addGraphQLParams(url, variables, endpointFor(operation).Features)
 
 		body, _, err := c.doGET(ctx, operation, url)
 		if err != nil {
+			loop.failed(ctx, c, operation, len(users))
 			return users, fmt.Errorf("%s: %w", operation, err)
 		}
 
-		batch, nextCursor, err := parse.RetweeterList(body)
+		page, err := parse.RetweeterListPage(body)
 		if err != nil {
+			loop.failed(ctx, c, operation, len(users))
 			return users, fmt.Errorf("parse %s: %w", operation, err)
 		}
-		users = append(users, batch...)
+		added := 0
+		for _, u := range page.Users {
+			if loop.fresh(u.ID) {
+				users = append(users, u)
+				added++
+			}
+		}
 
-		if nextCursor == "" || len(users) >= maxCount {
+		if reason := loop.after(page.Entries, added, len(users), page.Cursor); reason != "" {
+			loop.finish(c, operation, reason, len(users))
 			break
 		}
-		cursor = nextCursor
+		cursor = page.Cursor
 	}
 	return users, nil
 }
@@ -443,8 +496,8 @@ const tweetPageSize = 20
 // fetchTweetTimeline is the generic cursor-paginated GET fetcher for tweet
 // timelines (bookmarks, list, community). It mirrors fetchUserList: build
 // variables per page, GET via addGraphQLParams+doGET, parse a batch + bottom
-// cursor, loop until the cursor is empty, a page is empty, or maxCount is hit.
-// varsFn receives the per-page count and current cursor and returns the variables
+// cursor, and loop under the pageLoop stop policy (maxCount, no cursor, an empty
+// page, a repeated or terminal cursor, the page budget). varsFn receives the per-page count and current cursor and returns the variables
 // + feature map for that request.
 func (c *Client) fetchTweetTimeline(
 	ctx context.Context,
@@ -455,10 +508,12 @@ func (c *Client) fetchTweetTimeline(
 ) ([]*Tweet, error) {
 	var tweets []*Tweet
 	var cursor string
+	loop := newPageLoop(maxCount)
 
 	for {
 		select {
 		case <-ctx.Done():
+			loop.ctxDone(c, operation, len(tweets))
 			return tweets, ctx.Err()
 		default:
 		}
@@ -467,25 +522,33 @@ func (c *Client) fetchTweetTimeline(
 
 		url, err := EndpointURL(operation)
 		if err != nil {
+			loop.failed(ctx, c, operation, len(tweets))
 			return tweets, err
 		}
 		url = addGraphQLParams(url, variables, features)
 
 		body, _, err := c.doGET(ctx, operation, url)
 		if err != nil {
+			loop.failed(ctx, c, operation, len(tweets))
 			return tweets, fmt.Errorf("%s: %w", operation, err)
 		}
 
 		batch, nextCursor, err := parseFn(body, c.metrics.parseOption(operation))
 		if err != nil {
+			loop.failed(ctx, c, operation, len(tweets))
 			return tweets, fmt.Errorf("parse %s: %w", operation, err)
 		}
-		tweets = append(tweets, batch...)
+		added := 0
+		for _, t := range batch {
+			if loop.fresh(t.ID) {
+				tweets = append(tweets, t)
+				added++
+			}
+		}
 		c.metrics.recordFreshness(operation, batch)
 
-		// Stop on no cursor, an empty page (defends against a stuck cursor), or
-		// reaching the requested ceiling.
-		if nextCursor == "" || len(batch) == 0 || len(tweets) >= maxCount {
+		if reason := loop.after(len(batch), added, len(tweets), nextCursor); reason != "" {
+			loop.finish(c, operation, reason, len(tweets))
 			break
 		}
 		cursor = nextCursor
@@ -495,6 +558,11 @@ func (c *Client) fetchTweetTimeline(
 
 // GetBookmarks fetches the authenticated pool account's bookmarked tweets
 // (paginated up to maxCount).
+// Paging ends at maxCount or the end of the list. It also ends early, returning
+// what was collected with a nil error, on a page with no items, a repeated or
+// terminal ("0|...") cursor, or several consecutive pages that add nothing new; those
+// cases log a warning when they cut the read short of maxCount. The result may
+// exceed maxCount by up to one page.
 func (c *Client) GetBookmarks(ctx context.Context, maxCount int) ([]*Tweet, error) {
 	return c.fetchTweetTimeline(ctx, "Bookmarks", maxCount,
 		func(count int, cursor string) (map[string]any, map[string]any) {
@@ -510,6 +578,11 @@ func (c *Client) GetBookmarks(ctx context.Context, maxCount int) ([]*Tweet, erro
 }
 
 // GetListTweets fetches the latest tweets in a list (paginated up to maxCount).
+// Paging ends at maxCount or the end of the list. It also ends early, returning
+// what was collected with a nil error, on a page with no items, a repeated or
+// terminal ("0|...") cursor, or several consecutive pages that add nothing new; those
+// cases log a warning when they cut the read short of maxCount. The result may
+// exceed maxCount by up to one page.
 func (c *Client) GetListTweets(ctx context.Context, listID string, maxCount int) ([]*Tweet, error) {
 	return c.fetchTweetTimeline(ctx, "ListLatestTweetsTimeline", maxCount,
 		func(count int, cursor string) (map[string]any, map[string]any) {
@@ -525,6 +598,11 @@ func (c *Client) GetListTweets(ctx context.Context, listID string, maxCount int)
 }
 
 // GetCommunityTweets fetches the latest tweets in a community (paginated up to maxCount).
+// Paging ends at maxCount or the end of the list. It also ends early, returning
+// what was collected with a nil error, on a page with no items, a repeated or
+// terminal ("0|...") cursor, or several consecutive pages that add nothing new; those
+// cases log a warning when they cut the read short of maxCount. The result may
+// exceed maxCount by up to one page.
 func (c *Client) GetCommunityTweets(ctx context.Context, communityID string, maxCount int) ([]*Tweet, error) {
 	return c.fetchTweetTimeline(ctx, "CommunityTweetsTimeline", maxCount,
 		func(count int, cursor string) (map[string]any, map[string]any) {
@@ -545,6 +623,11 @@ func (c *Client) GetCommunityTweets(ctx context.Context, communityID string, max
 // maxCount). The response shares the followers shape
 // (data.user.result.timeline.timeline), so it reuses the existing fetchUserList
 // helper + parse.UserList parser.
+// Paging ends at maxCount or the end of the list. It also ends early, returning
+// what was collected with a nil error, on a page with no items, a repeated or
+// terminal ("0|...") cursor, or several consecutive pages that add nothing new; those
+// cases log a warning when they cut the read short of maxCount. The result may
+// exceed maxCount by up to one page.
 func (c *Client) GetVerifiedFollowers(ctx context.Context, userID string, maxCount int) ([]*TwitterUser, error) {
 	return c.fetchUserList(ctx, "BlueVerifiedFollowers", userID, maxCount)
 }
