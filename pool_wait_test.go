@@ -267,3 +267,31 @@ func TestParseRateLimitReset_PastIsFloored(t *testing.T) {
 	future := time.Now().Add(time.Hour).Truncate(time.Second)
 	assert.True(t, parseRateLimitReset(strconv.FormatInt(future.Unix(), 10)).Equal(future), "future reset must be kept as is")
 }
+
+// A wake-up that falls after the caller's own deadline cannot be waited for:
+// the sleep would end in a context error and tell the caller nothing about the
+// pool. The only account is in a 30 s proxy backoff and the caller has 1 s, so
+// the call must give up at once with the pool's own error. Before, the wait was
+// bounded only by poolWaitCap, so the call slept until the caller's deadline
+// and returned "context deadline exceeded".
+//
+// Mutation: request.go nextUsableAt, delete the `proxyUntil.After(ctxEnd)`
+// skip => RED (returns after ~1s with context.DeadlineExceeded).
+func TestPoolWait_WakeBeyondCallerDeadline_FailsFast(t *testing.T) {
+	fake := newPoolWaitFake(t)
+	c, accs := newPoolWaitClient(t, 1)
+	accs[0].mu.Lock()
+	accs[0].proxyBackoff = time.Now().Add(30 * time.Second)
+	accs[0].mu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	start := time.Now()
+	_, _, err := c.doGET(ctx, poolWaitEndpoint, fake.url())
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "pool exhausted for "+poolWaitEndpoint+" (requires auth)")
+	assert.False(t, errors.Is(err, context.DeadlineExceeded), "got a context error instead of the pool's: %v", err)
+	assert.Less(t, time.Since(start), 500*time.Millisecond, "a wake past the caller's deadline must not be slept for")
+	assert.EqualValues(t, 0, fake.hits.Load())
+}
