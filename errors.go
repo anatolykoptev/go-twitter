@@ -76,7 +76,7 @@ const (
 	errBadRequest               // HTTP 400 with an input-validation marker — the caller's own error, deterministic
 	errNotFound                 // errors-only 2xx with a deterministic-miss marker — the resource is absent (terminal)
 	errUnexpected               // errors-only 2xx with no recognized class — X answered, the library does not recognise it (terminal)
-	errAutomated                // 226 — X flagged the request as possibly automated; account-scoped, graduated bench (AuthCooldown, then BanCooldown on a repeat)
+	errAutomated                // 226 — X flagged the request as possibly automated; account-scoped, graduated bench (AuthCooldown, then max(BanCooldown, 2*AuthCooldown) on a repeat)
 
 	// errClassCount is one past the last class; metrics_test iterates [0, errClassCount)
 	// to prove every class has a twitter.outcome mapping. Keep it LAST.
@@ -134,6 +134,28 @@ const automatedCode = 226
 // accessRefusedCode is X's access/credentials refusal (37).
 const accessRefusedCode = 37
 
+// accountVerdictClass returns the class of the first account-scoped verdict
+// among codes (326 locked, 64 suspended, 226 automated, 88 banned), or errNone.
+// classifyError consults it when a body also carries 37/179/219, which may refer
+// to the target rather than the viewer and so must not hide the verdict.
+func accountVerdictClass(codes []int, hdrs map[string]string) errorClass {
+	for _, code := range codes {
+		switch code {
+		case 64:
+			return errSuspended
+		case 326:
+			return errLocked
+		case automatedCode:
+			return errAutomated
+		case 88:
+			if cls := classifyCode88(hdrs); cls == errBanned {
+				return cls
+			}
+		}
+	}
+	return errNone
+}
+
 // classifyError inspects a response body (and its headers, for code 88) for
 // known Twitter error codes.
 func classifyError(body []byte, hdrs map[string]string) errorClass {
@@ -167,6 +189,11 @@ func classifyError(body []byte, hdrs map[string]string) errorClass {
 		case 161:
 			return errBlocked
 		case accessRefusedCode, 179, 219:
+			// 37/179/219 can describe the target; an account verdict riding in
+			// the same body is the stronger signal.
+			if v := accountVerdictClass(extractErrorCodes(body), hdrs); v != errNone {
+				return v
+			}
 			return errNotAuthorized
 		case automatedCode:
 			return errAutomated

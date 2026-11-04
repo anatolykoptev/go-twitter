@@ -90,6 +90,9 @@ func TestDoGET_226_GraduatedBench(t *testing.T) {
 			assertBenched(t, accs[0], testAuthCooldown, testAuthCooldown/4)
 
 			accs[0].SetActive(true) // the bench ended; the account serves again
+			accs[0].mu.Lock()
+			accs[0].automatedUntil = time.Now().Add(-time.Minute)
+			accs[0].mu.Unlock()
 			_, err = c.GetUserTweets(context.Background(), "999", 20)
 			require.Error(t, err)
 			assert.True(t, IsAutomated(err), "got %v", err)
@@ -384,4 +387,111 @@ func TestDoMediaRequest_226_BenchesAccount(t *testing.T) {
 			assertBenched(t, accs[0], testAuthCooldown, testAuthCooldown/4)
 		})
 	}
+}
+
+// A repeat 226 is never shorter than the first, whatever the config: with a
+// short BanCooldown (AuthCooldown 30m / BanCooldown 1m) the repeat base is
+// 2*AuthCooldown.
+//
+// Mutation: automated.go automatedRepeatBase — `return c.cfg.BanCooldown` =>
+// RED (repeat ~1m < first 30m).
+func TestAutomatedBenchFor_RepeatNeverShorterThanFirst(t *testing.T) {
+	c, accs := newAutomatedClient(t, 1)
+	c.cfg.AuthCooldown = 30 * time.Minute
+	c.cfg.BanCooldown = time.Minute
+	acc := accs[0]
+
+	first := c.automatedBenchFor(acc)
+	assert.GreaterOrEqual(t, first, 30*time.Minute)
+	assert.LessOrEqual(t, first, 30*time.Minute+30*time.Minute/4)
+
+	acc.mu.Lock()
+	acc.automatedUntil = time.Now().Add(-time.Minute) // first bench ended
+	acc.mu.Unlock()
+	repeat := c.automatedBenchFor(acc)
+	assert.GreaterOrEqual(t, repeat, first, "repeat must not undercut the first bench")
+	assert.GreaterOrEqual(t, repeat, time.Hour)
+
+	// A larger BanCooldown still wins.
+	c.cfg.BanCooldown = 5 * time.Hour
+	acc.mu.Lock()
+	acc.automatedUntil = time.Now().Add(-time.Minute)
+	acc.mu.Unlock()
+	assert.GreaterOrEqual(t, c.automatedBenchFor(acc), 5*time.Hour)
+}
+
+// Concurrent 226s on one account inside its own bench are one offence: the
+// first sets the first-offence bench, the rest keep it and never escalate.
+//
+// Mutation: automated.go automatedBenchFor — delete the
+// `if now.Before(acc.automatedUntil) { return ... }` guard => RED (the second
+// hit lands in the repeat window and the bench jumps to BanCooldown).
+func TestAutomatedBenchFor_ConcurrentHitsDoNotEscalate(t *testing.T) {
+	c, accs := newAutomatedClient(t, 1)
+	acc := accs[0]
+	var wg sync.WaitGroup
+	got := make([]time.Duration, 8)
+	for i := range got {
+		wg.Add(1)
+		go func() { defer wg.Done(); got[i] = c.automatedBenchFor(acc) }()
+	}
+	wg.Wait()
+	for _, d := range got {
+		assert.GreaterOrEqual(t, d, time.Duration(0))
+		assert.LessOrEqual(t, d, testAuthCooldown+testAuthCooldown/4, "must stay at first-offence length")
+	}
+	acc.mu.Lock()
+	until := time.Until(acc.automatedUntil)
+	acc.mu.Unlock()
+	assert.LessOrEqual(t, until, testAuthCooldown+testAuthCooldown/4)
+}
+
+// Account verdicts outrank 37/179/219 in a multi-code body, in either order;
+// 37 alone stays not-authorized.
+//
+// Mutation: errors.go classifyError — remove the accountVerdictClass call in
+// the accessRefusedCode arm => RED on [37,226]/[37,326]/[37,64].
+func TestClassifyError_VerdictBeatsNotAuthorized(t *testing.T) {
+	cases := map[string]errorClass{
+		`{"errors":[{"code":37},{"code":226}]}`:  errAutomated,
+		`{"errors":[{"code":226},{"code":37}]}`:  errAutomated,
+		`{"errors":[{"code":179},{"code":326}]}`: errLocked,
+		`{"errors":[{"code":219},{"code":64}]}`:  errSuspended,
+		`{"errors":[{"code":37},{"code":37}]}`:   errNotAuthorized,
+		`{"errors":[{"code":37},{"code":179}]}`:  errNotAuthorized,
+	}
+	for body, want := range cases {
+		assert.Equal(t, want, classifyError([]byte(body), nil), body)
+	}
+	// 88 outranks only when it is a ban (remaining > 0), not a plain rate limit.
+	b88 := []byte(`{"errors":[{"code":37},{"code":88}]}`)
+	assert.Equal(t, errBanned, classifyError(b88, map[string]string{xRateLimitRemaining: "5"}))
+	assert.Equal(t, errNotAuthorized, classifyError(b88, map[string]string{xRateLimitRemaining: "0"}))
+}
+
+// [37,226] benches the account whether or not data rides along; [37] with
+// data stays a partial success.
+//
+// Mutation: errors.go classifyError — same as above => RED on both
+// [37,226] subtests (not-authorized, no bench).
+func TestDoGET_37And226_Automated(t *testing.T) {
+	for name, body := range map[string]string{
+		"errors_only": `{"errors":[{"code":37},{"code":226}]}`,
+		"with_data":   `{"data":{"user":{"result":{"timeline":{}}}},"errors":[{"code":37},{"code":226}]}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			fake := newPoolWaitFake(t)
+			fake.body = body
+			c, accs := newAutomatedClient(t, 1)
+			pointTwitterBase(t, fake.srv.URL)
+			_, err := c.GetUserTweets(context.Background(), "999", 20)
+			require.Error(t, err)
+			assert.True(t, IsAutomated(err), "got %v", err)
+			assertBenched(t, accs[0], testAuthCooldown, testAuthCooldown/4)
+		})
+	}
+	data37 := []byte(`{"data":{"user":{}},"errors":[{"code":37}]}`)
+	assert.True(t, partialSuccess(classifyError(data37, nil), data37), "[37]+data stays a partial success")
+	mixed := []byte(`{"data":{"user":{}},"errors":[{"code":37},{"code":226}]}`)
+	assert.False(t, partialSuccess(classifyError(mixed, nil), mixed))
 }
