@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.11](https://github.com/anatolykoptev/go-twitter/compare/v0.8.10...v0.8.11) (2026-11-04)
+
+
+### Features
+
+* **errors:** classify 226 as automated, 37 as not-authorized, add CheckSession ([#192](https://github.com/anatolykoptev/go-twitter/issues/192)) ([6d2cacd](https://github.com/anatolykoptev/go-twitter/commit/6d2cacdde0748f73dafc14ccc0a00adebb0d3cde))
+* **xtid:** browser failure value on the current wire; fix: refresh generator once on 404 ([#191](https://github.com/anatolykoptev/go-twitter/issues/191)) ([8af64c6](https://github.com/anatolykoptev/go-twitter/commit/8af64c6ab05bfccaf54cb3f6dfce6f7103d3efb9))
+
 ## [0.8.10](https://github.com/anatolykoptev/go-twitter/compare/v0.8.9...v0.8.10) (2026-11-04)
 
 
