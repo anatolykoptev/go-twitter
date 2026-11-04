@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.8](https://github.com/anatolykoptev/go-twitter/compare/v0.8.7...v0.8.8) (2026-11-04)
+
+
+### Bug Fixes
+
+* signed-in capture settles the web-client shape for current identities ([#181](https://github.com/anatolykoptev/go-twitter/issues/181)) ([402c390](https://github.com/anatolykoptev/go-twitter/commit/402c390c248e91db0942dc41bb96dfe71fbf7a30))
+
 ## [0.8.7](https://github.com/anatolykoptev/go-twitter/compare/v0.8.6...v0.8.7) (2026-11-04)
 
 
