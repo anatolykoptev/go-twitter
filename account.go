@@ -102,6 +102,16 @@ func (a *Account) IsActive() bool {
 	return a.active && !a.proxyClientFailed
 }
 
+// proxyBackedOff reports whether the account's proxy is still inside its
+// failure backoff. A locked read, not an atomic: markProxyDown must update the
+// failure count and the deadline together under mu, so the reader takes the
+// same lock rather than a second synchronisation mechanism.
+func (a *Account) proxyBackedOff() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return !time.Now().After(a.proxyBackoff)
+}
+
 // markProxyClientFailed permanently disables the account for this Client.
 func (a *Account) markProxyClientFailed() {
 	a.mu.Lock()

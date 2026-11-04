@@ -14,8 +14,11 @@ import (
 // client at an httptest server; production code never assigns it.
 var twitterBase = "https://x.com/i/api/graphql"
 
+// twitterAPIURL is the REST/login root. A var (not const) only so tests can
+// point the login flow at an httptest server; production code never assigns it.
+var twitterAPIURL = "https://api.twitter.com"
+
 const (
-	twitterAPIURL = "https://api.twitter.com"
 
 	// accountSettingsURL is the authenticated REST endpoint used by
 	// ValidateAccount to check whether an account's credentials are still

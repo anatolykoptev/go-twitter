@@ -255,18 +255,20 @@ func (c *Client) loadSession(acc *Account) (authToken, ct0 string, err error) {
 }
 
 // saveSession persists acc's credentials. Leased (credsAuthoritative) accounts
-// are skipped. A store failure is logged and swallowed: it must not fail the
-// request that triggered the save.
-func (c *Client) saveSession(acc *Account, authToken, ct0 string) {
+// are skipped. A store failure is logged and returned for callers that care;
+// none fails the request that triggered the save.
+func (c *Client) saveSession(acc *Account, authToken, ct0 string) error {
 	if acc.credsAuthoritative {
-		return
+		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), sessionStoreTimeout)
 	defer cancel()
 	s := Session{AuthToken: authToken, CT0: ct0, SavedAt: time.Now()}
 	if err := c.sessionStore().Save(ctx, acc.Username, s); err != nil {
 		slog.Warn("session save failed", slog.String("user", acc.Username), slog.Any("error", err))
+		return err
 	}
+	return nil
 }
 
 // deleteSession removes acc's stored session (relogin). Leased accounts are

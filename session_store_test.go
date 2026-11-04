@@ -210,16 +210,18 @@ func TestSessionStore_WithSocialMakesZeroStoreCalls(t *testing.T) {
 	assert.Zero(t, rec.calls(), "leased credentials must never touch the session store")
 }
 
-// F4 — relogin deletes the stored session for that username.
-func TestSessionStore_ReloginDeletesStoredSession(t *testing.T) {
+// F4 — a relogin that cannot establish a replacement leaves the stored session
+// alone; the replacement overwrites it only on success (relogin_state_test.go).
+func TestSessionStore_FailedReloginKeepsStoredSession(t *testing.T) {
 	rec := newRecordingStore()
 	rec.data["u4"] = Session{AuthToken: "t", CT0: "c", SavedAt: time.Now()}
 	c := failingClient(t, rec)
 	acc := &Account{Username: "u4", Password: "pw"}
 
 	acc.client = c.client // NewClient gives every account one; the shared fake stands in
-	_ = c.relogin(acc)    // the login itself fails against the fake; only the delete matters
-	assert.Equal(t, []string{"u4"}, rec.deletes, "relogin must delete the stored session")
+	require.Error(t, c.relogin(acc))
+	assert.Empty(t, rec.deletes, "a failed relogin must not delete the stored session")
+	assert.Contains(t, rec.data, "u4")
 }
 
 // F5 — a store whose Save fails never fails the API call.
@@ -297,8 +299,9 @@ func TestSessionStore_LoadErrorDoesNotTriggerLogin(t *testing.T) {
 	assert.Zero(t, proxyHits.Load())
 }
 
-// relogin deletes BEFORE it loads, so the stale session is never re-adopted.
-func TestSessionStore_ReloginDeletesBeforeLoad(t *testing.T) {
+// relogin never reads the store: the stored entry holds the token that just
+// failed, so a reload would adopt it.
+func TestSessionStore_ReloginNeverLoads(t *testing.T) {
 	rec := newRecordingStore()
 	rec.data["u"] = Session{AuthToken: "old", CT0: "oldct0", SavedAt: time.Now()}
 	c := failingClient(t, rec)
@@ -306,26 +309,9 @@ func TestSessionStore_ReloginDeletesBeforeLoad(t *testing.T) {
 
 	acc.client = c.client // NewClient gives every account one; the shared fake stands in
 	_ = c.relogin(acc)
-	require.GreaterOrEqual(t, len(rec.ops), 1)
-	assert.Equal(t, "delete:u", rec.ops[0], "Delete must precede any Load; got %v", rec.ops)
+	assert.Empty(t, rec.ops, "relogin touched the store before a replacement existed: %v", rec.ops)
 	tok, _, _ := acc.Credentials()
 	assert.NotEqual(t, "old", tok, "relogin adopted the stale session")
-}
-
-// If Delete fails, relogin must not reload from the store (the old session
-// would still be there): it goes straight to the password login.
-func TestSessionStore_ReloginAfterFailedDeleteSkipsLoad(t *testing.T) {
-	rec := newRecordingStore()
-	rec.data["u"] = Session{AuthToken: "old", CT0: "oldct0", SavedAt: time.Now()}
-	rec.delErr = errors.New("delete failed")
-	c := failingClient(t, rec)
-	acc := &Account{Username: "u", Password: "pw"}
-
-	acc.client = c.client // NewClient gives every account one; the shared fake stands in
-	_ = c.relogin(acc)
-	assert.Equal(t, []string{"delete:u"}, rec.ops, "no Load may follow a failed Delete")
-	tok, _, _ := acc.Credentials()
-	assert.NotEqual(t, "old", tok, "relogin adopted the old token after a failed Delete")
 }
 
 // A leased (credsAuthoritative) account never touches the store on relogin.

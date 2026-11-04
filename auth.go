@@ -27,10 +27,21 @@ type reloginOutcomeRecorder interface {
 	RecordSuccess(username string)
 }
 
-// relogin clears auth credentials and performs a fresh login. The gate is
-// consulted (and credentials are preserved) BEFORE the destructive clear, so an
-// OPEN breaker neither destroys a still-valid session nor hammers the
-// WAF-blocked login endpoint.
+// relogin replaces the account's credentials with a fresh login. The gate is
+// consulted BEFORE anything else, so an OPEN breaker neither touches a
+// still-valid session nor hammers the login endpoint.
+//
+// The account's current credentials and stored session are kept until a
+// replacement is in hand: the login runs on a candidate holding the identity
+// (username, password, TOTP seed) but no tokens, and only its success replaces
+// the account's tokens. A failed attempt — no password configured, a login
+// challenge, a network error — leaves the account and the store exactly as they
+// were; callers bench the account on failure, so a kept token is not kept in
+// rotation.
+//
+// The store is never read here (skipStore): the stored entry still holds the
+// token that just failed, so a reload would adopt it. A successful login
+// overwrites that entry; if the overwrite fails the stale entry is dropped.
 func (c *Client) relogin(acc *Account) error {
 	if c.reloginGate != nil {
 		if ok, reason := c.reloginGate.Allowed(context.Background(), acc.Username); !ok {
@@ -45,17 +56,18 @@ func (c *Client) relogin(acc *Account) error {
 
 	bc, err := c.clientForAccount(acc)
 	if err != nil {
-		// Before the destructive credential clear: an account with no transport
-		// must neither lose its session nor attempt a direct login.
+		// An account with no transport must neither lose its session nor
+		// attempt a direct login.
 		return err
 	}
 
-	acc.SetCredentials("", "")
-	// If the stale session could not be deleted, reloading it would adopt the
-	// token that just failed: go straight to the password login instead.
-	delErr := c.deleteSession(acc)
-
-	if err := c.establishCredentials(acc, bc, delErr != nil); err != nil {
+	cand := &Account{
+		Username:           acc.Username,
+		Password:           acc.Password,
+		TOTPSecret:         acc.TOTPSecret,
+		credsAuthoritative: acc.credsAuthoritative,
+	}
+	if err := c.establishCredentials(cand, bc, true); err != nil {
 		if rec != nil {
 			rec.RecordFailure(acc.Username)
 		}
@@ -63,6 +75,8 @@ func (c *Client) relogin(acc *Account) error {
 		return fmt.Errorf("relogin %s: %w", acc.Username, err)
 	}
 
+	authToken, ct0, _ := cand.Credentials()
+	acc.SetCredentials(authToken, ct0)
 	if rec != nil {
 		rec.RecordSuccess(acc.Username)
 	}
@@ -89,7 +103,9 @@ func (c *Client) loadOrLogin(acc *Account, client *stealth.BrowserClient) error 
 }
 
 // establishCredentials is loadOrLogin with an escape hatch: skipStore bypasses
-// the stored-session read (used by relogin after a failed Delete).
+// the stored-session read (used by relogin, whose stored entry holds the token
+// that just failed). With skipStore, a replacement that cannot be saved also
+// drops the stale entry, so a restart cannot reload the failed token.
 //
 // A store Load error other than ErrSessionNotFound means the stored state is
 // unknown. Provided credentials are then used as-is (nothing is saved); with
@@ -138,7 +154,9 @@ func (c *Client) establishCredentials(acc *Account, client *stealth.BrowserClien
 		return fmt.Errorf("login failed for %s: %w", acc.Username, err)
 	}
 
-	c.saveSession(acc, acc.AuthToken, acc.CT0)
+	if err := c.saveSession(acc, acc.AuthToken, acc.CT0); err != nil && skipStore {
+		_ = c.deleteSession(acc)
+	}
 	return nil
 }
 
