@@ -747,9 +747,14 @@ func (c *Client) doRequestWithBody(ctx context.Context, acc *Account, bc *stealt
 		// request on a dead ctx.
 		return nil, nil, 0, ctxErr
 	} else {
-		// The request still goes out, without the header. The failure is counted
-		// and logged once per streak so a broken generator is visible.
+		// The request still goes out. The failure is counted and logged once per
+		// streak so a broken generator is visible. A current-wire request carries
+		// the value the web client sends when its generator throws; the frozen
+		// legacy shape keeps omitting the header.
 		c.noteXtidFailure(txErr)
+		if c.wireFor(acc, bc) == wireChrome {
+			headers["x-client-transaction-id"] = xtidFailureValue
+		}
 	}
 	// First/TTL queryId refresh rides the same authenticated fetcher (and, after
 	// an xtid init, the page it just fetched); it runs in the background.

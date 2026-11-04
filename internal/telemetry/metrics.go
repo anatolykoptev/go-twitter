@@ -42,6 +42,8 @@ const (
 	MetricQIDAge              = "twitter.client.queryid.age"
 	MetricQIDWalk             = "twitter.client.queryid.refresh.duration"
 	MetricXtidFailures        = "twitter.client.xtid.failures"
+	MetricXtidRefreshes       = "twitter.client.xtid.refreshes"
+	MetricXtidRetries         = "twitter.client.xtid.retries"
 	MetricUsageReportsDropped = "twitter.client.usage_report.dropped"
 	MetricParseDropped        = "twitter.client.parse.dropped"
 	MetricCreatedAtFallbacks  = "twitter.client.parse.created_at_fallbacks"
@@ -141,6 +143,8 @@ type Metrics struct {
 	qidAge          metric.Float64Gauge
 	qidWalk         metric.Float64Histogram
 	xtidFailures    metric.Int64Counter
+	xtidRefreshes   metric.Int64Counter
+	xtidRetries     metric.Int64Counter
 	reportsDropped  metric.Int64Counter
 	parseDropped    metric.Int64Counter
 	createdAtFallbk metric.Int64Counter
@@ -280,6 +284,18 @@ func New(mp metric.MeterProvider) *Metrics {
 		metric.WithDescription("Requests sent without x-client-transaction-id because generating it failed.")); err != nil {
 		fail(MetricXtidFailures, err)
 		m.xtidFailures = noop.Int64Counter{}
+	}
+	if m.xtidRefreshes, err = meter.Int64Counter(MetricXtidRefreshes,
+		metric.WithUnit("{refresh}"),
+		metric.WithDescription("Forced rebuilds of the transaction-id generator after a 404, by result (refreshed, suppressed_floor, failed, cancelled).")); err != nil {
+		fail(MetricXtidRefreshes, err)
+		m.xtidRefreshes = noop.Int64Counter{}
+	}
+	if m.xtidRetries, err = meter.Int64Counter(MetricXtidRetries,
+		metric.WithUnit("{retry}"),
+		metric.WithDescription("Requests re-sent after a transaction-id refresh, by result (rescued, still_404).")); err != nil {
+		fail(MetricXtidRetries, err)
+		m.xtidRetries = noop.Int64Counter{}
 	}
 	if m.reportsDropped, err = meter.Int64Counter(MetricUsageReportsDropped,
 		metric.WithUnit("{report}"),
@@ -478,6 +494,22 @@ func (m *Metrics) RecordXtidFailure() {
 		return
 	}
 	m.xtidFailures.Add(context.Background(), 1)
+}
+
+// RecordXtidRefresh counts one forced transaction-id generator rebuild attempt.
+func (m *Metrics) RecordXtidRefresh(result string) {
+	if m == nil {
+		return
+	}
+	m.xtidRefreshes.Add(context.Background(), 1, metric.WithAttributes(attribute.String(AttrResult, result)))
+}
+
+// RecordXtidRetry counts the outcome of one request re-sent after a refresh.
+func (m *Metrics) RecordXtidRetry(result string) {
+	if m == nil {
+		return
+	}
+	m.xtidRetries.Add(context.Background(), 1, metric.WithAttributes(attribute.String(AttrResult, result)))
 }
 
 // RecordUsageReportDropped counts one *WithSocial usage report dropped at the

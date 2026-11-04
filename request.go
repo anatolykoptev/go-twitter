@@ -283,7 +283,7 @@ func (c *Client) nextUsableAt(ctx context.Context, endpoint string) (at time.Tim
 
 // doPoolRequest executes a pool-rotated request (GET or POST) with retry, ct0 rotation,
 // relogin, and guest-token fallback.
-func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string, payload []byte) ([]byte, map[string]string, error) {
+func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string, payload []byte) (_ []byte, _ map[string]string, retErr error) {
 	ct := beginCall(ctx, endpoint) // nil unless the caller attached a RequestTrace
 	// Pre-request jitter: off unless the client opted in with WithRequestJitter.
 	if err := c.preRequestJitter(ctx); err != nil {
@@ -310,6 +310,10 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 	// the committed request shape, so it is skipped; errOverloaded keeps the
 	// bounded backoff because X shedding load may recover.
 	prevEndpointFault := errNone
+	// xtidRetry bounds the transaction-id refresh to once per call (see
+	// retryAfterXtidRefresh).
+	var xtidRetry xtidRetry
+	defer func() { c.xtidRetryFinished(&xtidRetry, retErr) }()
 	// prevAcc is the account the previous attempt was served by; prevProxyFault
 	// records that it failed at its own per-account proxy (see skipBackoff).
 	var prevAcc *Account
@@ -655,6 +659,16 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 				// connection is X-side and stays uncharged.
 				if apiErr.Class == errOverloaded && acc.Proxy != "" {
 					c.markProxyDown(acc)
+				}
+				if c.retryAfterXtidRefresh(ctx, &xtidRetry, apiErr, status, acc, bc, authTok, ct0, ua) {
+					// A stale transaction id can answer 404 on a live route: with
+					// fresh keys the same request may well succeed, on any
+					// account, so nothing is marked faulted yet. A second 404
+					// takes the fault path below as before.
+					c.noteEndpointFault(endpoint, acc, bc, authTok, ct0, ua)
+					prevEndpointFault = errEndpoint
+					lastErr = apiErr
+					continue
 				}
 				endpointFaulted[acc.ID()] = true
 				prevEndpointFault = apiErr.Class
@@ -1105,7 +1119,7 @@ func (c *Client) recoverCSRFPost(ctx context.Context, acc *Account, bc *stealth.
 // doPOST executes a POST mutation with a specific account.
 // Unlike doGET, it does not rotate accounts from the pool — the caller provides the account.
 // Handles CSRF rotation, auth expiry, and retries on transient errors.
-func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string, payload []byte) ([]byte, error) {
+func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string, payload []byte) (_ []byte, retErr error) {
 	if err := stealth.DefaultJitter.Sleep(ctx); err != nil {
 		return nil, err
 	}
@@ -1118,6 +1132,8 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 	defer c.flightReleased(acc)
 
 	var lastErr error
+	var xtidRetry xtidRetry // once per call (see retryAfterXtidRefresh)
+	defer func() { c.xtidRetryFinished(&xtidRetry, retErr) }()
 	for attempt := range maxRetries {
 		if ae := terminalVerdict(lastErr); ae != nil {
 			return nil, ae // a recovery retry answered terminally: do not retry
@@ -1224,6 +1240,12 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 			}
 			if apiErr.Class == errEndpoint {
 				c.noteEndpointFault(endpoint, acc, bc, authTok, ct0, ua) // K of these refresh the queryIds (#68)
+			}
+			// A 404 means the route did not run the write, so one more send after
+			// a transaction-id refresh cannot duplicate it.
+			if c.retryAfterXtidRefresh(ctx, &xtidRetry, apiErr, status, acc, bc, authTok, ct0, ua) {
+				lastErr = apiErr
+				continue
 			}
 			return nil, apiErr
 		}

@@ -35,6 +35,8 @@ metrics.
 | `twitter.client.queryid.age` | gauge | `s` | none |
 | `twitter.client.queryid.refresh.duration` | histogram | `s` | `twitter.trigger`, `twitter.result` |
 | `twitter.client.xtid.failures` | counter | `{failure}` | none |
+| `twitter.client.xtid.refreshes` | counter | `{refresh}` | `twitter.result` |
+| `twitter.client.xtid.retries` | counter | `{retry}` | `twitter.result` |
 | `twitter.client.usage_report.dropped` | counter | `{report}` | none |
 | `twitter.client.parse.dropped` | counter | `{entry}` | `twitter.operation`, `twitter.reason` |
 | `twitter.client.parse.created_at_fallbacks` | counter | `{tweet}` | `twitter.operation` |
@@ -162,11 +164,27 @@ never hold. Counted at the response that triggered the hold, not for the
 pick-time estimate hold.
 
 ### `twitter.client.xtid.failures`
-Incremented for every request that went out without `x-client-transaction-id`
-because generating it failed (the keys could not be built or the init is in its
-negative-cache backoff). The request is not blocked; a sustained non-zero rate
+Incremented for every request whose `x-client-transaction-id` could not be generated
+(current-wire requests then carry the web client's failure value, legacy ones go
+out without the header); the keys could not be built or the init is in its
+negative-cache backoff. The request is not blocked; a sustained non-zero rate
 means the generator is broken and X will likely answer 404s. The client also logs
 one warning per failure streak, at most once every 5 minutes.
+
+### `twitter.client.xtid.refreshes`
+One count per forced rebuild attempt of the transaction-id generator, made when a
+request is answered 404 on a known route (current-wire accounts only), by
+`twitter.result`: `refreshed` (new keys in place), `suppressed_floor` (nothing
+rebuilt: keys younger than the one-minute floor, no keys yet, or the attempt kind
+is in backoff), `failed` (the rebuild failed; the previous keys keep serving) and
+`cancelled` (the caller's context ended while waiting). A steady `refreshed` rate
+with `retries{result="still_404"}` means the 404s are not about the id.
+
+### `twitter.client.xtid.retries`
+Outcome of the single re-send after a `refreshed` rebuild, by `twitter.result`:
+`rescued` (the call then succeeded) or `still_404` (the retry was answered 404
+again and took the ordinary endpoint-fault path). A call whose retry ends some
+other way (429, transport error) counts neither.
 
 ### `twitter.client.usage_report.dropped`
 `*WithSocial` helpers send their usage report to the credential service in the
