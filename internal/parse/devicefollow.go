@@ -282,5 +282,5 @@ func tweetNotificationsURT(body []byte) ([]*model.Tweet, string, error) {
 		}
 		_ = json.Unmarshal(data, &r)
 		return r.ViewerV2.UserResults.Result.TweetNotificationTimeline.Timeline
-	})
+	}, nil)
 }

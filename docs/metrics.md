@@ -35,6 +35,7 @@ metrics.
 | `twitter.client.queryid.refresh.duration` | histogram | `s` | `twitter.trigger`, `twitter.result` |
 | `twitter.client.xtid.failures` | counter | `{failure}` | none |
 | `twitter.client.usage_report.dropped` | counter | `{report}` | none |
+| `twitter.client.parse.dropped` | counter | `{entry}` | `twitter.operation`, `twitter.reason` |
 
 No instrument ever carries an account handle, user ID, list ID, search query or
 URL as an attribute.
@@ -168,6 +169,27 @@ background, at most 16 in flight. A report that arrives when all 16 slots are
 busy (the service is slow or stuck) is dropped, and this counter is incremented.
 A sustained non-zero rate means the credential service is not keeping up and its
 view of lease health is lagging. Reported on the `SetSocialMeterProvider` provider.
+
+### `twitter.client.parse.dropped`
+
+One count per timeline entry the parser dropped instead of returning as a tweet,
+on the tweet-timeline reads (`UserTweets`, `SearchTimeline`, `TweetDetail`,
+`Bookmarks`, `ListLatestTweetsTimeline`, `CommunityTweetsTimeline`,
+`HomeTimeline`, `HomeLatestTimeline`). Before this counter these drops were a
+debug log line only, so a parse that went empty looked like "no new tweets".
+
+- `twitter.operation`: the operation whose response was parsed.
+- `twitter.reason`:
+  - `no_id`: a tweet result with no `rest_id`.
+  - `no_created_at`: a tweet with an id but no creation time from `legacy.created_at`,
+    `details.created_at_ms` or the snowflake id.
+  - `unhandled_type`: a timeline item whose `__typename` the parser does not know
+    (a new X entry kind). Prompts, user items and cursors are expected and not counted.
+  - `tombstone`: a deleted or unavailable tweet. Normal at a low rate.
+
+A sustained rate of `no_id`, `no_created_at` or `unhandled_type` means X changed
+the response shape. A response that carries no timeline at all is not counted here:
+it fails the call with `ErrUnexpectedResponse`.
 
 ### `twitter.client.queryid.refreshes` / `.changed` / `.age`
 

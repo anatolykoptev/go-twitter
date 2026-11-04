@@ -161,6 +161,15 @@ func (m *clientMetrics) recordRateLimit(endpoint string, obs rateLimitObs) {
 	m.t.RecordRateLimit(endpoint, obs.remaining, obs.limit)
 }
 
+// parseDropOption returns the parse option that counts every entry the parser
+// drops under endpoint; a nil m yields an option that records nothing.
+func (m *clientMetrics) parseDropOption(endpoint string) parse.Option {
+	if m == nil {
+		return nil
+	}
+	return parse.WithDropObserver(func(reason string) { m.t.RecordParseDrop(endpoint, reason) })
+}
+
 // recordHold counts one proactive hold: an endpoint taken out of rotation on an
 // account because a response showed its window spent.
 func (m *clientMetrics) recordHold(endpoint string) {

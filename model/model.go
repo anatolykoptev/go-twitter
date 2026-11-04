@@ -15,6 +15,13 @@ import (
 // it as twitter.ErrNotFound.
 var ErrNotFound = errors.New("twitter: resource not found")
 
+// ErrUnexpectedResponse marks a 2xx answer the library cannot read as the
+// requested data: an errors-only body it does not recognise, or a response
+// whose data carries no timeline where one must be. It is terminal and
+// account/endpoint-neutral. The root package re-exports it as
+// twitter.ErrUnexpectedResponse.
+var ErrUnexpectedResponse = errors.New("twitter: unexpected response")
+
 // TwitterUser represents a Twitter/X account profile.
 type TwitterUser struct {
 	ID          string
