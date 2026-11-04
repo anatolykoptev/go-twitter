@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.8.9](https://github.com/anatolykoptev/go-twitter/compare/v0.8.8...v0.8.9) (2026-11-04)
+
+
+### Features
+
+* wire coherence for current identities (account wire, warm navigations, api.x.com, referers, WireFor) ([#183](https://github.com/anatolykoptev/go-twitter/issues/183)) ([fb40947](https://github.com/anatolykoptev/go-twitter/commit/fb4094726df7841cfbbcc9642a5e9007361973b1))
+
+
+### Bug Fixes
+
+* current identities send each session cookie once ([#185](https://github.com/anatolykoptev/go-twitter/issues/185)) ([0128011](https://github.com/anatolykoptev/go-twitter/commit/01280111940aef37ed7ce788addbe8628dc66a01))
+* stop cursor-paginated reads on empty page, repeated or terminal cursor, or page cap ([#186](https://github.com/anatolykoptev/go-twitter/issues/186)) ([59ee75d](https://github.com/anatolykoptev/go-twitter/commit/59ee75d98bd3cbb0fd2e4863225ab13357590a8e))
+
 ## [0.8.8](https://github.com/anatolykoptev/go-twitter/compare/v0.8.7...v0.8.8) (2026-11-04)
 
 
