@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.13](https://github.com/anatolykoptev/go-twitter/compare/v0.8.12...v0.8.13) (2026-11-04)
+
+
+### Bug Fixes
+
+* **errors:** make 226 graduation monotonic, concurrency-safe and multi-code aware ([#200](https://github.com/anatolykoptev/go-twitter/issues/200)) ([fc8ebf9](https://github.com/anatolykoptev/go-twitter/commit/fc8ebf981e54f382a6ad8403b28b4427330a8e93))
+
 ## [0.8.12](https://github.com/anatolykoptev/go-twitter/compare/v0.8.11...v0.8.12) (2026-11-04)
 
 
