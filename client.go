@@ -54,6 +54,9 @@ type Client struct {
 	// generation wakes on the NEXT release. Re-fetch before each wait; a
 	// release before that re-fetch is caught by the next pick attempt.
 	flightRelease chan struct{}
+
+	reloginMu      sync.Mutex
+	reloginFlights map[*Account]*reloginFlight
 }
 
 // NewClient creates a fully-wired Twitter client.

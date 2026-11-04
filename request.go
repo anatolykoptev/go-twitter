@@ -579,12 +579,12 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 				continue
 			case errAuthExpired:
 				slog.Warn("auth expired (code 32), attempting relogin", slog.String("user", acc.Username))
-				if reErr := c.relogin(acc); reErr != nil {
+				if reErr := c.relogin(ctx, acc, authTok); reErr != nil {
 					if ctxErr := ctx.Err(); ctxErr != nil {
 						return nil, nil, ctxErr // caller gone: the relogin verdict is not an account charge
 					}
 					slog.Warn("relogin failed", slog.String("user", acc.Username), slog.Any("error", reErr))
-					c.pool.SoftDeactivate(acc, c.cfg.AuthCooldown)
+					c.benchFailedRelogin(acc, reErr)
 					lastErr = &APIError{Class: errAuthExpired, Err: reErr, Message: reErr.Error()}
 					continue
 				}
@@ -740,12 +740,12 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 
 		case errAuthExpired:
 			slog.Warn("auth expired (code 32), attempting relogin", slog.String("user", acc.Username))
-			if reErr := c.relogin(acc); reErr != nil {
+			if reErr := c.relogin(ctx, acc, authTok); reErr != nil {
 				if ctxErr := ctx.Err(); ctxErr != nil {
 					return nil, nil, ctxErr // caller gone: the relogin verdict is not an account charge
 				}
 				slog.Warn("relogin failed, soft-deactivating", slog.String("user", acc.Username), slog.Any("error", reErr))
-				c.pool.SoftDeactivate(acc, c.cfg.AuthCooldown)
+				c.benchFailedRelogin(acc, reErr)
 				lastErr = &APIError{Class: errAuthExpired, Err: reErr, Message: reErr.Error()}
 				continue
 			}
@@ -816,7 +816,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 			slog.Warn("account locked (code 326, captcha needed)", slog.String("user", acc.Username))
 			if c.cfg.CaptchaSolver != nil {
 				slog.Info("attempting CAPTCHA unlock via relogin", slog.String("user", acc.Username))
-				if reErr := c.relogin(acc); reErr != nil {
+				if reErr := c.relogin(ctx, acc, authTok); reErr != nil {
 					if ctxErr := ctx.Err(); ctxErr != nil {
 						return nil, nil, ctxErr // caller gone: the relogin verdict is not an account charge
 					}
@@ -967,6 +967,9 @@ func withAuthFailure(authErr error, guestMsg string) string {
 // Rotating to a random ct0 on a 353 is proven futile against an established
 // session (the live-reproduced killer), so it is never done here.
 func (c *Client) recoverCSRF(ctx context.Context, acc *Account, bc *stealth.BrowserClient, method, url string, payload []byte, endpoint string, respHdrs map[string]string, lastErr *error) ([]byte, map[string]string, bool) {
+	// The token this request failed with: a relogin another request already
+	// completed since then makes this one unnecessary.
+	failedTok, _, _ := acc.Credentials()
 	if serverCT0, ok := csrfRecoveryCT0(respHdrs); ok {
 		slog.Warn("CSRF error 353, adopting server ct0", slog.String("user", acc.Username))
 		acc.SetCT0(serverCT0)
@@ -997,12 +1000,12 @@ func (c *Client) recoverCSRF(ctx context.Context, acc *Account, bc *stealth.Brow
 	if ctx.Err() != nil {
 		return nil, nil, false // caller gone: no relogin, no charge on its way out
 	}
-	if reErr := c.relogin(acc); reErr != nil {
+	if reErr := c.relogin(ctx, acc, failedTok); reErr != nil {
 		if ctx.Err() != nil {
 			return nil, nil, false // relogin aborted by the caller's own ctx
 		}
 		slog.Warn("relogin after CSRF failed", slog.String("user", acc.Username), slog.Any("error", reErr))
-		c.pool.SoftDeactivate(acc, c.cfg.AuthCooldown)
+		c.benchFailedRelogin(acc, reErr)
 		*lastErr = &APIError{Class: errAuthExpired, Err: reErr, Message: reErr.Error()}
 		return nil, nil, false
 	}
@@ -1026,6 +1029,9 @@ func (c *Client) recoverCSRF(ctx context.Context, acc *Account, bc *stealth.Brow
 // generates a client-random ct0. Returns (body, true) on a recovered success;
 // (nil, false) when recovery failed — the caller sets lastErr and `continue`s.
 func (c *Client) recoverCSRFPost(ctx context.Context, acc *Account, bc *stealth.BrowserClient, url string, payload []byte, endpoint string, respHdrs map[string]string, lastErr *error) ([]byte, bool) {
+	// The token this request failed with: a relogin another request already
+	// completed since then makes this one unnecessary.
+	failedTok, _, _ := acc.Credentials()
 	if serverCT0, ok := csrfRecoveryCT0(respHdrs); ok {
 		slog.Warn("doPOST: CSRF error 353, adopting server ct0", slog.String("user", acc.Username))
 		acc.SetCT0(serverCT0)
@@ -1054,11 +1060,12 @@ func (c *Client) recoverCSRFPost(ctx context.Context, acc *Account, bc *stealth.
 	if ctx.Err() != nil {
 		return nil, false // caller gone: no relogin, no charge on its way out
 	}
-	if reErr := c.relogin(acc); reErr != nil {
+	if reErr := c.relogin(ctx, acc, failedTok); reErr != nil {
 		if ctx.Err() != nil {
 			return nil, false // relogin aborted by the caller's own ctx
 		}
 		slog.Warn("doPOST: relogin after CSRF failed", slog.String("user", acc.Username), slog.Any("error", reErr))
+		c.benchFailedRelogin(acc, reErr)
 		*lastErr = &APIError{Class: errAuthExpired, Err: reErr, Message: "relogin failed: " + reErr.Error()}
 		return nil, false
 	}
@@ -1151,10 +1158,12 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 				continue
 			case errAuthExpired:
 				slog.Warn("doPOST: auth expired, attempting relogin", slog.String("user", acc.Username))
-				if reErr := c.relogin(acc); reErr != nil {
+				if reErr := c.relogin(ctx, acc, authTok); reErr != nil {
 					if ctxErr := ctx.Err(); ctxErr != nil {
 						return nil, ctxErr // caller gone: the relogin verdict is not an account charge
 					}
+					slog.Warn("doPOST: relogin failed, soft-deactivating", slog.String("user", acc.Username), slog.Any("error", reErr))
+					c.benchFailedRelogin(acc, reErr)
 					lastErr = &APIError{Class: errAuthExpired, Err: reErr, Message: "relogin failed: " + reErr.Error()}
 					continue
 				}
@@ -1351,8 +1360,10 @@ func terminalVerdict(err error) *APIError {
 // postReloginFailure classifies a failed post-recovery retry — a relogin or
 // ct0-adoption retry that still did not produce a usable response — by the
 // retry's own error codes, not by the failure that triggered the recovery
-// (#26 / issue #34). The fallback class applies only when the body carries
-// no recognized class: an errors-only retry body is its own terminal verdict
+// (#26 / issue #34). A non-2xx retry is classified by its status first, as on
+// the primary path (5xx overloaded, 404/410 endpoint), so its errors-only body
+// cannot make it terminal. The fallback class applies only when the response
+// carries no recognized class: a 2xx errors-only retry body is its own terminal verdict
 // (a deterministic miss or an unrecognised answer via errorsOnlyClass —
 // never an auth verdict, and never benched: the account just logged in and
 // was answered for real), an unrecognized-code retry keeps the verdict the
@@ -1365,18 +1376,30 @@ func terminalVerdict(err error) *APIError {
 // doPOST/recoverCSRFPost sites pass as 0 because they never charged a
 // post-relogin failure at all.
 func (c *Client) postReloginFailure(acc *Account, endpoint string, status int, body []byte, hdrs map[string]string, err error, fallback errorClass, fallbackCooldown time.Duration, msg string) *APIError {
-	cls := classifyError(body, hdrs)
-	if cls == errNone {
-		if errorsOnly(body) {
-			// An errors-only retry body is its own terminal verdict — a
+	var cls errorClass
+	switch {
+	case status >= 200 && status < 300:
+		cls = classifyError(body, hdrs)
+		if cls == errNone && errorsOnly(body) {
+			// An errors-only 2xx retry body is its own terminal verdict — a
 			// deterministic miss or an answer the library does not recognise
 			// — never the auth verdict that triggered the recovery. Neither
 			// class benches: the freshly logged-in account proved healthy by
 			// being answered for real.
 			cls = errorsOnlyClass(body)
-		} else {
-			cls = fallback
 		}
+	case status > 0:
+		// A non-2xx retry keeps the status classes of the primary path (5xx
+		// -> overloaded and retryable, 404/410 -> endpoint, 400+214 -> bad
+		// request): the errors[] envelope on a non-2xx proves nothing about
+		// the request shape having executed, so it must not turn a retryable
+		// failure into a terminal verdict.
+		cls = newAPIError(status, body, hdrs).Class
+	default:
+		cls = classifyError(body, hdrs) // transport error: no response to classify
+	}
+	if cls == errNone {
+		cls = fallback
 	}
 	switch {
 	case cls == errSuspended:
@@ -1387,6 +1410,8 @@ func (c *Client) postReloginFailure(acc *Account, endpoint string, status int, b
 		acc.MarkEndpointRateLimited(endpoint, parseRateLimitReset(hdrs[xRateLimitReset]))
 	case cls == errNotFound || cls == errUnexpected:
 		// Terminal healthy-account verdicts: no bench, no charge.
+	case cls == errEndpoint || cls == errOverloaded || cls == errBadRequest:
+		// X-side or caller-side: the account just logged in is innocent.
 	case fallbackCooldown > 0:
 		c.pool.SoftDeactivate(acc, fallbackCooldown)
 	}

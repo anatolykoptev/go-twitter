@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -269,6 +270,43 @@ func (c *Client) saveSession(acc *Account, authToken, ct0 string) error {
 		return err
 	}
 	return nil
+}
+
+// dropStaleSession runs after relogin's replacement session could not be saved:
+// the stored entry may still hold the token that was just rejected, which a
+// restart would reload. It removes that entry, with two guards.
+//
+// A save that timed out or was cancelled is ambiguous: the write may have
+// landed. The store is read back first, and an entry already holding the new
+// token is kept — deleting it would throw away the live session and cost a
+// login at the next restart. Only a definite failure, or an ambiguous one whose
+// read-back shows a different (or unreadable) entry, proceeds to the delete.
+//
+// When the delete fails too the store accepts no writes at all and nothing can
+// be persisted: the account carries the new credentials in memory, and the
+// rejected entry is reported at error level rather than left silent. It cannot
+// be made harmless from here; it heals on the next successful save (any ct0
+// rotation or relogin overwrites the entry), and a restart that reloads it
+// meets code 32 and relogins once, which the per-account breaker bounds.
+func (c *Client) dropStaleSession(acc *Account, saveErr error) {
+	if isAmbiguousStoreErr(saveErr) {
+		if tok, _, err := c.loadSession(acc); err == nil && (tok == acc.AuthToken || tok == "") {
+			return // the write landed, or there is no stored entry to be stale
+		}
+	}
+	if err := c.deleteSession(acc); err != nil {
+		slog.Error("rejected session could not be removed from the store; a restart may reload it and relogin once",
+			slog.String("user", acc.Username), slog.Any("error", err))
+	}
+}
+
+// isAmbiguousStoreErr reports a store error that does not say whether the
+// write took effect: a deadline or cancellation, or a timeout from the
+// transport underneath.
+func isAmbiguousStoreErr(err error) bool {
+	var ne net.Error
+	return errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) ||
+		(errors.As(err, &ne) && ne.Timeout())
 }
 
 // deleteSession removes acc's stored session (relogin). Leased accounts are

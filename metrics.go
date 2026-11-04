@@ -229,10 +229,13 @@ func attemptOutcome(status int, body []byte, hdrs map[string]string, err error, 
 		return telemetry.OutcomeTransport
 	}
 	ae := newAPIError(status, body, hdrs)
-	// A 404 keeps its historical not_found label: dashboards and alerts keyed
-	// on twitter.outcome=not_found track the raw 404 rate regardless of the
-	// errEndpoint classification the retry loop now gives it. GraphQL-shaped
-	// 400s — the other endpoint-fault source — take the new "endpoint" value.
+	// A 404 keeps its historical not_found label regardless of the errEndpoint
+	// classification the retry loop now gives it. The label is therefore no
+	// longer the raw 404 rate: it also counts errors-only 2xx answers carrying
+	// a deterministic-miss marker (errNotFound, below), so a rate keyed on
+	// twitter.outcome=not_found mixes dead routes with absent resources.
+	// GraphQL-shaped 400s — the other endpoint-fault source — take the new
+	// "endpoint" value.
 	if ae.Class == errEndpoint && status == 404 {
 		return telemetry.OutcomeNotFound
 	}
