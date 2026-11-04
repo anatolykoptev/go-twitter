@@ -536,10 +536,41 @@ func (r *Refresher) noteSuccess(trig string, snap *Snapshot, carried int) {
 	if wasFailing || snap.Changed > 0 || carried > 0 {
 		level = slog.LevelInfo
 	}
-	slog.Log(context.Background(), level, "queryid refresh applied",
+	attrs := []slog.Attr{
 		slog.String("trigger", trig), slog.Int("ops", len(snap.IDs)),
 		slog.Int("changed", snap.Changed), slog.Int("carried_forward", carried), slog.Bool("features_updated", snap.Features != nil),
-		slog.Bool("recovered", wasFailing))
+		slog.Bool("recovered", wasFailing),
+	}
+	if snap.Changed > 0 {
+		names, more := changedOps(r.Cfg.Catalog, snap.IDs)
+		attrs = append(attrs, slog.Any("changed_ops", names))
+		if more > 0 {
+			attrs = append(attrs, slog.Int("changed_ops_more", more))
+		}
+	}
+	slog.LogAttrs(context.Background(), level, "queryid refresh applied", attrs...)
+}
+
+// maxLoggedChangedOps caps the operation names listed in the applied line.
+const maxLoggedChangedOps = 30
+
+// changedOps names the operations in ids that differ from the compiled set,
+// sorted and capped at maxLoggedChangedOps; more is how many were cut. It asks
+// the catalog about one id at a time, so it agrees with Snapshot.Changed
+// (env-pinned operations excluded) without a second source of truth. Names
+// only: the ids themselves are never logged.
+func changedOps(cat Catalog, ids map[string]string) (names []string, more int) {
+	for op, id := range ids {
+		if cat.CountChanged(map[string]string{op: id}) > 0 {
+			names = append(names, op)
+		}
+	}
+	slices.Sort(names)
+	if len(names) > maxLoggedChangedOps {
+		more = len(names) - maxLoggedChangedOps
+		names = names[:maxLoggedChangedOps]
+	}
+	return names, more
 }
 
 // noteFailure keeps the last good snapshot untouched and reports the failure
