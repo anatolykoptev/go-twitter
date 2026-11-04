@@ -69,7 +69,7 @@ func (c *Client) qidRefresh() *queryid.Refresher {
 func (c *Client) noteEndpointFault(op string, acc *Account, bc *stealth.BrowserClient, authTok, ct0, ua string) {
 	r := c.qidRefresh()
 	r.OnEndpointFault(op, func() bundle.Fetcher {
-		return r.Shared(warmFetcher(c.warmClient(acc, bc), twitterHeaders(authTok, ct0, ua)))
+		return r.Shared(c.warmFetcherFor(acc, bc, twitterHeaders(authTok, ct0, ua)))
 	}, c.metrics.instruments())
 }
 

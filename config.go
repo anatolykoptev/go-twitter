@@ -221,6 +221,11 @@ type ClientConfig struct {
 	// builds, shared and per-account. Test seam: a fake X on loopback needs
 	// stealth.WithoutSSRFGuard() on the clients NewClient itself constructs.
 	stealthOpts []stealth.ClientOption
+
+	// sessionOrigins are the sites a current identity's session cookies are
+	// seeded for (defaultSessionOrigins when empty). Tests point it at a local
+	// server, whose host a cookie for x.com would never reach.
+	sessionOrigins []string
 }
 
 // defaults fills in zero-value config fields with sensible defaults.

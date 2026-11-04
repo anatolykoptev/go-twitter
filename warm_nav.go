@@ -15,8 +15,6 @@ type navTransport interface {
 	// identity (user agent, client hints, accept for its Chrome major,
 	// sec-fetch-*, upgrade-insecure-requests, priority: u=0, i).
 	ChromeHeaders() map[string]string
-	// GetCookieValue reads the client's cookie jar (see singleSourceCookies).
-	GetCookieValue(rawURL, name string) string
 	DoWithHeaderOrderCtx(ctx context.Context, method, urlStr string, headers map[string]string, body io.Reader, order []string) ([]byte, map[string]string, int, error)
 }
 
@@ -29,11 +27,11 @@ type navTransport interface {
 // account's own client; a script subresource is not a navigation, and no script
 // capture is in the oracle, so that shape is unchanged.
 //
-// The two clients do not share a cookie jar (go-stealth 1.27.0 offers no way to):
-// the account's cookie goes on every warm request explicitly, as before, and
-// what a page response sets lands in the navigation client's own jar. A session
-// cookie that jar holds goes out from the jar only (singleSourceCookies), never
-// twice; the page's other cookies still do not reach the account's XHRs.
+// The two clients share the account's cookie jar (sessionJar), so the session
+// cookies go out of the jar on a navigation as on an XHR, and what a page
+// response sets (guest_id, the page's other cookies) reaches the account's next
+// XHR, as it does between the tabs of one browser. A navigation carries no
+// explicit Cookie header of its own.
 type warmRouter struct {
 	page  navTransport
 	other warmDoer
@@ -45,7 +43,6 @@ func (r *warmRouter) DoCtx(ctx context.Context, method, rawURL string, headers m
 		return r.other.DoCtx(ctx, method, rawURL, headers, body)
 	}
 	h, order := navigationRequest(r.page.ChromeHeaders(), method, headers)
-	singleSourceCookies(r.page, rawURL, h, nil)
 	return r.page.DoWithHeaderOrderCtx(ctx, method, rawURL, h, body, order)
 }
 

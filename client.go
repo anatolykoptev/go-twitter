@@ -26,7 +26,6 @@ import (
 
 // Client is the top-level Twitter scraping client.
 type Client struct {
-	cookieSeen           sync.Map // *Account -> *cookieState: the session cookies each Account sent last (singleSourceCookies)
 	client               *stealth.BrowserClient
 	pool                 *pool.Pool[*Account]
 	xtidMgr              *xtid.Manager
@@ -343,6 +342,15 @@ func buildAccountClientFor(cfg ClientConfig, acc *Account, navigation bool) (*st
 	// an empty profile is never passed to WithProfile.
 	if proxy != "" {
 		opts = append(opts, stealth.WithProxy(proxy))
+	}
+	// A current identity's two clients share one caller-owned cookie jar (see
+	// sessionJar). The legacy wire keeps the transport's own jar: it is frozen.
+	if accountWire(acc) == wireChrome {
+		sj, err := acc.sessionJarFor(cfg)
+		if err != nil {
+			return nil, proxy, err
+		}
+		opts = append(opts, stealth.WithCookieJar(sj.jar))
 	}
 	bc, err := stealth.NewClient(append(opts, cfg.stealthOpts...)...)
 	return bc, proxy, err
@@ -666,6 +674,20 @@ func warmFetcher(d warmDoer, headers map[string]string) bundle.Fetcher {
 	return &bundle.StealthFetcher{Client: d, UserAgent: ua, Cookie: cookie}
 }
 
+// warmFetcherFor is warmFetcher for a request of acc. The fetcher is built from
+// the request's explicit cookie (it is what says the request is authenticated),
+// but an Account with a cookie jar sends its session cookies from the jar, which
+// both of its clients share: the fetcher then carries no cookie of its own, or
+// a page fetch would send them twice. A test doer standing in for the Account's
+// clients (warmDoerOverride) has no access to the jar, so the cookie stays.
+func (c *Client) warmFetcherFor(acc *Account, bc *stealth.BrowserClient, headers map[string]string) bundle.Fetcher {
+	f := warmFetcher(c.warmClient(acc, bc), headers)
+	if sf, ok := f.(*bundle.StealthFetcher); ok && acc != nil && acc.jar.Load() != nil && c.warmDoerOverride == nil {
+		sf.Cookie = ""
+	}
+	return f
+}
+
 // warmDoer is the request primitive the warm-page fetcher needs; the account's
 // *stealth.BrowserClient in production.
 type warmDoer interface {
@@ -713,7 +735,7 @@ func (c *Client) doRequestWithBody(ctx context.Context, acc *Account, bc *stealt
 		delete(headers, "content-type")
 	}
 	qid := c.qidRefresh()
-	wf := qid.Shared(warmFetcher(c.warmClient(acc, bc), headers))
+	wf := qid.Shared(c.warmFetcherFor(acc, bc, headers))
 	if txID, txErr := c.xtidMgr.GenerateIDWith(ctx, method, urlPath, wf); txErr == nil {
 		headers["x-client-transaction-id"] = txID
 		c.xtidFail.onSuccess()
@@ -744,7 +766,10 @@ func (c *Client) doRequestWithBody(ctx context.Context, acc *Account, bc *stealt
 
 	currentCall(ctx).ready()
 	if c.wireFor(acc, bc) == wireChrome {
-		singleSourceCookies(bc, urlStr, headers, c.cookieStateFor(acc))
+		// The Account's jar sends the session cookies; the explicit pair goes.
+		if sj := acc.syncedJar(); sj != nil {
+			sj.forRequest(urlStr, headers)
+		}
 	}
 	order := c.wireFor(acc, bc).shapeFor(method, urlStr, headers, c.pageSourceFor(acc, bc, method, body))
 	return bc.DoWithHeaderOrderCtx(ctx, method, urlStr, headers, body, order)

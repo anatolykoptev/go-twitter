@@ -186,31 +186,82 @@ func TestLive_AccountNavigationAndXHR(t *testing.T) {
 	assert.Equal(t, "u=1, i", got.values["priority"])
 }
 
-// A cookie the server put in the jar and the explicit session cookies reach a
-// real server as one Cookie header with each name once. httpbin.org is the echo
-// service here because tls.peet.ws sets no cookie to put in the jar.
-func TestLive_CookiesEachNameOnce(t *testing.T) {
+// One current-identity account, XHR and warm navigation through the real TLS
+// transport to a real server: the session cookies come from the Account's jar,
+// both clients share it, and every name reaches the server once, as one Cookie
+// header. httpbin.org is the echo service here because tls.peet.ws sets no
+// cookie to put in the jar; the account's cookies are seeded for httpbin.org
+// instead of x.com. The Client runs offline (no x.com request).
+func TestLive_AccountJarCookiesEachNameOnce(t *testing.T) {
 	const base = "https://httpbin.org"
 	p := chromeProfile(t, stealth.ProfileChrome156, "chrome", "macos")
-	bc := liveClient(t, p)
+	acc := &Account{Username: "live", AuthToken: "dummyauth", CT0: "OLDCT0", Profile: p}
+	c := newLoopbackClient(t, ClientConfig{Accounts: []*Account{acc}, sessionOrigins: []string{base + "/"}})
+	ctx := context.Background()
 
-	_, _, status, err := bc.Do("GET", base+"/cookies/set?ct0=ROTATED&guest_id=g1", map[string]string{}, nil)
-	require.NoError(t, err, "echo service unreachable")
-	require.Equal(t, 302, status, "set-cookie answer (redirect not followed)")
-	require.Equal(t, "ROTATED", bc.GetCookieValue(base+"/headers", "ct0"), "the jar holds the server's ct0")
-
-	h := twitterHeaders("dummyauth", "OLDCT0", p.UserAgent)
-	singleSourceCookies(bc, base+"/headers", h, nil)
-	order := wireChrome.shape("GET", base+"/headers", h)
-	body, _, status, err := bc.DoWithHeaderOrder("GET", base+"/headers", h, nil, order)
-	require.NoError(t, err)
-	require.Equal(t, 200, status)
-	var echo struct {
-		Headers map[string]string `json:"headers"`
+	echoCookie := func(body []byte) string {
+		var echo struct {
+			Headers map[string]string `json:"headers"`
+		}
+		require.NoError(t, json.Unmarshal(body, &echo), string(body))
+		return echo.Headers["Cookie"]
 	}
-	require.NoError(t, json.Unmarshal(body, &echo))
-	t.Logf("cookie names on the wire: %v", cookieNames(echo.Headers["Cookie"]))
-	assert.ElementsMatch(t, []string{"auth_token", "ct0", "guest_id"}, cookieNames(echo.Headers["Cookie"]))
-	assert.Contains(t, echo.Headers["Cookie"], "ct0=ROTATED")
-	assert.NotContains(t, echo.Headers["Cookie"], "OLDCT0")
+	xhr := func() string {
+		tok, ct0, ua := acc.Credentials()
+		body, _, status, err := c.doRequestWithBody(ctx, acc, acc.client, "GET", base+"/headers", twitterHeaders(tok, ct0, ua), nil)
+		require.NoError(t, err, "echo service unreachable")
+		require.Equal(t, 200, status)
+		return echoCookie(body)
+	}
+	nav := c.navClientFor(acc)
+	require.NotNil(t, nav)
+	navigate := func(path string) ([]byte, int) {
+		h, order := navigationRequest(nav.ChromeHeaders(), "GET", nil)
+		body, _, status, err := nav.DoWithHeaderOrderCtx(ctx, "GET", base+path, h, nil, order)
+		require.NoError(t, err, "echo service unreachable")
+		return body, status
+	}
+
+	// A page navigation sets guest_id; the server rotates ct0 on an XHR.
+	_, status := navigate("/cookies/set?guest_id=g1")
+	require.Equal(t, 302, status, "set-cookie answer (redirect not followed)")
+	_, _, status, err := acc.client.Do("GET", base+"/cookies/set?ct0=ROTATED", map[string]string{}, nil)
+	require.NoError(t, err)
+	require.Equal(t, 302, status)
+
+	got := xhr()
+	t.Logf("XHR cookie names on the wire: %v", cookieNames(got))
+	assert.ElementsMatch(t, []string{"auth_token", "ct0", "guest_id"}, cookieNames(got))
+	assert.Contains(t, got, "ct0=ROTATED")
+	assert.NotContains(t, got, "OLDCT0")
+
+	body, status := navigate("/headers")
+	require.Equal(t, 200, status)
+	got = echoCookie(body)
+	t.Logf("navigation cookie names on the wire: %v", cookieNames(got))
+	assert.ElementsMatch(t, []string{"auth_token", "ct0", "guest_id"}, cookieNames(got))
+	assert.Contains(t, got, "ct0=ROTATED")
+}
+
+// The Cookie header the jar writes sits where the explicit header sat: same
+// header order on the wire, whichever source supplies the cookies. The control
+// is a client with no caller jar sending the explicit header; the account's
+// cookies are seeded for the echo host.
+func TestLive_AccountJarCookieHeaderPosition(t *testing.T) {
+	p := chromeProfile(t, stealth.ProfileChrome156, "chrome", "macos")
+	acc := &Account{Username: "live", AuthToken: "dummyauth", CT0: "dummyct0", Profile: p}
+	c := newLoopbackClient(t, ClientConfig{Accounts: []*Account{acc}, sessionOrigins: []string{"https://tls.peet.ws/"}})
+
+	tok, ct0, ua := acc.Credentials()
+	body, _, status, err := c.doRequestWithBody(context.Background(), acc, acc.client, "GET", echoURL, twitterHeaders(tok, ct0, ua), nil)
+	require.NoError(t, err, "echo service unreachable")
+	require.Equal(t, 200, status)
+	viaJar := parseSeen(t, body)
+
+	control := send(t, liveClient(t, p), wireChrome, "GET", echoURL, twitterHeaders(tok, ct0, ua), "")
+	t.Logf("jar:     %v\ncontrol: %v", viaJar.names, control.names)
+	assert.Contains(t, viaJar.names, "cookie")
+	// doRequestWithBody also drops the content-type of a bodyless REST GET and
+	// adds the transaction id; neither is what is compared here.
+	assert.Equal(t, without(control.names, "content-type"), without(viaJar.names, "x-client-transaction-id"))
 }
