@@ -38,6 +38,7 @@ type Client struct {
 	alertHook            func(topic string, payload any)                  // proxy/pool event sink (PoolAlertHook or slog fallback)
 	metrics              *clientMetrics                                   // OpenTelemetry instruments (nil-safe)
 	poolGaugeReg         metric.Registration                              // pool.accounts callback; unregistered by Close (guarded by mu)
+	handles              handleCache                                      // user id -> handle seen in responses; feeds the profile referer of UserTweets
 	owned                *clientSet                                       // every BrowserClient this Client built; Close releases their idle connections (nil-safe)
 	warmDoerOverride     warmDoer                                         // test seam: replaces the account client for xtid warm-page fetches
 	qid                  *queryid.Refresher                               // nil = the process-wide queryId refresher; only tests set it
@@ -741,7 +742,8 @@ func (c *Client) doRequestWithBody(ctx context.Context, acc *Account, bc *stealt
 	}
 
 	currentCall(ctx).ready()
-	return bc.DoWithHeaderOrderCtx(ctx, method, urlStr, headers, body, c.wireOrderFor(acc, bc, method, urlStr, headers))
+	order := c.wireFor(acc, bc).shapeFor(method, urlStr, headers, c.pageSourceFor(acc, bc, method, body))
+	return bc.DoWithHeaderOrderCtx(ctx, method, urlStr, headers, body, order)
 }
 
 // xpffFor returns the generator for a request: the account's own when the
@@ -922,4 +924,55 @@ func buildAccountPacer(cfg ClientConfig) *ratelimit.KeyedPacer {
 		return nil
 	}
 	return ratelimit.NewKeyedPacer(cfg.AccountPaceMin, cfg.AccountPaceRandom)
+}
+
+// pageSourceFor is what the referer of a request may use besides its URL: the
+// known handles and, for a POST on a current identity, the JSON body. The body
+// is read without consuming it (the transport reads it next); only a
+// *bytes.Reader, which is what the pool paths send, is peeked.
+func (c *Client) pageSourceFor(acc *Account, bc *stealth.BrowserClient, method string, body io.Reader) pageSource {
+	src := pageSource{handle: c.handles.get}
+	if method != http.MethodPost || c.wireFor(acc, bc) != wireChrome {
+		return src
+	}
+	if br, ok := body.(*bytes.Reader); ok && br.Size() <= maxPeekBody {
+		buf := make([]byte, br.Size())
+		if n, _ := br.ReadAt(buf, 0); n == len(buf) {
+			src.body = buf
+		}
+	}
+	return src
+}
+
+// maxPeekBody bounds the request body inspected for the referer.
+const maxPeekBody = 1 << 20
+
+// handleCache remembers the handle of the users a Client has looked up, by id.
+// It is bounded: when full it starts over, which only costs a fallback referer.
+type handleCache struct {
+	mu sync.Mutex
+	m  map[string]string
+}
+
+const handleCacheMax = 4096
+
+func (h *handleCache) put(id, handle string) {
+	if id == "" || handle == "" {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.m == nil || len(h.m) >= handleCacheMax {
+		h.m = make(map[string]string)
+	}
+	h.m[id] = handle
+}
+
+func (h *handleCache) get(id string) string {
+	if id == "" {
+		return ""
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.m[id]
 }

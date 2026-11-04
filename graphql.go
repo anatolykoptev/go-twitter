@@ -25,7 +25,11 @@ func (c *Client) GetUserByScreenName(ctx context.Context, handle string) (*Twitt
 	if err != nil {
 		return nil, fmt.Errorf("UserByScreenName: %w", err)
 	}
-	return parse.UserByScreenName(body)
+	user, err := parse.UserByScreenName(body)
+	if err == nil && user != nil {
+		c.handles.put(user.ID, user.Handle)
+	}
+	return user, err
 }
 
 // GetFollowers fetches followers for a user (paginated).

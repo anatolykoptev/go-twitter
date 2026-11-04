@@ -114,10 +114,23 @@ func (c *Client) wireOrderFor(acc *Account, bc *stealth.BrowserClient, method, r
 	return c.wireFor(acc, bc).shape(method, rawURL, headers)
 }
 
+// pageSource is what the referer of a request can be derived from beyond its
+// URL: the request body (a GraphQL POST carries its variables there) and the
+// handles this Client has seen for user ids.
+type pageSource struct {
+	body   []byte                     // the JSON body of a POST, nil otherwise
+	handle func(userID string) string // the known handle of a user id, "" if unknown; may be nil
+}
+
 // shape prepares headers for a request of this generation and returns the order
 // they go out in. The builders (twitterHeaders, guestHeaders, loginFlowHeaders)
 // keep producing the v0.8.6 set; the legacy generation sends it untouched.
 func (g wireGen) shape(method, rawURL string, h map[string]string) []string {
+	return g.shapeFor(method, rawURL, h, pageSource{})
+}
+
+// shapeFor is shape with the extra inputs a page referer can use.
+func (g wireGen) shapeFor(method, rawURL string, h map[string]string, src pageSource) []string {
 	if g != wireChrome {
 		return twitterHeaderOrder
 	}
@@ -137,7 +150,7 @@ func (g wireGen) shape(method, rawURL string, h map[string]string) []string {
 	// referer is that page; a request to another host (api.x.com, ...) sends the
 	// site root, as the browser does.
 	if site == "same-origin" {
-		h["referer"] = pageReferer(rawURL)
+		h["referer"] = pageReferer(rawURL, src)
 	} else if h["referer"] == "" {
 		h["referer"] = "https://x.com/"
 	}
@@ -155,14 +168,18 @@ func (g wireGen) shape(method, rawURL string, h map[string]string) []string {
 	return chromeHeaderOrder
 }
 
+// maxRefererBytes is the longest referer Chrome sends in full; a longer one is
+// cut to the origin ("https://x.com/"), the policy the browser applies.
+const maxRefererBytes = 4096
+
 // pageReferer is the x.com page a user would be on when the web client makes
 // the request to rawURL: one table keyed by GraphQL operation name, with the
-// operation's variables (the URL's `variables` parameter) filling in the page.
-// Anything it cannot place (an operation not listed, a missing or malformed
-// variable, a request whose variables ride in a POST body, a REST path) falls
-// back to the home timeline. UserTweets carries only a user id, not the handle
-// the profile URL needs, so it falls back too.
-func pageReferer(rawURL string) string {
+// operation's variables (the URL's `variables` parameter, or the "variables" of
+// a POST body) filling in the page. Anything it cannot place (an operation not
+// listed, a missing or malformed variable, a REST path, a user id whose handle
+// is not known) falls back to the home timeline. A referer longer than
+// maxRefererBytes becomes the site root.
+func pageReferer(rawURL string, src pageSource) string {
 	const home = "https://x.com/home"
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -181,11 +198,41 @@ func pageReferer(rawURL string) string {
 		if json.Unmarshal([]byte(v), &vars) != nil {
 			return home
 		}
+	} else if len(src.body) > 0 {
+		var env struct {
+			Variables map[string]any `json:"variables"`
+		}
+		if json.Unmarshal(src.body, &env) != nil {
+			return home
+		}
+		vars = env.Variables
 	}
-	if p := page(vars); p != "" {
-		return p
+	p := page(vars, src)
+	if p == "" {
+		return home
 	}
-	return home
+	if len(p) > maxRefererBytes {
+		return "https://x.com/"
+	}
+	return p
+}
+
+// encodeURIComponent is the JavaScript function of that name: every byte except
+// A-Z a-z 0-9 - _ . ! ~ * ' ( ) is percent-encoded (a space is %20, not +).
+func encodeURIComponent(s string) string {
+	const hex = "0123456789ABCDEF"
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.IndexByte("-_.!~*'()", c) >= 0 {
+			b.WriteByte(c)
+			continue
+		}
+		b.WriteByte('%')
+		b.WriteByte(hex[c>>4])
+		b.WriteByte(hex[c&15])
+	}
+	return b.String()
 }
 
 // varString is vars[key] when it is a non-empty string.
@@ -196,32 +243,43 @@ func varString(vars map[string]any, key string) string {
 
 // operationPages maps a GraphQL operation to the page the web client issues it
 // from. A func returns "" when the variable it needs is absent.
-var operationPages = map[string]func(vars map[string]any) string{
-	"HomeTimeline":       func(map[string]any) string { return "https://x.com/home" },
-	"HomeLatestTimeline": func(map[string]any) string { return "https://x.com/home" },
-	"UserByScreenName": func(v map[string]any) string {
+var operationPages = map[string]func(vars map[string]any, src pageSource) string{
+	"HomeTimeline":       func(map[string]any, pageSource) string { return "https://x.com/home" },
+	"HomeLatestTimeline": func(map[string]any, pageSource) string { return "https://x.com/home" },
+	"UserByScreenName": func(v map[string]any, src pageSource) string {
 		if h := varString(v, "screen_name"); h != "" {
 			return "https://x.com/" + url.PathEscape(h)
 		}
 		return ""
 	},
-	"SearchTimeline": func(v map[string]any) string {
+	"SearchTimeline": func(v map[string]any, src pageSource) string {
 		if q := varString(v, "rawQuery"); q != "" {
-			return "https://x.com/search?q=" + url.QueryEscape(q)
+			return "https://x.com/search?q=" + encodeURIComponent(q)
+		}
+		return ""
+	},
+	// The profile URL needs the handle, which the request carries only as a user
+	// id: it is known when this Client has seen the user (GetUserByScreenName).
+	"UserTweets": func(v map[string]any, src pageSource) string {
+		if src.handle == nil {
+			return ""
+		}
+		if h := src.handle(varString(v, "userId")); h != "" {
+			return "https://x.com/" + url.PathEscape(h)
 		}
 		return ""
 	},
 	// The handle is not known here; x.com/i/status/<id> is the page X itself
 	// redirects to the canonical URL from.
-	"TweetDetail": func(v map[string]any) string {
+	"TweetDetail": func(v map[string]any, src pageSource) string {
 		if id := varString(v, "focalTweetId"); id != "" {
 			return "https://x.com/i/status/" + url.PathEscape(id)
 		}
 		return ""
 	},
-	"tweetNotificationsQuery": func(map[string]any) string { return "https://x.com/notifications" },
-	"Bookmarks":               func(map[string]any) string { return "https://x.com/i/bookmarks" },
-	"ListLatestTweetsTimeline": func(v map[string]any) string {
+	"tweetNotificationsQuery": func(map[string]any, pageSource) string { return "https://x.com/notifications" },
+	"Bookmarks":               func(map[string]any, pageSource) string { return "https://x.com/i/bookmarks" },
+	"ListLatestTweetsTimeline": func(v map[string]any, src pageSource) string {
 		if id := varString(v, "listId"); id != "" {
 			return "https://x.com/i/lists/" + url.PathEscape(id)
 		}
