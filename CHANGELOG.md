@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.4](https://github.com/anatolykoptev/go-twitter/compare/v0.8.3...v0.8.4) (2026-11-04)
+
+
+### Performance
+
+* bound the xtid cold start by the request ctx; send usage reports in the background ([#160](https://github.com/anatolykoptev/go-twitter/issues/160)) ([be70695](https://github.com/anatolykoptev/go-twitter/commit/be70695e50265bf7160df545503e3d9ba982e996))
+* skip retry backoff for account-scoped failures; prefer pace-ready accounts ([#159](https://github.com/anatolykoptev/go-twitter/issues/159)) ([5bbc9a6](https://github.com/anatolykoptev/go-twitter/commit/5bbc9a69645adac05c0bac771d773eac19951cc4))
+
 ## [0.8.3](https://github.com/anatolykoptev/go-twitter/compare/v0.8.2...v0.8.3) (2026-11-04)
 
 
