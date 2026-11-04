@@ -407,10 +407,12 @@ func (c *Client) doMediaRequest(ctx context.Context, acc *Account, method, urlSt
 				continue
 			case errAuthExpired:
 				slog.Warn("UploadMedia: auth expired, attempting relogin", slog.String("user", acc.Username))
-				if reErr := c.relogin(acc); reErr != nil {
+				if reErr := c.relogin(ctx, acc, authTok); reErr != nil {
 					if ctxErr := ctx.Err(); ctxErr != nil {
 						return nil, ctxErr // caller gone: the relogin verdict is not an account charge
 					}
+					slog.Warn("UploadMedia: relogin failed, soft-deactivating", slog.String("user", acc.Username), slog.Any("error", reErr))
+					c.benchFailedRelogin(acc, reErr)
 					lastErr = fmt.Errorf("relogin failed: %w", reErr)
 					continue
 				}
@@ -521,6 +523,9 @@ func isUploadOK(status int) bool {
 // success; (nil, false) when recovery failed — the caller sets lastErr and
 // `continue`s.
 func (c *Client) recoverCSRFMedia(ctx context.Context, acc *Account, bc *stealth.BrowserClient, method, urlStr string, payload []byte, contentType string, respHdrs map[string]string, lastErr *error) ([]byte, bool) {
+	// The token this request failed with: a relogin another request already
+	// completed since then makes this one unnecessary.
+	failedTok, _, _ := acc.Credentials()
 	if serverCT0, ok := csrfRecoveryCT0(respHdrs); ok {
 		slog.Warn("UploadMedia: CSRF error 353, adopting server ct0", slog.String("user", acc.Username))
 		acc.SetCT0(serverCT0)
@@ -549,11 +554,12 @@ func (c *Client) recoverCSRFMedia(ctx context.Context, acc *Account, bc *stealth
 	if ctx.Err() != nil {
 		return nil, false // caller gone: no relogin, no charge on its way out
 	}
-	if reErr := c.relogin(acc); reErr != nil {
+	if reErr := c.relogin(ctx, acc, failedTok); reErr != nil {
 		if ctx.Err() != nil {
 			return nil, false // relogin aborted by the caller's own ctx
 		}
 		slog.Warn("UploadMedia: relogin after CSRF failed", slog.String("user", acc.Username), slog.Any("error", reErr))
+		c.benchFailedRelogin(acc, reErr)
 		*lastErr = fmt.Errorf("relogin failed: %w", reErr)
 		return nil, false
 	}

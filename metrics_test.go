@@ -512,7 +512,7 @@ func TestMetrics_RelogAndProxyCounters(t *testing.T) {
 	}
 
 	c.markProxyDown(acc)
-	require.Error(t, c.relogin(acc))
+	require.Error(t, c.relogin(context.Background(), acc, ""))
 
 	var rm metricdata.ResourceMetrics
 	require.NoError(t, reader.Collect(context.Background(), &rm))

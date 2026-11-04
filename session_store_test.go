@@ -219,7 +219,7 @@ func TestSessionStore_FailedReloginKeepsStoredSession(t *testing.T) {
 	acc := &Account{Username: "u4", Password: "pw"}
 
 	acc.client = c.client // NewClient gives every account one; the shared fake stands in
-	require.Error(t, c.relogin(acc))
+	require.Error(t, c.relogin(context.Background(), acc, ""))
 	assert.Empty(t, rec.deletes, "a failed relogin must not delete the stored session")
 	assert.Contains(t, rec.data, "u4")
 }
@@ -308,7 +308,7 @@ func TestSessionStore_ReloginNeverLoads(t *testing.T) {
 	acc := &Account{Username: "u", Password: "pw"}
 
 	acc.client = c.client // NewClient gives every account one; the shared fake stands in
-	_ = c.relogin(acc)
+	_ = c.relogin(context.Background(), acc, "")
 	assert.Empty(t, rec.ops, "relogin touched the store before a replacement existed: %v", rec.ops)
 	tok, _, _ := acc.Credentials()
 	assert.NotEqual(t, "old", tok, "relogin adopted the stale session")
@@ -321,7 +321,7 @@ func TestSessionStore_LeasedReloginMakesZeroStoreCalls(t *testing.T) {
 	acc := &Account{Username: "leased", Password: "pw", AuthToken: "t", CT0: "c", credsAuthoritative: true}
 
 	acc.client = c.client // NewClient gives every account one; the shared fake stands in
-	_ = c.relogin(acc)
+	_ = c.relogin(context.Background(), acc, "")
 	assert.Empty(t, rec.ops, "leased account relogin touched the store: %v", rec.ops)
 }
 

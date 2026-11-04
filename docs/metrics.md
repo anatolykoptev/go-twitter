@@ -70,7 +70,7 @@ instrumented.
 | `blocked` | code 161 |
 | `forbidden` | HTTP 403 without a recognized code |
 | `internal` | code 131 (recorded as `internal` even when the client then accepts usable data) |
-| `not_found` | HTTP 404 — the historical dead-route label (an endpoint fault under the hood: never charged to the account); also an errors-only 2xx carrying a deterministic-miss marker (`ErrNotFound`) |
+| `not_found` | two populations under one label: HTTP 404 — the historical dead-route label (an endpoint fault under the hood: never charged to the account) — and an errors-only 2xx carrying a deterministic-miss marker (`ErrNotFound`, an absent resource). It is no longer the raw 404 rate; an alert on it counts both |
 | `endpoint` | HTTP 400 with a GraphQL-shaped `errors` body — an endpoint-wide fault (stale features / request shape); never charged to the account |
 | `bad_request` | HTTP 400 with a GraphQL error entry carrying code `214` (top-level or inside `extensions`) — a deterministic caller-input rejection (`ErrBadRequest`): never retried, rotated or charged to the account, and not an endpoint fault |
 | `unexpected` | an errors-only 2xx whose entries match no known class and no miss marker (`ErrUnexpectedResponse`): X answered with errors the library does not recognise — terminal, never charged to the account, and not an endpoint fault |
