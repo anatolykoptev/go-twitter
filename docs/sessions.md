@@ -1,6 +1,6 @@
 # Session storage
 
-Sessions (`auth_token` + `ct0`) are loaded at startup, re-saved whenever x.com rotates `ct0`, and deleted on relogin. By default they live in `<SessionDir>/<username>.json` (`FileSessionStore`, atomic writes, 0600). Set `ClientConfig.SessionStore` to keep them elsewhere, for example in the database of your credential service:
+Sessions (`auth_token` + `ct0`) are loaded at startup, re-saved whenever x.com rotates `ct0`, and replaced when a relogin succeeds. A failed relogin leaves the stored session and the account's credentials as they were; relogin never reads the stored session. By default they live in `<SessionDir>/<username>.json` (`FileSessionStore`, atomic writes, 0600). Set `ClientConfig.SessionStore` to keep them elsewhere, for example in the database of your credential service:
 
 ```go
 type dbStore struct{ db *sql.DB }

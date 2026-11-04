@@ -43,7 +43,7 @@ Errors returned by the client wrap `*twitter.APIError` (`Status`, `Codes`, `Mess
 
 ## Relogin circuit breaker
 
-Relogin clears an account's credentials before logging in again, so a login outage can destroy a still-valid session. To prevent that, `NewClient` installs a per-account breaker by default: after 3 consecutive failed relogins for an account, further relogins for it are refused for 30 minutes, and the account's credentials are left intact. A successful relogin resets the count. A refused relogin surfaces as a `relogin blocked` error on that attempt.
+Relogin logs in on a separate candidate and replaces the account's credentials only when the login succeeds, so a failed relogin leaves them intact. To keep a login outage from turning into a stream of login attempts, `NewClient` installs a per-account breaker by default: after 3 consecutive failed relogins for an account, further relogins for it are refused for 30 minutes. A successful relogin resets the count. A refused relogin surfaces as a `relogin blocked` error on that attempt.
 
 To opt out and always relogin, install an always-allow gate after `NewClient`:
 
