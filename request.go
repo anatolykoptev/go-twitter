@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -619,6 +620,9 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 				prevEndpointFault = apiErr.Class
 				lastErr = apiErr
 				continue
+			case errAutomated:
+				lastErr = c.benchAutomated(acc, endpoint, status, body, respHdrs)
+				continue
 			default:
 				acc.RecordFailure()
 				apiErr := newAPIError(status, body, respHdrs)
@@ -853,6 +857,10 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 			}
 			c.pool.SoftDeactivate(acc, c.cfg.BanCooldown)
 			lastErr = &APIError{Status: 200, Class: errLocked, Codes: extractErrorCodes(body), Message: "account locked"}
+			continue
+
+		case errAutomated:
+			lastErr = c.benchAutomated(acc, endpoint, http.StatusOK, body, respHdrs)
 			continue
 
 		default: // errBlocked, errNotAuthorized
@@ -1194,6 +1202,8 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 				apiErr := newAPIError(status, body, respHdrs)
 				apiErr.Message = fmt.Sprintf("%s HTTP %d: %s", endpoint, status, truncateBytes(body, 200))
 				return nil, apiErr
+			case errAutomated:
+				return nil, c.benchAutomated(acc, endpoint, status, body, respHdrs)
 			default:
 				acc.RecordFailure()
 				apiErr := newAPIError(status, body, respHdrs)
@@ -1282,6 +1292,10 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 			apiErr := newAPIError(200, body, respHdrs)
 			apiErr.Message = fmt.Sprintf("%s X-side error class %d: %s", endpoint, errClass, truncateBytes(body, 200))
 			return nil, apiErr
+		case errAutomated:
+			// A write is never replayed on another account; the verdict is
+			// final for this one.
+			return nil, c.benchAutomated(acc, endpoint, http.StatusOK, body, respHdrs)
 		default:
 			c.recordAPICall(endpoint, false, false)
 			acc.RecordFailure()
@@ -1416,6 +1430,8 @@ func (c *Client) postReloginFailure(acc *Account, endpoint string, status int, b
 		c.pool.DeactivateItem(acc)
 	case cls == errLocked || cls == errBanned:
 		c.pool.SoftDeactivate(acc, c.cfg.BanCooldown)
+	case cls == errAutomated:
+		c.pool.SoftDeactivate(acc, automatedCooldown(c.cfg.BanCooldown))
 	case cls == errRateLimited:
 		acc.MarkEndpointRateLimited(endpoint, parseRateLimitReset(hdrs[xRateLimitReset]))
 	case cls == errNotFound || cls == errUnexpected:
@@ -1507,7 +1523,7 @@ func (c *Client) attributeTransportError(acc *Account, err error) {
 // account-scoped too, but it is a transport error and tracked by the caller.
 func accountScopedFailure(err error) bool {
 	switch failureClass(err) {
-	case errBanned, errRateLimited, errSuspended, errLocked, errCSRF, errAuthExpired, errBlocked, errNotAuthorized:
+	case errBanned, errRateLimited, errSuspended, errLocked, errCSRF, errAuthExpired, errBlocked, errNotAuthorized, errAutomated:
 		return true
 	}
 	return false

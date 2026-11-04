@@ -75,6 +75,7 @@ const (
 	OutcomeOverloaded  = "overloaded"
 	OutcomeBadRequest  = "bad_request"
 	OutcomeUnexpected  = "unexpected"
+	OutcomeAutomated   = "automated"
 	OutcomeTransport   = "transport"
 	OutcomeProxy       = "proxy"
 	OutcomeOther       = "other"

@@ -318,6 +318,8 @@ func outcomeForClass(c errorClass) string {
 		return telemetry.OutcomeNotFound
 	case errUnexpected:
 		return telemetry.OutcomeUnexpected
+	case errAutomated:
+		return telemetry.OutcomeAutomated
 	}
 	return telemetry.OutcomeOther
 }

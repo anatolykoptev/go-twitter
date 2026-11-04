@@ -64,12 +64,13 @@ instrumented.
 |---|---|
 | `ok` | 2xx, no error code in the body |
 | `rate_limited` | HTTP 429, or code 88 with `x-rate-limit-remaining` 0 or absent |
-| `auth` | code 32 / 179 / 219, or a bare 401 |
+| `auth` | code 32 / 37 / 179 / 219, or a bare 401 |
 | `csrf` | code 353 |
 | `banned` | code 88 with `x-rate-limit-remaining` > 0 (a declared ban; see the escalation note below) |
 | `suspended` | code 64 |
 | `locked` | code 326 |
 | `blocked` | code 161 |
+| `automated` | code 226 — X flagged the request as possibly automated; the account is benched for a cooldown no shorter than `BanCooldown` |
 | `forbidden` | HTTP 403 without a recognized code |
 | `internal` | code 131 (recorded as `internal` even when the client then accepts usable data) |
 | `not_found` | two populations under one label: HTTP 404 — the historical dead-route label (an endpoint fault under the hood: never charged to the account) — and an errors-only 2xx carrying a deterministic-miss marker (`ErrNotFound`, an absent resource). It is no longer the raw 404 rate; an alert on it counts both |
