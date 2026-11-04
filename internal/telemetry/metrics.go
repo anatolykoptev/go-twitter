@@ -33,6 +33,7 @@ const (
 	MetricRelogins            = "twitter.client.relogins"
 	MetricProxyFailures       = "twitter.client.proxy.failures"
 	MetricProxyClientFailures = "twitter.client.proxy.client_failures"
+	MetricAutomatedSuspect    = "twitter.client.automated.shared_suspect"
 	MetricRateLimitRemain     = "twitter.client.ratelimit.remaining"
 	MetricRateLimitLimit      = "twitter.client.ratelimit.limit"
 	MetricRateLimitHolds      = "twitter.client.ratelimit.holds"
@@ -77,6 +78,7 @@ const (
 	OutcomeOverloaded  = "overloaded"
 	OutcomeBadRequest  = "bad_request"
 	OutcomeUnexpected  = "unexpected"
+	OutcomeAutomated   = "automated"
 	OutcomeTransport   = "transport"
 	OutcomeProxy       = "proxy"
 	OutcomeOther       = "other"
@@ -132,6 +134,7 @@ type Metrics struct {
 	relogins        metric.Int64Counter
 	proxyFailures   metric.Int64Counter
 	proxyClientFail metric.Int64Counter
+	automatedSusp   metric.Int64Counter
 	rlRemaining     metric.Int64Histogram
 	rlLimit         metric.Int64Histogram
 	rlHolds         metric.Int64Counter
@@ -218,6 +221,12 @@ func New(mp metric.MeterProvider) *Metrics {
 		metric.WithDescription("Proxy-layer failures that put an account's proxy into backoff.")); err != nil {
 		fail(MetricProxyFailures, err)
 		m.proxyFailures = noop.Int64Counter{}
+	}
+	if m.automatedSusp, err = meter.Int64Counter(MetricAutomatedSuspect,
+		metric.WithUnit("{signal}"),
+		metric.WithDescription("Times two or more distinct accounts answered code 226 (automation flagged) within 10 minutes: a shared cause is suspected.")); err != nil {
+		fail(MetricAutomatedSuspect, err)
+		m.automatedSusp = noop.Int64Counter{}
 	}
 	if m.proxyClientFail, err = meter.Int64Counter(MetricProxyClientFailures,
 		metric.WithUnit("{failure}"),
@@ -510,6 +519,15 @@ func (m *Metrics) RecordUsageReportDropped() {
 		return
 	}
 	m.reportsDropped.Add(context.Background(), 1)
+}
+
+// RecordAutomatedSharedSuspect counts one crossing of the shared-cause window
+// for code 226.
+func (m *Metrics) RecordAutomatedSharedSuspect() {
+	if m == nil {
+		return
+	}
+	m.automatedSusp.Add(context.Background(), 1)
 }
 
 func (m *Metrics) RecordProxyFailure() {

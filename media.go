@@ -441,6 +441,8 @@ func (c *Client) doMediaRequest(ctx context.Context, acc *Account, method, urlSt
 				apiErr := newAPIError(status, body, respHdrs)
 				apiErr.Message = fmt.Sprintf("%s HTTP %d: %s", epUploadMedia, status, truncateBytes(body, 200))
 				return nil, apiErr
+			case errAutomated:
+				return nil, c.benchAutomated(acc, epUploadMedia, status, body, respHdrs)
 			default:
 				acc.RecordFailure()
 				apiErr := newAPIError(status, body, respHdrs)
@@ -484,6 +486,10 @@ func (c *Client) doMediaRequest(ctx context.Context, acc *Account, method, urlSt
 			c.recordAPICall(epUploadMedia, false, false)
 			return nil, &APIError{Status: status, Codes: extractErrorCodes(body), Class: errorsOnlyClass(body),
 				Message: fmt.Sprintf("%s errors-only %d: %s", epUploadMedia, status, truncateBytes(body, 200))}
+		}
+		if cls == errAutomated {
+			c.recordAPICall(epUploadMedia, false, false)
+			return nil, c.benchAutomated(acc, epUploadMedia, status, body, respHdrs)
 		}
 		if cls != errNone {
 			c.recordAPICall(epUploadMedia, false, false)

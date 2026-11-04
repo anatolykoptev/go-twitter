@@ -32,6 +32,7 @@ type Client struct {
 	xtidFail             xtidFailureStreak // failure-streak state for the missing-header warning
 	xpffGen              *xpff.Generator
 	cfg                  ClientConfig
+	automated            automatedTracker                                 // sliding window of accounts that answered 226 (shared-cause signal)
 	reloginGate          AutoReloginGate                                  // nil = always allow
 	nonResponsiveBackoff pool.BackoffConfig                               // transient-failure backoff (base from cfg, x2, cap 30m)
 	accountPacer         *ratelimit.KeyedPacer                            // per-account human-pace spacing (keyed by account, nil = disabled)

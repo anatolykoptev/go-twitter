@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
+	"net/http"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -623,6 +624,9 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 				prevEndpointFault = apiErr.Class
 				lastErr = apiErr
 				continue
+			case errAutomated:
+				lastErr = c.benchAutomated(acc, endpoint, status, body, respHdrs)
+				continue
 			default:
 				acc.RecordFailure()
 				apiErr := newAPIError(status, body, respHdrs)
@@ -704,7 +708,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 		// 64 suspended, 88 banned/limited) riding alongside data must take its
 		// class arm below, never count as a healthy success. A 200 with errors
 		// and NO usable data still fails through the class switch below.
-		if partialSuccessClass(errClass) && hasResponseData(body) {
+		if partialSuccess(errClass, body) && hasResponseData(body) {
 			if newCT0 := extractCT0FromHeaders(respHdrs); newCT0 != "" && newCT0 != ct0 {
 				acc.SetCT0(newCT0)
 				authTok2, ct02, _ := acc.Credentials()
@@ -867,6 +871,11 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 			}
 			c.pool.SoftDeactivate(acc, c.cfg.BanCooldown)
 			lastErr = &APIError{Status: 200, Class: errLocked, Codes: extractErrorCodes(body), Message: "account locked"}
+			continue
+
+		case errAutomated:
+			c.recordAPICall(endpoint, false, false)
+			lastErr = c.benchAutomated(acc, endpoint, http.StatusOK, body, respHdrs)
 			continue
 
 		default: // errBlocked, errNotAuthorized
@@ -1210,6 +1219,8 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 				apiErr := newAPIError(status, body, respHdrs)
 				apiErr.Message = fmt.Sprintf("%s HTTP %d: %s", endpoint, status, truncateBytes(body, 200))
 				return nil, apiErr
+			case errAutomated:
+				return nil, c.benchAutomated(acc, endpoint, status, body, respHdrs)
 			default:
 				acc.RecordFailure()
 				apiErr := newAPIError(status, body, respHdrs)
@@ -1246,7 +1257,7 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 		// the same X-side-classes-only rule as doPoolRequest: account-dead
 		// verdicts (326, 64, 88) take their class arm below even with data.
 		// Errors with no usable data still fail through the class switch.
-		if partialSuccessClass(errClass) && hasResponseData(body) {
+		if partialSuccess(errClass, body) && hasResponseData(body) {
 			if newCT0 := extractCT0FromHeaders(respHdrs); newCT0 != "" && newCT0 != ct0 {
 				acc.SetCT0(newCT0)
 				authTok2, ct02, _ := acc.Credentials()
@@ -1304,6 +1315,11 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 			apiErr := newAPIError(200, body, respHdrs)
 			apiErr.Message = fmt.Sprintf("%s X-side error class %d: %s", endpoint, errClass, truncateBytes(body, 200))
 			return nil, apiErr
+		case errAutomated:
+			// A write is never replayed on another account; the verdict is
+			// final for this one.
+			c.recordAPICall(endpoint, false, false)
+			return nil, c.benchAutomated(acc, endpoint, http.StatusOK, body, respHdrs)
 		default:
 			c.recordAPICall(endpoint, false, false)
 			acc.RecordFailure()
@@ -1438,6 +1454,8 @@ func (c *Client) postReloginFailure(acc *Account, endpoint string, status int, b
 		c.pool.DeactivateItem(acc)
 	case cls == errLocked || cls == errBanned:
 		c.pool.SoftDeactivate(acc, c.cfg.BanCooldown)
+	case cls == errAutomated:
+		c.pool.SoftDeactivate(acc, c.automatedBenchFor(acc))
 	case cls == errRateLimited:
 		acc.MarkEndpointRateLimited(endpoint, parseRateLimitReset(hdrs[xRateLimitReset]))
 	case cls == errNotFound || cls == errUnexpected:
