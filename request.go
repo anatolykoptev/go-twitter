@@ -299,39 +299,81 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 	// the committed request shape, so it is skipped; errOverloaded keeps the
 	// bounded backoff because X shedding load may recover.
 	prevEndpointFault := errNone
+	// prevAcc is the account the previous attempt was served by; prevProxyFault
+	// records that it failed at its own per-account proxy (see skipBackoff).
+	var prevAcc *Account
+	prevProxyFault := false
 
 	// poolFilter is the eligibility check every pick this call shares:
 	// faulted accounts excluded, account usable for this endpoint NOW. It is
 	// consuming — tryAcquireFlight takes the in-flight slot and AllowRequest
 	// increments the per-endpoint counter — so it must only run on a real pick.
 	flightLimit := c.flightCap()
-	poolFilter := func(a *Account) bool {
-		if endpointFaulted[a.ID()] || a.proxyBackedOff() || !a.tryAcquireFlight(flightLimit) {
-			return false
-		}
-		// The minimum-interval check+stamp (Account.SetMinInterval) sits
-		// BEFORE the consuming AllowRequest, so an account refused for being
-		// too soon never spends rate-limit budget (#129); the in-flight slot
-		// is returned on that refusal.
-		rsv, ok := a.tryReserveInterval()
-		if !ok {
-			if flightLimit > 0 {
-				a.releaseFlight()
+	// paceHint is the upper bound of one pacer gap. It is 0 (feature off) when
+	// the client has no account pacer; otherwise accounts the pick reserved
+	// within the last paceHint are "pace-busy": the pacer may still hold them,
+	// so a request prefers an account that is certainly past its gap.
+	var paceHint time.Duration
+	if c.accountPacer != nil {
+		paceHint = c.cfg.AccountPaceMin + c.cfg.AccountPaceRandom
+	}
+	// newPoolFilter builds the eligibility check every pick this call shares:
+	// faulted accounts excluded, account usable for this endpoint NOW. It is
+	// consuming — tryAcquireFlight takes the in-flight slot and AllowRequest
+	// increments the per-endpoint counter — so it must only run on a real pick.
+	// requireReady additionally refuses a pace-busy account; that check is
+	// read-only and runs before anything is consumed, so a refusal has nothing
+	// to unwind. The preferred pass uses it; the pass that follows does not, so
+	// a pool whose every account is inside its gap still picks and the
+	// post-pick pacer waits (ctx-aware) instead of the call failing.
+	newPoolFilter := func(requireReady bool) func(*Account) bool {
+		return func(a *Account) bool {
+			if endpointFaulted[a.ID()] || a.proxyBackedOff() || (requireReady && a.paceBusy()) || !a.tryAcquireFlight(flightLimit) {
+				return false
 			}
-			return false
-		}
-		// The slot is taken BEFORE the consuming AllowRequest, so a refused
-		// slot never burns a rate-limit slot; a refused AllowRequest returns
-		// the slot it just took and the interval stamp (a pick that was not
-		// made must not delay the next one).
-		if !a.AllowRequest(endpoint) {
-			a.unreserveInterval(rsv)
-			if flightLimit > 0 {
-				a.releaseFlight()
+			// The minimum-interval check+stamp (Account.SetMinInterval) sits
+			// BEFORE the consuming AllowRequest, so an account refused for being
+			// too soon never spends rate-limit budget (#129); the in-flight slot
+			// is returned on that refusal.
+			rsv, ok := a.tryReserveInterval()
+			if !ok {
+				if flightLimit > 0 {
+					a.releaseFlight()
+				}
+				return false
 			}
-			return false
+			// The slot is taken BEFORE the consuming AllowRequest, so a refused
+			// slot never burns a rate-limit slot; a refused AllowRequest returns
+			// the slot it just took and the interval stamp (a pick that was not
+			// made must not delay the next one).
+			if !a.AllowRequest(endpoint) {
+				a.unreserveInterval(rsv)
+				if flightLimit > 0 {
+					a.releaseFlight()
+				}
+				return false
+			}
+			// Every consuming step passed: the pick is made. Reserve the pace
+			// window now (not after the pacer wait) so concurrent picks already
+			// see this account as busy.
+			if paceHint > 0 {
+				a.reservePace(paceHint)
+			}
+			return true
 		}
-		return true
+	}
+	poolFilter := newPoolFilter(false)
+	readyFilter := newPoolFilter(true)
+	// preferReady takes an account that is certainly past its pace gap, or nil
+	// when there is none (or pacing is off) and the regular pick must decide.
+	preferReady := func() *Account {
+		if paceHint <= 0 {
+			return nil
+		}
+		if a, err := c.pool.Next(readyFilter); err == nil {
+			return a
+		}
+		return nil
 	}
 	// canServe is the read-only twin of poolFilter for the backoff gate below:
 	// IsEndpointRateLimited reads the same limiter without consuming a slot.
@@ -391,7 +433,17 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 		// fast on pool.Next below and a normal pick enters nextAccountWithWait's
 		// own bounded wait, so sleeping ~1 s first only delays a decided
 		// outcome (e.g. an errOverloaded on a single-account pool).
-		if attempt > 0 && prevEndpointFault != errEndpoint && c.pool.Healthy(canServe) > 0 {
+		//
+		// The sleep is also skipped when the previous failure was a verdict
+		// about the serving account alone (accountScoped) and a DIFFERENT
+		// account can serve now: that account is unaffected by the verdict, and
+		// the per-account pacer still spaces it. X-side or shared failures keep
+		// the backoff — pacing the next attempt is what protects everyone then.
+		skipBackoff := false
+		if attempt > 0 && prevAcc != nil && (prevProxyFault || accountScopedFailure(lastErr)) {
+			skipBackoff = c.pool.Healthy(func(a *Account) bool { return a != prevAcc && canServe(a) }) > 0
+		}
+		if attempt > 0 && !skipBackoff && prevEndpointFault != errEndpoint && c.pool.Healthy(canServe) > 0 {
 			delay := stealth.DefaultBackoff.Duration(attempt)
 			select {
 			case <-time.After(delay):
@@ -407,7 +459,9 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 		var acc *Account
 		var accErr error
 
-		if requiresAuth(endpoint) && !rotateNow {
+		if acc = preferReady(); acc != nil {
+			// A pace-ready account was taken: no wait of any kind.
+		} else if requiresAuth(endpoint) && !rotateNow {
 			acc, accErr = c.nextAccountWithWait(ctx, endpoint, poolFilter, capWaitable, paceWaitable, false, waitDeadline)
 		} else {
 			acc, accErr = c.pool.Next(poolFilter)
@@ -432,6 +486,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 			lastErr = accErr
 			break
 		}
+		prevAcc, prevProxyFault = acc, false
 		heldAcc = acc // the pick consumed this account's in-flight slot inside the filter
 		ct.picked(acc.Proxy != "")
 
@@ -444,6 +499,9 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 		if c.accountPacer != nil {
 			if err := c.accountPacer.Wait(ctx, acc.ID()); err != nil {
 				return nil, nil, err
+			}
+			if paceHint > 0 {
+				acc.reservePace(paceHint) // the grant may have come after a wait: restart the window from it
 			}
 		}
 		ct.paced()
@@ -473,6 +531,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 				return nil, nil, ctxErr
 			}
 			c.attributeTransportError(acc, err)
+			prevProxyFault = acc.Proxy != "" && isProxyError(err)
 			lastErr = err
 			continue
 		}
@@ -1396,6 +1455,26 @@ func (c *Client) attributeTransportError(acc *Account, err error) {
 	} else {
 		acc.RecordFailure()
 	}
+}
+
+// accountScopedFailure reports whether err is a verdict about the serving
+// account alone, so another account is unaffected by it: rate limit (429 /
+// code 88), a banned, suspended or locked account, CSRF or expired auth, and
+// the blocked / not-authorized classes (the loop benches the account for
+// those). Everything else — overload (5xx, LoadShed), internal 131, endpoint
+// faults, plain 403, unrecognised or non-API errors — says something about X
+// or the shared request, not about the account. A per-account proxy failure is
+// account-scoped too, but it is a transport error and tracked by the caller.
+func accountScopedFailure(err error) bool {
+	var ae *APIError
+	if !errors.As(err, &ae) {
+		return false
+	}
+	switch ae.Class {
+	case errBanned, errRateLimited, errSuspended, errLocked, errCSRF, errAuthExpired, errBlocked, errNotAuthorized:
+		return true
+	}
+	return false
 }
 
 // markProxyDown applies exponential backoff for proxy failures and emits a
