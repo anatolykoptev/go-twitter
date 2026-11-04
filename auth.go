@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	stealth "github.com/anatolykoptev/go-stealth"
@@ -27,22 +28,76 @@ type reloginOutcomeRecorder interface {
 	RecordSuccess(username string)
 }
 
-// relogin replaces the account's credentials with a fresh login. The gate is
-// consulted BEFORE anything else, so an OPEN breaker neither touches a
-// still-valid session nor hammers the login endpoint.
+// reloginFlight is one in-progress relogin of one account. Callers that arrive
+// while it runs park on done and take its outcome (err, written before done is
+// closed).
+type reloginFlight struct {
+	done    chan struct{}
+	err     error
+	waiters atomic.Int32
+}
+
+// relogin replaces the account's credentials with a fresh login, single-flight
+// per account: the first caller (the leader) runs the login; callers that
+// arrive while it is in progress wait for its outcome and use it, so N
+// requests that hit code 32 on one account cost one login and one gate/breaker
+// outcome, and the in-memory credentials and the stored session cannot diverge
+// between two concurrent logins. A waiter honours ctx: when it ends the waiter
+// returns ctx.Err() and the flight carries on for the others. The login itself
+// is not bound to any caller's ctx (it has its own timeout), so one caller
+// giving up never fails the relogin the others share.
+//
+// A caller that arrives after the flight finished starts a new one: it cannot
+// know whether the token its request failed with is the one the finished
+// flight replaced.
+func (c *Client) relogin(ctx context.Context, acc *Account) error {
+	c.reloginMu.Lock()
+	if f, ok := c.reloginFlights[acc]; ok {
+		f.waiters.Add(1)
+		c.reloginMu.Unlock()
+		select {
+		case <-f.done:
+			return f.err
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	f := &reloginFlight{done: make(chan struct{})}
+	if c.reloginFlights == nil {
+		c.reloginFlights = make(map[*Account]*reloginFlight)
+	}
+	c.reloginFlights[acc] = f
+	c.reloginMu.Unlock()
+
+	// Deferred so a panic in the login cannot leave waiters parked forever.
+	defer func() {
+		c.reloginMu.Lock()
+		delete(c.reloginFlights, acc)
+		c.reloginMu.Unlock()
+		close(f.done)
+	}()
+	f.err = c.doRelogin(acc)
+	return f.err
+}
+
+// doRelogin is one relogin attempt (see relogin for the single-flight wrapper).
+// The gate is consulted BEFORE anything else, so an OPEN breaker neither
+// touches a still-valid session nor hammers the login endpoint.
 //
 // The account's current credentials and stored session are kept until a
 // replacement is in hand: the login runs on a candidate holding the identity
 // (username, password, TOTP seed) but no tokens, and only its success replaces
 // the account's tokens. A failed attempt — no password configured, a login
 // challenge, a network error — leaves the account and the store exactly as they
-// were; callers bench the account on failure, so a kept token is not kept in
-// rotation.
+// were. The account then keeps its old token, so every caller that sees this
+// error benches the account (SoftDeactivate for AuthCooldown) to keep it out of
+// rotation; the relogin itself does not.
 //
 // The store is never read here (skipStore): the stored entry still holds the
 // token that just failed, so a reload would adopt it. A successful login
-// overwrites that entry; if the overwrite fails the stale entry is dropped.
-func (c *Client) relogin(acc *Account) error {
+// overwrites that entry; if the overwrite fails the stale entry is dropped
+// (see establishCredentials).
+func (c *Client) doRelogin(acc *Account) error {
 	if c.reloginGate != nil {
 		if ok, reason := c.reloginGate.Allowed(context.Background(), acc.Username); !ok {
 			slog.Warn("twitter: auto-relogin blocked by gate",
@@ -155,7 +210,7 @@ func (c *Client) establishCredentials(acc *Account, client *stealth.BrowserClien
 	}
 
 	if err := c.saveSession(acc, acc.AuthToken, acc.CT0); err != nil && skipStore {
-		_ = c.deleteSession(acc)
+		c.dropStaleSession(acc, err)
 	}
 	return nil
 }

@@ -35,6 +35,9 @@ type reloginJourney struct {
 	// request carrying reloginNewTok — the verdict a post-relogin retry meets
 	// (S3 in silent_failures_test.go answers suspended).
 	answerAuthed func(w http.ResponseWriter, r *http.Request)
+	// pre, when set, sees every GraphQL-host request before the token check;
+	// returning true means it answered the request itself.
+	pre func(w http.ResponseWriter, r *http.Request) bool
 }
 
 // oneConnListener hands a single, already-accepted connection to http.Serve.
@@ -94,6 +97,9 @@ func (j *reloginJourney) handler(w http.ResponseWriter, r *http.Request) {
 	}
 	if j.gqlHits != nil {
 		j.gqlHits.Add(1)
+	}
+	if j.pre != nil && j.pre(w, r) {
+		return
 	}
 	if !strings.Contains(r.Header.Get("Cookie"), "auth_token="+reloginNewTok) {
 		w.WriteHeader(http.StatusUnauthorized)

@@ -407,10 +407,12 @@ func (c *Client) doMediaRequest(ctx context.Context, acc *Account, method, urlSt
 				continue
 			case errAuthExpired:
 				slog.Warn("UploadMedia: auth expired, attempting relogin", slog.String("user", acc.Username))
-				if reErr := c.relogin(acc); reErr != nil {
+				if reErr := c.relogin(ctx, acc); reErr != nil {
 					if ctxErr := ctx.Err(); ctxErr != nil {
 						return nil, ctxErr // caller gone: the relogin verdict is not an account charge
 					}
+					slog.Warn("UploadMedia: relogin failed, soft-deactivating", slog.String("user", acc.Username), slog.Any("error", reErr))
+					c.pool.SoftDeactivate(acc, c.cfg.AuthCooldown)
 					lastErr = fmt.Errorf("relogin failed: %w", reErr)
 					continue
 				}
@@ -549,11 +551,12 @@ func (c *Client) recoverCSRFMedia(ctx context.Context, acc *Account, bc *stealth
 	if ctx.Err() != nil {
 		return nil, false // caller gone: no relogin, no charge on its way out
 	}
-	if reErr := c.relogin(acc); reErr != nil {
+	if reErr := c.relogin(ctx, acc); reErr != nil {
 		if ctx.Err() != nil {
 			return nil, false // relogin aborted by the caller's own ctx
 		}
 		slog.Warn("UploadMedia: relogin after CSRF failed", slog.String("user", acc.Username), slog.Any("error", reErr))
+		c.pool.SoftDeactivate(acc, c.cfg.AuthCooldown)
 		*lastErr = fmt.Errorf("relogin failed: %w", reErr)
 		return nil, false
 	}

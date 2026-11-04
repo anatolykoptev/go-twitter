@@ -64,7 +64,7 @@ const (
 	errLocked                   // 326 — account locked (captcha needed)
 	errCSRF                     // 353 — csrf token mismatch
 	errAuthExpired              // 32 — could not authenticate
-	errBlocked                  // 161 — blocked from performing action
+	errBlocked                  // 161, 185, 226 — the serving account is blocked from performing the action
 	errNotAuthorized            // 179, 219 — not authorized
 	errInternal                 // 131 — Twitter internal error
 	errForbidden                // 403 — forbidden (no recognized error code)
@@ -152,7 +152,7 @@ func classifyError(body []byte, hdrs map[string]string) errorClass {
 			return errCSRF
 		case 32:
 			return errAuthExpired
-		case 161:
+		case 161, 185, 226:
 			return errBlocked
 		case 179, 219:
 			return errNotAuthorized
@@ -418,7 +418,7 @@ func IsAuthExpired(err error) bool {
 	return false
 }
 
-// IsBlocked reports a blocked-from-action condition (code 161).
+// IsBlocked reports a blocked-from-action condition (codes 161, 185, 226).
 func IsBlocked(err error) bool {
 	var ae *APIError
 	if errors.As(err, &ae) {
