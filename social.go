@@ -291,6 +291,15 @@ func tryWithAccount[T any](ctx context.Context, sc *social.Client, op string, fn
 		credsAuthoritative: true, // freshly leased: a stale session file must not override them
 	}
 
+	// The identity the service presents this session as is applied before any
+	// client exists, so the session never reaches X under a browser the service
+	// did not state. An unusable identity ends the attempt without a usage
+	// report: the credential is not at fault (the service has no neutral
+	// status), and the retry loop leases the next account.
+	if err := applyLeaseIdentity(acc, creds.Identity); err != nil {
+		return zero, fmt.Errorf("%s: %w", acc.Username, err)
+	}
+
 	// report sends the usage verdict together with the last rate-limit window
 	// this lease observed (op's endpoint when seen, else the latest endpoint),
 	// so the credential service can steer later leases by endpoint budget. It

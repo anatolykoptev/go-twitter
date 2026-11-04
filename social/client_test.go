@@ -185,3 +185,33 @@ func TestReportUsageWithRateLimit_Body(t *testing.T) {
 		})
 	}
 }
+
+// L5 — the lease's identity object is pinned against a literal body, so a
+// renamed JSON field breaks here instead of silently dropping the identity.
+func TestAcquireAccount_DecodesIdentityFromLiteralBody(t *testing.T) {
+	const body = `{"id":"acc-1","credentials":{"username":"u"},"proxy":"","expires_in":300,"read_only":false,
+"identity":{"mode":"legacy","tls_profile":"chrome_131","user_agent":"Mozilla/5.0 (X11) Chrome/131","browser":"chrome","os":"windows"}}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(body))
+	}))
+	defer srv.Close()
+
+	creds, err := NewClient(srv.URL, "t", "c").AcquireAccount(context.Background(), "twitter")
+	require.NoError(t, err)
+	require.NotNil(t, creds.Identity)
+	assert.Equal(t, Identity{
+		Mode: "legacy", TLSProfile: "chrome_131", UserAgent: "Mozilla/5.0 (X11) Chrome/131", Browser: "chrome", OS: "windows",
+	}, *creds.Identity)
+}
+
+func TestAcquireAccount_NoIdentityObjectDecodesNil(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"id":"acc-1","credentials":{"username":"u"},"expires_in":300}`))
+	}))
+	defer srv.Close()
+
+	creds, err := NewClient(srv.URL, "t", "c").AcquireAccount(context.Background(), "twitter")
+	require.NoError(t, err)
+	assert.Nil(t, creds.Identity)
+	assert.True(t, creds.Identity.IsZero())
+}
