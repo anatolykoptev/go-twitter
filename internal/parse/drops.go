@@ -16,13 +16,29 @@ const (
 	DropUnhandledType = "unhandled_type"
 	// DropTombstone: a deleted or unavailable tweet (TweetTombstone and the like).
 	DropTombstone = "tombstone"
+	// DropBlankText is NOT a drop: the tweet is still returned. It marks a
+	// tweet whose text is empty in every location and that carries no media,
+	// card, quote or retweet to explain it, i.e. a likely blanked parse.
+	DropBlankText = "blank_text"
 )
 
 // Option tunes a parse call.
 type Option func(*options)
 
 type options struct {
-	onDrop func(reason string)
+	obs Observer
+}
+
+// Observer receives the parser's quality signals. Both callbacks are optional,
+// run on the parsing goroutine and must not block.
+type Observer struct {
+	// Drop is called once per timeline entry dropped instead of returned, with
+	// one of the Drop* reasons (DropBlankText is reported although the tweet is
+	// kept).
+	Drop func(reason string)
+	// CreatedAtFallback is called once per tweet dated from its snowflake id
+	// because no created_at field carried a time. The tweet is kept.
+	CreatedAtFallback func()
 }
 
 func newOptions(opts []Option) options {
@@ -37,16 +53,21 @@ func newOptions(opts []Option) options {
 
 // drop reports one dropped entry to the observer, if any.
 func (o options) drop(reason string) {
-	if o.onDrop != nil {
-		o.onDrop(reason)
+	if o.obs.Drop != nil {
+		o.obs.Drop(reason)
 	}
 }
 
-// WithDropObserver registers fn to be called once for every timeline entry the
-// parser drops instead of returning, with one of the Drop* reasons. fn runs on
-// the parsing goroutine and must not block.
-func WithDropObserver(fn func(reason string)) Option {
-	return func(o *options) { o.onDrop = fn }
+// createdAtFallback reports one snowflake-dated tweet to the observer, if any.
+func (o options) createdAtFallback() {
+	if o.obs.CreatedAtFallback != nil {
+		o.obs.CreatedAtFallback()
+	}
+}
+
+// WithObserver registers obs for the parse call.
+func WithObserver(obs Observer) Option {
+	return func(o *options) { o.obs = obs }
 }
 
 // dropError is the error parseTweetResult returns for a result it cannot turn

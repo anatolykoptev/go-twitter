@@ -334,3 +334,132 @@ func TestTweetNotifications_NoCreatedAtMs_UsesSnowflakeOrDrops(t *testing.T) {
 		"CreatedAt = %v, want the snowflake time", tweets[0].CreatedAt)
 	assert.Equal(t, map[string]int64{"no_created_at": 1}, parseDrops(t, f, "tweetNotificationsQuery"))
 }
+
+// R1 — every tweet-timeline read reports its drops. Each row feeds one unusable
+// entry through the real Client method and expects the counter under that
+// operation. Rows share call sites: Bookmarks, ListLatestTweetsTimeline and
+// CommunityTweetsTimeline go through fetchTweetTimeline; HomeTimeline and
+// HomeLatestTimeline through fetchHomeTimeline.
+//
+// Mutation (one per call site in graphql.go; the rows named drop out):
+//   - fetchTweetTimeline: `parseFn(body, c.metrics.parseOption(operation))` ->
+//     `parseFn(body)` => RED Bookmarks, ListLatestTweetsTimeline,
+//     CommunityTweetsTimeline.
+//   - fetchHomeTimeline: drop the option from parse.HomeTimeline => RED
+//     HomeTimeline, HomeLatestTimeline.
+//   - searchTimeline: drop the option from parse.SearchTimeline => RED SearchTimeline.
+//   - getTweetDetail: drop the option from parse.TweetDetail => RED TweetDetail.
+func TestTimelineReads_ReportDrops(t *testing.T) {
+	ctx := context.Background()
+	rows := []struct {
+		op   string
+		wrap func(inst string) string
+		call func(c *Client, focal string) error
+	}{
+		{"Bookmarks", func(i string) string { return `{"data":{"bookmark_timeline_v2":{"timeline":{` + i + `}}}}` },
+			func(c *Client, _ string) error { _, err := c.GetBookmarks(ctx, 10); return err }},
+		{"ListLatestTweetsTimeline", func(i string) string { return `{"data":{"list":{"tweets_timeline":{"timeline":{` + i + `}}}}}` },
+			func(c *Client, _ string) error { _, err := c.GetListTweets(ctx, "1", 10); return err }},
+		{"CommunityTweetsTimeline", func(i string) string {
+			return `{"data":{"communityResults":{"result":{"ranked_community_timeline":{"timeline":{` + i + `}}}}}}`
+		}, func(c *Client, _ string) error { _, err := c.GetCommunityTweets(ctx, "1", 10); return err }},
+		{"HomeTimeline", func(i string) string { return `{"data":{"home":{"home_timeline_urt":{` + i + `}}}}` },
+			func(c *Client, _ string) error { _, err := c.GetHomeTimeline(ctx, 10); return err }},
+		{"HomeLatestTimeline", func(i string) string { return `{"data":{"home":{"home_timeline_urt":{` + i + `}}}}` },
+			func(c *Client, _ string) error { _, err := c.GetHomeLatestTimeline(ctx, 10); return err }},
+		{"SearchTimeline", func(i string) string {
+			return `{"data":{"search_by_raw_query":{"search_timeline":{"timeline":{` + i + `}}}}}`
+		}, func(c *Client, _ string) error { _, err := c.SearchTimeline(ctx, "q", 10); return err }},
+		{"TweetDetail", func(i string) string { return `{"data":{"threaded_conversation_with_injections_v2":{` + i + `}}}` },
+			func(c *Client, focal string) error { _, err := c.GetTweetByID(ctx, focal); return err }},
+	}
+	for _, row := range rows {
+		t.Run(row.op, func(t *testing.T) {
+			var f *metricsFixture
+			var good string
+			f = newMetricsFixture(t, func(w http.ResponseWriter, r *http.Request) {
+				good = snowflakeAt(f.now.Add(-time.Minute))
+				inst := `"instructions":[{"type":"TimelineAddEntries","entries":[` +
+					itemEntry("tweet-bad", tweetItem(`{"__typename":"Tweet"}`)) + `,` +
+					itemEntry("tweet-good", tweetItem(`{"__typename":"Tweet","rest_id":"`+good+`","legacy":{"full_text":"ok","user_id_str":"999"}}`)) +
+					`]}]`
+				_, _ = w.Write([]byte(row.wrap(inst)))
+			}, "r1_acc")
+			focal := snowflakeAt(f.now.Add(-time.Minute))
+			require.NoError(t, row.call(f.c, focal))
+			assert.Equal(t, map[string]int64{"no_id": 1}, parseDrops(t, f, row.op))
+		})
+	}
+}
+
+// B1 — a tweet with no text in any location and nothing to explain it (no
+// media, card, quote or retweet) is returned but counted as blank_text; one
+// with media, or a card, is not.
+//
+// Mutation: internal/parse/parsers.go parseTweetResult — delete
+// `o.drop(DropBlankText)` => RED on "blank" (counter empty). Delete
+// `!r.hasAttachment() &&` => RED on "media" and "card" (counted).
+func TestUserTweets_BlankText_CountedButKept(t *testing.T) {
+	cases := []struct {
+		name, extra string
+		want        map[string]int64
+	}{
+		{"blank", ``, map[string]int64{"blank_text": 1}},
+		{"media", `,"entities":{"media":[{"id_str":"1"}]}`, map[string]int64{}},
+		{"extended media", `,"extended_entities":{"media":[{"id_str":"1"}]}`, map[string]int64{}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var f *metricsFixture
+			f = newMetricsFixture(t, func(w http.ResponseWriter, r *http.Request) {
+				id := snowflakeAt(f.now.Add(-time.Minute))
+				_, _ = w.Write([]byte(userTweetsEnvelope(itemEntry("tweet-x", tweetItem(
+					`{"__typename":"Tweet","rest_id":"`+id+`","legacy":{"user_id_str":"999"`+tc.extra+`}}`)))))
+			}, "b1_acc")
+			tweets, err := f.c.GetUserTweets(context.Background(), "999", 20)
+			require.NoError(t, err)
+			require.Len(t, tweets, 1, "a blank tweet is kept")
+			assert.Equal(t, tc.want, parseDrops(t, f, "UserTweets"))
+		})
+	}
+	t.Run("card", func(t *testing.T) {
+		var f *metricsFixture
+		f = newMetricsFixture(t, func(w http.ResponseWriter, r *http.Request) {
+			id := snowflakeAt(f.now.Add(-time.Minute))
+			_, _ = w.Write([]byte(userTweetsEnvelope(itemEntry("tweet-x", tweetItem(
+				`{"__typename":"Tweet","rest_id":"`+id+`","card":{"legacy":{"name":"poll"}},"legacy":{"user_id_str":"999"}}`)))))
+		}, "b1c_acc")
+		_, err := f.c.GetUserTweets(context.Background(), "999", 20)
+		require.NoError(t, err)
+		assert.Empty(t, parseDrops(t, f, "UserTweets"))
+	})
+}
+
+// S1 — a tweet dated from its snowflake id (no created_at field) is kept and
+// counted on the created_at_fallbacks counter, not as a drop; a tweet with a
+// real created_at is not counted.
+//
+// Mutation: internal/parse/parsers.go parseTweetResult — delete
+// `o.createdAtFallback()` => RED (counter absent).
+func TestUserTweets_SnowflakeDated_Counted(t *testing.T) {
+	var f *metricsFixture
+	f = newMetricsFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		id1 := snowflakeAt(f.now.Add(-time.Minute))
+		id2 := snowflakeAt(f.now.Add(-2 * time.Minute))
+		_, _ = w.Write([]byte(userTweetsEnvelope(
+			itemEntry("t1", tweetItem(`{"__typename":"Tweet","rest_id":"`+id1+`","legacy":{"full_text":"a","user_id_str":"999"}}`)),
+			itemEntry("t2", tweetItem(`{"__typename":"Tweet","rest_id":"`+id2+`","legacy":{"full_text":"b","user_id_str":"999","created_at":"Mon Jan 02 15:04:05 +0000 2006"}}`)),
+		)))
+	}, "s1_acc")
+	tweets, err := f.c.GetUserTweets(context.Background(), "999", 20)
+	require.NoError(t, err)
+	require.Len(t, tweets, 2)
+	assert.Empty(t, parseDrops(t, f, "UserTweets"), "a fallback is not a drop")
+
+	m, ok := f.collect(t)["twitter.client.parse.created_at_fallbacks"]
+	require.True(t, ok, "snowflake-dated tweet must be counted")
+	sum := m.Data.(metricdata.Sum[int64])
+	require.Len(t, sum.DataPoints, 1)
+	assert.EqualValues(t, 1, sum.DataPoints[0].Value)
+	assert.Equal(t, "UserTweets", attrMap(sum.DataPoints[0].Attributes)["twitter.operation"])
+}

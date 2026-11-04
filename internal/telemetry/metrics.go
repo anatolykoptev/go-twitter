@@ -43,6 +43,7 @@ const (
 	MetricXtidFailures        = "twitter.client.xtid.failures"
 	MetricUsageReportsDropped = "twitter.client.usage_report.dropped"
 	MetricParseDropped        = "twitter.client.parse.dropped"
+	MetricCreatedAtFallbacks  = "twitter.client.parse.created_at_fallbacks"
 
 	// Attribute keys.
 	AttrOperation    = "twitter.operation"
@@ -133,6 +134,7 @@ type Metrics struct {
 	xtidFailures    metric.Int64Counter
 	reportsDropped  metric.Int64Counter
 	parseDropped    metric.Int64Counter
+	createdAtFallbk metric.Int64Counter
 }
 
 // instrumentationVersion reports this module's version as seen by the
@@ -273,6 +275,12 @@ func New(mp metric.MeterProvider) *Metrics {
 		metric.WithDescription("Timeline entries the parser dropped instead of returning as tweets, by operation and reason.")); err != nil {
 		fail(MetricParseDropped, err)
 		m.parseDropped = noop.Int64Counter{}
+	}
+	if m.createdAtFallbk, err = meter.Int64Counter(MetricCreatedAtFallbacks,
+		metric.WithUnit("{tweet}"),
+		metric.WithDescription("Tweets dated from their snowflake id because no created_at field carried a time (the tweet is kept), by operation.")); err != nil {
+		fail(MetricCreatedAtFallbacks, err)
+		m.createdAtFallbk = noop.Int64Counter{}
 	}
 	return m
 }
@@ -468,4 +476,12 @@ func (m *Metrics) RecordParseDrop(endpoint, reason string) {
 		attribute.String(AttrOperation, endpoint),
 		attribute.String(AttrReason, reason),
 	))
+}
+
+// RecordCreatedAtFallback counts one tweet dated from its snowflake id.
+func (m *Metrics) RecordCreatedAtFallback(endpoint string) {
+	if m == nil {
+		return
+	}
+	m.createdAtFallbk.Add(context.Background(), 1, metric.WithAttributes(attribute.String(AttrOperation, endpoint)))
 }

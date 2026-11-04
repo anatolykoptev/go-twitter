@@ -207,7 +207,7 @@ func (c *Client) getTweetDetail(ctx context.Context, tweetID string) ([]*Tweet, 
 	if err != nil {
 		return nil, fmt.Errorf("TweetDetail: %w", err)
 	}
-	tweets, err := parse.TweetDetail(body, tweetID, c.metrics.parseDropOption("TweetDetail"))
+	tweets, err := parse.TweetDetail(body, tweetID, c.metrics.parseOption("TweetDetail"))
 	if err != nil {
 		// If parsing fails, log the raw response for debugging
 		slog.Debug("TweetDetail parse failed", slog.String("body_prefix", string(body[:min(500, len(body))])))
@@ -237,7 +237,7 @@ func (c *Client) GetUserTweets(ctx context.Context, userID string, count int) ([
 	if err != nil {
 		return nil, fmt.Errorf("UserTweets: %w", err)
 	}
-	tweets, err := parse.TweetTimeline(body, userID, c.metrics.parseDropOption("UserTweets"))
+	tweets, err := parse.TweetTimeline(body, userID, c.metrics.parseOption("UserTweets"))
 	if err == nil {
 		c.metrics.recordFreshness("UserTweets", tweets)
 	}
@@ -273,7 +273,7 @@ func (c *Client) searchTimeline(ctx context.Context, query string, product Searc
 	if err != nil {
 		return nil, fmt.Errorf("SearchTimeline: %w", err)
 	}
-	tweets, err := parse.SearchTimeline(body, c.metrics.parseDropOption("SearchTimeline"))
+	tweets, err := parse.SearchTimeline(body, c.metrics.parseOption("SearchTimeline"))
 	if err == nil {
 		c.metrics.recordFreshness("SearchTimeline", tweets)
 	}
@@ -472,7 +472,7 @@ func (c *Client) fetchTweetTimeline(
 			return tweets, fmt.Errorf("%s: %w", operation, err)
 		}
 
-		batch, nextCursor, err := parseFn(body, c.metrics.parseDropOption(operation))
+		batch, nextCursor, err := parseFn(body, c.metrics.parseOption(operation))
 		if err != nil {
 			return tweets, fmt.Errorf("parse %s: %w", operation, err)
 		}
@@ -585,7 +585,7 @@ func (c *Client) fetchHomeTimeline(ctx context.Context, operation string, count 
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", operation, err)
 	}
-	tweets, _, err := parse.HomeTimeline(body, c.metrics.parseDropOption(operation))
+	tweets, _, err := parse.HomeTimeline(body, c.metrics.parseOption(operation))
 	if err != nil {
 		return nil, fmt.Errorf("parse %s: %w", operation, err)
 	}

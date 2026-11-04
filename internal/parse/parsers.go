@@ -721,6 +721,10 @@ type tweetResult struct {
 		QuoteCount    int    `json:"quote_count"`
 		ReplyCount    int    `json:"reply_count"`
 		UserIDStr     string `json:"user_id_str"`
+		// Entities and ExtendedEntities carry the attached media; a media-only
+		// tweet legitimately has empty text.
+		Entities         mediaEntities `json:"entities"`
+		ExtendedEntities mediaEntities `json:"extended_entities"`
 		// InReplyToStatusID, QuotedStatusID: relationship markers.
 		InReplyToStatusID string `json:"in_reply_to_status_id_str"`
 		QuotedStatusID    string `json:"quoted_status_id_str"`
@@ -730,6 +734,8 @@ type tweetResult struct {
 			Result *tweetResult `json:"result"`
 		} `json:"retweeted_status_result"`
 	} `json:"legacy"`
+	// Card is the link/poll card of a tweet; a tweet may carry only that.
+	Card json.RawMessage `json:"card"`
 	// NoteTweet holds the untruncated text of a long tweet; legacy.full_text
 	// is cut at ~280 characters for those.
 	NoteTweet struct {
@@ -888,7 +894,7 @@ func extractTweets(tl timelineObj, defaultAuthorID string, dedupe bool, o option
 				}
 				continue
 			}
-			t, err := parseTweetResult(item.TweetResults.Result, defaultAuthorID)
+			t, err := parseTweetResult(item.TweetResults.Result, defaultAuthorID, o)
 			if err != nil {
 				o.drop(dropReason(err))
 				slog.Debug("skip tweet parse error", slog.String("entry", it.entryID), slog.Any("error", err))
@@ -969,7 +975,7 @@ func parseUserResult(r userResult) (*model.TwitterUser, error) {
 	}, nil
 }
 
-func parseTweetResult(r tweetResult, defaultAuthorID string) (*model.Tweet, error) {
+func parseTweetResult(r tweetResult, defaultAuthorID string, o options) (*model.Tweet, error) {
 	// Unwrap *Results shells (TweetWithVisibilityResults for sensitive
 	// tweets): the payload nests the real tweet one level down. Loop —
 	// not a fixed depth — so a stacked wrapper still decodes.
@@ -1003,6 +1009,7 @@ func parseTweetResult(r tweetResult, defaultAuthorID string) (*model.Tweet, erro
 	if createdAt.IsZero() {
 		if ts, err := SnowflakeTime(r.RestID); err == nil {
 			createdAt = ts
+			o.createdAtFallback()
 		}
 	}
 	if createdAt.IsZero() {
@@ -1048,7 +1055,7 @@ func parseTweetResult(r tweetResult, defaultAuthorID string) (*model.Tweet, erro
 	}
 	if rs := r.Legacy.RetweetedStatus.Result; rs != nil {
 		t.RetweetOfID = innerRestID(rs)
-		if orig, err := parseTweetResult(*rs, ""); err == nil {
+		if orig, err := parseTweetResult(*rs, "", options{}); err == nil {
 			t.RetweetOf = orig
 			t.RetweetOfID = orig.ID
 			// The retweet's own full_text is the "RT @user: …" form X cuts
@@ -1060,8 +1067,23 @@ func parseTweetResult(r tweetResult, defaultAuthorID string) (*model.Tweet, erro
 			slog.Debug("retweet original not decodable", slog.String("retweet", t.ID), slog.Any("error", err))
 		}
 	}
+	// Empty text with nothing to explain it (media, card, quote, retweet) is
+	// likely a blanked parse: count it, but keep the tweet.
+	if t.Text == "" && !r.hasAttachment() && t.QuotedID == "" && t.RetweetOfID == "" {
+		o.drop(DropBlankText)
+	}
 	t.TokenMentions = extractTokenMentions(t.Text)
 	return t, nil
+}
+
+// mediaEntities is the media list of an entities block.
+type mediaEntities struct {
+	Media []json.RawMessage `json:"media"`
+}
+
+// hasAttachment reports media or a card on the tweet.
+func (r tweetResult) hasAttachment() bool {
+	return len(r.Legacy.Entities.Media) > 0 || len(r.Legacy.ExtendedEntities.Media) > 0 || hasJSONValue(r.Card)
 }
 
 // innerRestID returns the rest_id of a result after unwrapping *Results

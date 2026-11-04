@@ -89,6 +89,7 @@ func DeviceFollow(body []byte, opts ...Option) ([]*model.Tweet, error) {
 		if t.CreatedAt.IsZero() {
 			if ts, err := SnowflakeTime(lt.IDStr); err == nil {
 				t.CreatedAt = ts
+				o.createdAtFallback()
 			}
 		}
 		if u, ok := raw.GlobalObjects.Users[lt.UserIDStr]; ok {
@@ -263,6 +264,7 @@ func TweetNotifications(body []byte, opts ...Option) ([]*model.Tweet, string, er
 				t.CreatedAt = time.UnixMilli(r.Details.CreatedAtMs).UTC()
 			} else if ts, err := SnowflakeTime(r.RestID); err == nil {
 				t.CreatedAt = ts
+				o.createdAtFallback()
 			} else {
 				o.drop(DropNoCreatedAt)
 				slog.Debug("skip notification tweet without creation time", slog.String("entry", e.EntryID))
