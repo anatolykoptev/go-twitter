@@ -444,37 +444,59 @@ func (m *Manager) GenerateIDWith(ctx context.Context, method, path string, auth 
 	return m.ct.GenerateID(method, path), nil
 }
 
+// RefreshResult is the outcome of Manager.Refresh; the values are the metric
+// labels of twitter.client.xtid.refreshes.
+type RefreshResult string
+
+const (
+	// RefreshRefreshed: a rebuild this call ran or joined succeeded.
+	RefreshRefreshed RefreshResult = "refreshed"
+	// RefreshSuppressed: nothing was rebuilt because it was not due — keys
+	// younger than the floor, no keys yet, or the attempt kind in backoff.
+	RefreshSuppressed RefreshResult = "suppressed_floor"
+	// RefreshFailed: the rebuild ran and failed; the previous keys keep serving.
+	RefreshFailed RefreshResult = "failed"
+	// RefreshCancelled: the caller's ctx ended while waiting for the rebuild.
+	RefreshCancelled RefreshResult = "cancelled"
+)
+
 // Refresh rebuilds the ClientTransaction from freshly fetched pages ahead of
 // its normal expiry, for a caller whose request was answered as if its
-// transaction id were stale. It reports whether a rebuild this call ran or
-// joined succeeded; false means nothing was rebuilt (no keys yet, keys younger
-// than the floor, the attempt kind in backoff, or the rebuild failed — the
-// previous keys keep serving). Concurrent callers share one rebuild, and the
+// transaction id were stale. Concurrent callers share one rebuild, and the
 // floor stops a run of failing calls from refetching the pages once each. auth
 // is as in GenerateIDWith.
-func (m *Manager) Refresh(ctx context.Context, auth bundle.Fetcher) bool {
+//
+// A failed rebuild is recorded like a failed init: it extends the attempt
+// kind's backoff streak and, on an ok->failed transition, fires the init-failed
+// hook, even though the previous keys keep serving.
+func (m *Manager) Refresh(ctx context.Context, auth bundle.Fetcher) RefreshResult {
 	kind := kindOf(auth)
 	if !m.refreshDue(kind) {
-		return false
+		return RefreshSuppressed
 	}
 	ch := m.sf.DoChan(fmt.Sprintf("refresh-%d", kind), func() (any, error) {
 		// Re-check inside the flight: a caller that passed the check just as the
 		// previous flight finished must not start a second rebuild.
 		if !m.refreshDue(kind) {
-			return false, nil
+			return RefreshSuppressed, nil
 		}
 		ictx, cancel := context.WithTimeout(context.Background(), initTimeout)
 		defer cancel()
 		err := m.initialize(ictx, auth)
 		m.recordResult(kind, err)
-		return err == nil, err
+		if err != nil {
+			return RefreshFailed, err
+		}
+		return RefreshRefreshed, nil
 	})
 	select {
 	case res := <-ch:
-		ok, _ := res.Val.(bool)
-		return ok
+		if r, ok := res.Val.(RefreshResult); ok {
+			return r
+		}
+		return RefreshFailed
 	case <-ctx.Done():
-		return false
+		return RefreshCancelled
 	}
 }
 

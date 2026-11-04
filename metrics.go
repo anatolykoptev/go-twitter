@@ -223,6 +223,20 @@ func (m *clientMetrics) recordXtidFailure() {
 	m.t.RecordXtidFailure()
 }
 
+func (m *clientMetrics) recordXtidRefresh(result string) {
+	if m == nil {
+		return
+	}
+	m.t.RecordXtidRefresh(result)
+}
+
+func (m *clientMetrics) recordXtidRetry(result string) {
+	if m == nil {
+		return
+	}
+	m.t.RecordXtidRetry(result)
+}
+
 func (m *clientMetrics) recordProxyFailure() {
 	if m == nil {
 		return

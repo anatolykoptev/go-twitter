@@ -47,8 +47,8 @@ func TestRefresh_RebuildsKeysOlderThanFloor(t *testing.T) {
 	h.gf.set(legacyRoutes(newKey))
 	h.clock(defaultForcedRefreshMinAge + time.Second) // older than the floor, younger than the TTL
 
-	if !h.mgr.Refresh(context.Background(), nil) {
-		t.Fatal("Refresh = false, want a rebuild of keys older than the floor")
+	if got := h.mgr.Refresh(context.Background(), nil); got != RefreshRefreshed {
+		t.Fatalf("Refresh = %q, want a rebuild of keys older than the floor", got)
 	}
 	if got := h.gf.count(warmPageURL); got != 2 {
 		t.Fatalf("warm page fetched %d times, want 2 (init + refresh)", got)
@@ -63,8 +63,8 @@ func TestRefresh_YoungKeysAreNotRebuilt(t *testing.T) {
 	h := newRefreshHarness(t, fixtureKey)
 	h.clock(defaultForcedRefreshMinAge - time.Second)
 
-	if h.mgr.Refresh(context.Background(), nil) {
-		t.Fatal("Refresh = true for keys younger than the floor")
+	if got := h.mgr.Refresh(context.Background(), nil); got != RefreshSuppressed {
+		t.Fatalf("Refresh = %q for keys younger than the floor, want %q", got, RefreshSuppressed)
 	}
 	if got := h.gf.count(warmPageURL); got != 1 {
 		t.Fatalf("warm page fetched %d times, want 1 (no refetch for young keys)", got)
@@ -80,7 +80,7 @@ func TestRefresh_ConcurrentCallersShareOneRebuild(t *testing.T) {
 	release := h.gf.arm() // hold the rebuild so every caller piles up behind it
 
 	const callers = 16
-	results := make([]bool, callers)
+	results := make([]RefreshResult, callers)
 	var wg sync.WaitGroup
 	for i := 0; i < callers; i++ {
 		wg.Add(1)
@@ -97,8 +97,8 @@ func TestRefresh_ConcurrentCallersShareOneRebuild(t *testing.T) {
 		t.Fatalf("warm page fetched %d times for %d concurrent callers, want 2 (init + ONE refresh)", got, callers)
 	}
 	for i, ok := range results {
-		if !ok {
-			t.Errorf("caller %d: Refresh = false, want true (joined the rebuild)", i)
+		if ok != RefreshRefreshed {
+			t.Errorf("caller %d: Refresh = %q, want refreshed (joined the rebuild)", i, ok)
 		}
 	}
 }
@@ -109,8 +109,8 @@ func TestRefresh_FailureKeepsPreviousKeys(t *testing.T) {
 	h.gf.set(map[string][]byte{}) // every fetch now 404s
 	h.clock(defaultForcedRefreshMinAge + time.Second)
 
-	if h.mgr.Refresh(context.Background(), nil) {
-		t.Fatal("Refresh = true although every fetch failed")
+	if got := h.mgr.Refresh(context.Background(), nil); got != RefreshFailed {
+		t.Fatalf("Refresh = %q although every fetch failed, want %q", got, RefreshFailed)
 	}
 	if got := h.keyNow(t, len(fixtureKey)); !bytes.Equal(got, fixtureKey) {
 		t.Fatalf("keys after failed refresh = %v, want the previous %v", got, fixtureKey)
@@ -122,10 +122,26 @@ func TestRefresh_NoKeysYetDoesNothing(t *testing.T) {
 	gf := &gatedFetcher{exactFetcher: newExactFetcher(legacyRoutes(fixtureKey))}
 	mgr := NewManager(gf)
 	mgr.cacheDir = t.TempDir()
-	if mgr.Refresh(context.Background(), nil) {
-		t.Fatal("Refresh = true on a manager that never initialised")
+	if got := mgr.Refresh(context.Background(), nil); got != RefreshSuppressed {
+		t.Fatalf("Refresh = %q on a manager that never initialised, want %q", got, RefreshSuppressed)
 	}
 	if got := gf.count(warmPageURL); got != 0 {
 		t.Fatalf("warm page fetched %d times, want 0", got)
+	}
+}
+
+// A caller whose ctx ends while the rebuild is in flight is told so; the
+// rebuild itself still completes for the others.
+func TestRefresh_CancelledWhileWaiting(t *testing.T) {
+	h := newRefreshHarness(t, fixtureKey)
+	h.gf.set(legacyRoutes([]byte{0, 21, 31, 41, 51, 0, 71, 81}))
+	h.clock(defaultForcedRefreshMinAge + time.Second)
+	release := h.gf.arm()
+	defer close(release)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	if got := h.mgr.Refresh(ctx, nil); got != RefreshCancelled {
+		t.Fatalf("Refresh = %q with an expiring ctx, want %q", got, RefreshCancelled)
 	}
 }
