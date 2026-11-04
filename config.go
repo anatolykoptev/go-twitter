@@ -135,6 +135,16 @@ type ClientConfig struct {
 	// Default: false (guest fallback enabled for backward compatibility).
 	DisableGuestFallback bool
 
+	// ChromeWireForAccountlessClients opts the shared account-less client (the
+	// guest-token fallback and warm fetches that carry no account) and the
+	// open-account login client into the current Chrome request shape (header
+	// order, fetch metadata, origin and priority as the X web client in Chrome
+	// sends them). By default they send the request shape of v0.8.6 unchanged, so
+	// a deployment that hosts only older accounts presents one consistent shape.
+	// Accounts choose their shape by their own profile (chrome_146/150/152 get the
+	// current one) and are not affected by this field. Default: false.
+	ChromeWireForAccountlessClients bool
+
 	// AccountPaceMin is the minimum human-pace delay between consecutive requests
 	// MADE BY THE SAME ACCOUNT, applied AFTER the pool selects an account and IN
 	// ADDITION TO the anti-fingerprint jitter. Pacing is keyed by account, not by

@@ -89,9 +89,12 @@ func NewClient(cfg ClientConfig, clientOpts ...ClientOption) (*Client, error) {
 	}
 	m := newClientMetrics(cfg.MeterProvider)
 
-	opts := []stealth.ClientOption{
+	// The shared client serves the account-less paths (guest fallback, warm
+	// fetches). It stays on the legacy wire shape unless the caller opts in.
+	sharedWire := accountlessWire(cfg)
+	opts := append([]stealth.ClientOption{
 		stealth.WithHeaderOrder(twitterHeaderOrder),
-	}
+	}, wireClientOptions(sharedWire)...)
 	if cfg.DefaultProxy != "" {
 		opts = append(opts, stealth.WithProxy(cfg.DefaultProxy))
 	}
@@ -101,6 +104,7 @@ func NewClient(cfg ClientConfig, clientOpts ...ClientOption) (*Client, error) {
 	}
 	owned := &clientSet{}
 	owned.add(bc)
+	owned.setWire(bc, sharedWire)
 
 	// One transport per account. Every account owns its own stealth client, and
 	// with it its own cookie jar: a set-cookie on a response to account A can
@@ -132,6 +136,7 @@ func NewClient(cfg ClientConfig, clientOpts ...ClientOption) (*Client, error) {
 			continue
 		}
 		owned.add(accClient)
+		owned.setWire(accClient, accountWire(acc))
 		acc.client = accClient
 		usable++
 	}
@@ -289,6 +294,7 @@ func buildAccountClient(cfg ClientConfig, acc *Account) (*stealth.BrowserClient,
 	// The caller has completed the identity (ensureIdentity); the account's
 	// mutex may be held, so it is read directly.
 	opts := []stealth.ClientOption{stealth.WithHeaderOrder(twitterHeaderOrder)}
+	opts = append(opts, wireClientOptions(accountWire(acc))...)
 	if acc.Profile.TLSProfile != "" {
 		// Profile and UA go in together, so the client's reported identity (used
 		// by the login flow) is exactly what every later request sends.
@@ -360,6 +366,7 @@ func (c *Client) clientForAccount(acc *Account) (*stealth.BrowserClient, error) 
 		return nil, fmt.Errorf("%w: %s", ErrProxyClientUnavailable, acc.Username)
 	}
 	c.owned.add(bc)
+	c.owned.setWire(bc, accountWire(acc))
 	acc.client = bc
 	return bc, nil
 }
@@ -369,8 +376,43 @@ func (c *Client) clientForAccount(acc *Account) (*stealth.BrowserClient, error) 
 // client was stored last, and a caller-owned client must never be released
 // here. A nil *clientSet is valid and empty, so a bare &Client{} never panics.
 type clientSet struct {
-	mu  sync.Mutex
-	set []*stealth.BrowserClient
+	mu   sync.Mutex
+	set  []*stealth.BrowserClient
+	wire map[*stealth.BrowserClient]wireGen // the request shape each client sends; absent = legacy
+}
+
+// setWire records the wire generation bc sends.
+func (s *clientSet) setWire(bc *stealth.BrowserClient, g wireGen) {
+	if s == nil || bc == nil {
+		return
+	}
+	s.mu.Lock()
+	if s.wire == nil {
+		s.wire = map[*stealth.BrowserClient]wireGen{}
+	}
+	s.wire[bc] = g
+	s.mu.Unlock()
+}
+
+// forgetWire drops bc's entry (a short-lived client that was never listed).
+func (s *clientSet) forgetWire(bc *stealth.BrowserClient) {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	delete(s.wire, bc)
+	s.mu.Unlock()
+}
+
+// wireOf is the generation bc sends. A client nobody registered is legacy: the
+// new shape is opt-in per client, never inferred.
+func (s *clientSet) wireOf(bc *stealth.BrowserClient) wireGen {
+	if s == nil || bc == nil {
+		return wireLegacy
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.wire[bc]
 }
 
 func (s *clientSet) add(bc *stealth.BrowserClient) {
@@ -626,7 +668,7 @@ func (c *Client) doRequestWithBody(ctx context.Context, acc *Account, bc *stealt
 	}
 
 	currentCall(ctx).ready()
-	return bc.DoWithHeaderOrderCtx(ctx, method, urlStr, headers, body, twitterHeaderOrder)
+	return bc.DoWithHeaderOrderCtx(ctx, method, urlStr, headers, body, c.wireOrderFor(bc, method, urlStr, headers))
 }
 
 // xpffFor returns the generator for a request: the account's own when the
