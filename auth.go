@@ -101,9 +101,15 @@ func (c *Client) relogin(ctx context.Context, acc *Account, failedTok string) er
 	// Deferred so a panic in the login cannot leave waiters parked forever.
 	defer func() {
 		c.reloginMu.Lock()
+		// Leaving the map and signalling done are one step: a caller between
+		// the two would start a second login beside this one, and the two
+		// could write the account's credentials and stored session out of order.
 		delete(c.reloginFlights, acc)
-		c.reloginMu.Unlock()
+		if c.reloginWindowHook != nil {
+			c.reloginWindowHook()
+		}
 		close(f.done)
+		c.reloginMu.Unlock()
 	}()
 	f.err = c.doRelogin(acc)
 	return f.err
@@ -355,7 +361,11 @@ func (c *Client) loginOpenAccount(ctx context.Context) (*Account, error) {
 	// login ends rather than listing it on the Client: listing would pin its
 	// jar, which holds the open account's cookies, for the Client's lifetime.
 	defer bc.CloseIdleConnections()
+	return c.openAccountOn(bc)
+}
 
+// openAccountOn runs the welcome flow on bc and returns the account it minted.
+func (c *Client) openAccountOn(bc *stealth.BrowserClient) (*Account, error) {
 	guestToken, err := c.getGuestToken(bc)
 	if err != nil {
 		return nil, fmt.Errorf("guest token: %w", err)
@@ -424,10 +434,15 @@ func (c *Client) loginOpenAccount(ctx context.Context) (*Account, error) {
 
 	username := "guest_" + guestToken[:min(8, len(guestToken))]
 	slog.Info("open account created", slog.String("username", username))
+	// The session was minted under bc's browser identity; the account keeps it
+	// instead of deriving another from its username on the first request.
+	id := bc.Identity()
 	return &Account{
 		Username:  username,
 		AuthToken: authToken,
 		CT0:       ct0,
+		Profile:   id.BrowserProfile,
+		UserAgent: id.UserAgent,
 		active:    true,
 	}, nil
 }

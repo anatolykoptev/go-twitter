@@ -1355,13 +1355,13 @@ func (c *Client) escalateHeaderless88(acc *Account, endpoint string, body []byte
 }
 
 // terminalVerdict returns the *APIError a recovery path left in lastErr when
-// it is a terminal answer (a deterministic miss or an unrecognised errors-only
-// body). The recovery paths (relogin / ct0 retries) record their verdict in
+// it is a terminal answer (a deterministic miss, an unrecognised errors-only
+// body, or the caller's own rejected input). The recovery paths (relogin / ct0 retries) record their verdict in
 // lastErr and `continue`; without this check the loop would rotate to another
 // account, or fall back to a guest token, to reproduce the identical answer.
 func terminalVerdict(err error) *APIError {
 	var ae *APIError
-	if errors.As(err, &ae) && (ae.Class == errNotFound || ae.Class == errUnexpected) {
+	if errors.As(err, &ae) && (ae.Class == errNotFound || ae.Class == errUnexpected || ae.Class == errBadRequest) {
 		return ae
 	}
 	return nil

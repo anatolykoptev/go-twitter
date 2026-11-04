@@ -21,6 +21,10 @@ type reportSink struct {
 	sem     chan struct{}
 	dropped atomic.Int64
 
+	// afterFirstStep, when set (tests only), runs between the two steps of
+	// submit: registering the report and reserving its slot.
+	afterFirstStep func()
+
 	mu      sync.Mutex
 	n       int             // reports submitted and not yet finished
 	waiters []chan struct{} // closed when n reaches zero
@@ -33,18 +37,24 @@ func newReportSink(limit int) *reportSink {
 // submit runs fn on its own goroutine unless the cap is reached, in which case
 // it returns false and fn is not run.
 func (s *reportSink) submit(fn func()) bool {
+	// Register before reserving: a flush that runs between the two steps must
+	// see this report as in flight, not return while it is about to start.
+	s.mu.Lock()
+	s.n++
+	s.mu.Unlock()
+	if s.afterFirstStep != nil {
+		s.afterFirstStep()
+	}
 	select {
 	case s.sem <- struct{}{}:
 	default:
+		s.release()
 		if n := s.dropped.Add(1); n == 1 || n%100 == 0 {
 			slog.Warn("twitter: usage report dropped, too many in flight",
 				slog.Int("max_inflight", cap(s.sem)), slog.Int64("dropped_total", n))
 		}
 		return false
 	}
-	s.mu.Lock()
-	s.n++
-	s.mu.Unlock()
 	go func() {
 		defer s.done()
 		fn()
@@ -54,6 +64,11 @@ func (s *reportSink) submit(fn func()) bool {
 
 func (s *reportSink) done() {
 	<-s.sem
+	s.release()
+}
+
+// release unregisters one report and wakes the waiters when none is left.
+func (s *reportSink) release() {
 	s.mu.Lock()
 	s.n--
 	if s.n == 0 {

@@ -81,6 +81,16 @@ All methods below are on `*twitter.Client`. Every one of them needs an authentic
 
 The `social` package is a thin client for an external account-leasing service. `SearchWithSocial`, `SearchTweetsWithSocial`, `SearchUsersWithSocial`, `GetUserWithSocial`, `GetUserTweetsWithSocial` and `GetTweetConversationWithSocial`, along with `GetFollowersWithSocial`, `GetFollowingWithSocial`, `GetRetweetersWithSocial`, `GetTweetByIDWithSocial` and `GetUserTweetsByIDWithSocial`, lease an account, run the call, retry on other accounts, and report the outcome. The repeated header-less code 88 escalation described in [Error handling](errors.md) does not fire on this path: each attempt builds a fresh `Account`, so the count never reaches the threshold. A leased account that keeps answering 88 is reported to the service as `auth_error`.
 
+The usage report that ends a call (the final success, or a deterministic outcome that is not retried) is sent in the background, after the helper has returned. Delivery is best effort and bounded: a report that cannot be queued is dropped and counted. A process that exits right after its last helper call can lose that report, so call `FlushSocialReports(ctx)` at shutdown, with a short deadline:
+
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+defer cancel()
+_ = twitter.FlushSocialReports(ctx)
+```
+
+It returns `ctx.Err()` if reports are still in flight at the deadline.
+
 A caller-side cancellation or deadline (`context.Canceled`, `context.DeadlineExceeded`, or the caller ctx ending mid-request) is NOT the leased account's fault: it reports nothing to the service (the vocabulary has no neutral status) and stops leasing immediately. Reports are sent on a detached, bounded context, so a `success` verdict still lands when the caller's ctx died before the response arrived.
 
 ## Tracing
