@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/anatolykoptev/go-stealth/pool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -117,40 +118,46 @@ func waitFor(d time.Duration, cond func() bool) bool {
 	return cond()
 }
 
-// N concurrent requests hit code 32 on the SAME account: exactly one login
-// reaches the login server, the gate sees one outcome, and every request is
-// served with the new token.
-//
-// Mutation: auth.go relogin — make the in-flight lookup never match (`if f, ok
-// := c.reloginFlights[acc]; ok && false`) => RED: logins == N, gate saw N.
-func TestRelogin_ConcurrentCode32_SingleLogin(t *testing.T) {
-	const n = 6
-	c, acc, j := newReloginJourneyClient(t, seededStore(), "pw")
-	c.cfg.MaxInFlightPerAccount = -1
-	gate := newBlockingGate()
-	c.SetAutoReloginGate(gate)
-
+// callRelogin starts n goroutines that each relogin acc after a request failed
+// with reloginOldTok, and returns their errors once all have finished. The
+// gate holds the leader until n-1 callers are parked on its flight, so the
+// outcome does not depend on scheduling.
+func callRelogin(t *testing.T, c *Client, acc *Account, gate *blockingGate, n int) []error {
+	t.Helper()
 	var wg sync.WaitGroup
 	errs := make([]error, n)
 	for i := range n {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-			defer cancel()
-			_, errs[i] = c.GetUserTweets(ctx, "100"+string(rune('0'+i)), 20)
+			errs[i] = c.relogin(context.Background(), acc, reloginOldTok)
 		}()
 	}
-	// Hold the login until every other request is parked on it. A mutant that
-	// does not coalesce never parks anyone: the wait times out and the counts
-	// below fail.
-	waitFor(3*time.Second, func() bool { return reloginWaiters(c, acc) == n-1 })
+	parked := waitFor(5*time.Second, func() bool { return reloginWaiters(c, acc) == n-1 })
 	close(gate.release)
 	wg.Wait()
+	require.True(t, parked, "the other %d callers never parked on the leader's flight", n-1)
+	return errs
+}
 
-	for i, err := range errs {
-		assert.NoError(t, err, "request %d must be served after the shared relogin", i)
+// N callers whose requests failed with code 32 on the SAME account: exactly one
+// login reaches the login server, the gate sees one outcome, and every caller
+// ends with the new credentials.
+//
+// Mutation: auth.go relogin — make the in-flight lookup never match (`if f, ok
+// := c.reloginFlights[acc]; ok && false`) => RED: the barrier cannot be met
+// (nobody parks) and logins != 1.
+func TestRelogin_ConcurrentCode32_SingleLogin(t *testing.T) {
+	const n = 6
+	c, acc, j := newReloginJourneyClient(t, seededStore(), "pw")
+	gate := newBlockingGate()
+	c.SetAutoReloginGate(gate)
+
+	for i, err := range callRelogin(t, c, acc, gate, n) {
+		assert.NoError(t, err, "caller %d", i)
 	}
+	tok, _, _ := acc.Credentials()
+	assert.Equal(t, reloginNewTok, tok)
 	assert.EqualValues(t, 1, j.logins.Load(), "one login request must reach the login server for %d concurrent code-32 callers", n)
 	assert.EqualValues(t, 1, gate.allowed.Load(), "the gate is consulted once per flight")
 	assert.EqualValues(t, 1, gate.successes.Load(), "the breaker must see ONE outcome, not one per caller")
@@ -160,30 +167,111 @@ func TestRelogin_ConcurrentCode32_SingleLogin(t *testing.T) {
 // A failed shared relogin is also ONE failure for the breaker, and every
 // caller gets the failure.
 //
-// Mutation: auth.go relogin — as above => RED: failures == N.
+// Mutation: auth.go relogin — as above => RED: the barrier fails, failures != 1.
 func TestRelogin_ConcurrentFailure_OneBreakerFailure(t *testing.T) {
 	const n = 5
 	c, acc, _ := newReloginJourneyClient(t, seededStore(), "") // token-only: the relogin cannot succeed
 	gate := newBlockingGate()
 	c.SetAutoReloginGate(gate)
 
-	var wg sync.WaitGroup
-	errs := make([]error, n)
-	for i := range n {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			errs[i] = c.relogin(context.Background(), acc)
-		}()
-	}
-	waitFor(3*time.Second, func() bool { return reloginWaiters(c, acc) == n-1 })
-	close(gate.release)
-	wg.Wait()
-
-	for i, err := range errs {
+	for i, err := range callRelogin(t, c, acc, gate, n) {
 		assert.Error(t, err, "caller %d must see the shared failure", i)
 	}
 	assert.EqualValues(t, 1, gate.failures.Load(), "one flight, one recorded failure")
+}
+
+// Waiters of a failed flight must not bench the account again: N callers of
+// one failed relogin are one deactivation (one item_deactivated alert). The
+// callers run through doPOST, whose retries open further flights, so the
+// invariant is one bench per FLIGHT (gate.allowed), never one per caller.
+//
+// Mutation: auth.go benchFailedRelogin — delete the errReloginShared early
+// return => RED: alerts > flights.
+func TestRelogin_FailedFlight_WaitersDoNotBench(t *testing.T) {
+	const n = 4
+	fake := newPoolWaitFake(t)
+	fake.status.Store(401)
+	fake.body = code32Body
+	c, accs := newPoolWaitClient(t, 1)
+	var alerts atomic.Int32
+	c.pool = pool.New(accs, pool.Config{AlertHook: func(topic string, _ any) {
+		if topic == "alerts.item_deactivated" {
+			alerts.Add(1)
+		}
+	}})
+	gate := newBlockingGate()
+	c.SetAutoReloginGate(gate)
+
+	var wg sync.WaitGroup
+	for range n {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = c.doPOST(context.Background(), accs[0], "CreateTweet", fake.srv.URL+"/i/api/graphql/x/CreateTweet", []byte(`{}`))
+		}()
+	}
+	parked := waitFor(5*time.Second, func() bool { return reloginWaiters(c, accs[0]) == n-1 })
+	close(gate.release)
+	wg.Wait()
+	require.True(t, parked, "callers never parked on the first flight")
+
+	flights := gate.allowed.Load()
+	require.GreaterOrEqual(t, flights, int32(1))
+	assert.EqualValues(t, flights, alerts.Load(), "one deactivation per failed flight, not per caller")
+}
+
+// A panic inside the login must not read as success to the waiters.
+//
+// Mutation: auth.go relogin — create the flight with `err: nil` (drop
+// errReloginAborted) => RED: the waiter gets nil.
+func TestRelogin_PanickingLeader_WaiterSeesFailure(t *testing.T) {
+	c, acc, _ := newReloginJourneyClient(t, seededStore(), "pw")
+	gate := &panicGate{blockingGate: newBlockingGate()}
+	c.SetAutoReloginGate(gate)
+
+	leaderDone := make(chan struct{})
+	go func() {
+		defer close(leaderDone)
+		defer func() { _ = recover() }()
+		_ = c.relogin(context.Background(), acc, reloginOldTok)
+	}()
+	require.True(t, waitFor(3*time.Second, func() bool { return gate.allowed.Load() == 1 }))
+	waiter := make(chan error, 1)
+	go func() { waiter <- c.relogin(context.Background(), acc, reloginOldTok) }()
+	require.True(t, waitFor(3*time.Second, func() bool { return reloginWaiters(c, acc) == 1 }))
+	close(gate.release)
+	<-leaderDone
+	select {
+	case err := <-waiter:
+		assert.Error(t, err, "a flight that panicked is not a success")
+	case <-time.After(2 * time.Second):
+		t.Fatal("waiter never released")
+	}
+}
+
+type panicGate struct{ *blockingGate }
+
+func (g *panicGate) Allowed(ctx context.Context, u string) (bool, string) {
+	g.blockingGate.Allowed(ctx, u)
+	panic("login blew up")
+}
+
+// A caller whose request failed with a token an earlier relogin already
+// replaced must not log in again.
+//
+// Mutation: auth.go relogin — delete the `cur != failedTok` early return =>
+// RED: a second login reaches the server.
+func TestRelogin_LateArrivalWithReplacedToken_NoSecondLogin(t *testing.T) {
+	c, acc, j := newReloginJourneyClient(t, seededStore(), "pw")
+
+	require.NoError(t, c.relogin(context.Background(), acc, reloginOldTok))
+	require.EqualValues(t, 1, j.logins.Load())
+
+	// Request B failed with the OLD token before A's relogin finished.
+	require.NoError(t, c.relogin(context.Background(), acc, reloginOldTok))
+	assert.EqualValues(t, 1, j.logins.Load(), "the token B failed with is already replaced: no second login")
+	tok, _, _ := acc.Credentials()
+	assert.Equal(t, reloginNewTok, tok)
 }
 
 // A waiter whose ctx ends stops waiting at once; the flight and its leader are
@@ -197,12 +285,12 @@ func TestRelogin_WaiterHonoursContext(t *testing.T) {
 	c.SetAutoReloginGate(gate)
 
 	leader := make(chan error, 1)
-	go func() { leader <- c.relogin(context.Background(), acc) }()
+	go func() { leader <- c.relogin(context.Background(), acc, reloginOldTok) }()
 	require.True(t, waitFor(3*time.Second, func() bool { return gate.allowed.Load() == 1 }), "leader never started")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	waiter := make(chan error, 1)
-	go func() { waiter <- c.relogin(ctx, acc) }()
+	go func() { waiter <- c.relogin(ctx, acc, reloginOldTok) }()
 	require.True(t, waitFor(3*time.Second, func() bool { return reloginWaiters(c, acc) == 1 }), "waiter never parked")
 	cancel()
 	select {
@@ -366,59 +454,62 @@ func TestPostRelogin_5xxErrorsOnlyRetry_StaysRetryable(t *testing.T) {
 	assert.True(t, acc.IsActive())
 }
 
-// --- #158.2: account-verdict codes ---
+// --- #158.2: account-specific codes stay unclassified ---
 
-// Mutation: errors.go classifyError — delete `185, 226` from the errBlocked
-// case => RED for those rows.
-func TestClassifyError_AccountVerdictCodes(t *testing.T) {
-	mk := func(code int) []byte {
-		return []byte(`{"errors":[{"code":` + strconv.Itoa(code) + `,"message":"m"}]}`)
-	}
-	for _, code := range []int{161, 185, 226} {
-		assert.Equal(t, errBlocked, classifyError(mk(code), nil), "code %d", code)
-	}
-	// Left unmapped on purpose (see docs/errors.md): their scope is not
-	// established, so they must keep today's errors-only handling.
-	for _, code := range []int{37, 220, 344} {
-		assert.Equal(t, errNone, classifyError(mk(code), nil), "code %d", code)
+// 37, 185, 220, 226 and 344 are not verdicts we can attribute to the serving
+// account (see docs/errors.md), so classifyError leaves them alone.
+//
+// Mutation: errors.go classifyError — `case 161, 226:` => RED for code 226.
+func TestClassifyError_UnattributableCodesStayUnclassified(t *testing.T) {
+	for _, code := range []int{37, 185, 220, 226, 344} {
+		body := []byte(`{"errors":[{"code":` + strconv.Itoa(code) + `,"message":"m"}]}`)
+		assert.Equal(t, errNone, classifyError(body, nil), "code %d", code)
 	}
 }
 
-// Journey: the first account answers an errors-only 200 with code 226 (the
-// request looked automated for THAT account); the pool benches it and the next
-// account serves. Before the code was classified the answer was a terminal
-// ErrUnexpectedResponse with no bench and no rotation.
+// A 200 carrying usable data next to a code-226 entry still succeeds, and an
+// errors-only 226 is a terminal ErrUnexpectedResponse that benches nobody.
 //
-// Mutation: errors.go classifyError — delete `226` from the errBlocked case =>
-// RED (ErrUnexpectedResponse, account 0 still active).
-func TestAccountVerdictCode_BenchesAndRotates(t *testing.T) {
-	var hits atomic.Int32
-	c, accs := newPoolWaitClient(t, 2)
-	srv := startFakeX(t, func(w http.ResponseWriter, _ *http.Request) {
-		if hits.Add(1) == 1 {
-			_, _ = w.Write([]byte(`{"errors":[{"code":226,"message":"This request looks like it might be automated."}]}`))
-			return
+// Mutation: errors.go classifyError — `case 161, 226:` (226 => errBlocked) =>
+// RED: the data answer is discarded and the account benched; the errors-only
+// answer rotates instead of surfacing ErrUnexpectedResponse.
+func TestCode226_DataStillSucceeds_ErrorsOnlyIsUnexpected(t *testing.T) {
+	good := userTweetsBody(snowflakeAt(time.Now()))
+	withErr := `{"errors":[{"code":226,"message":"This request looks like it might be automated."}],` + strings.TrimPrefix(good, "{")
+	run := func(t *testing.T, body string) (error, []*Account, *atomic.Int32) {
+		var hits atomic.Int32
+		c, accs := newPoolWaitClient(t, 2)
+		srv := startFakeX(t, func(w http.ResponseWriter, _ *http.Request) {
+			hits.Add(1)
+			_, _ = w.Write([]byte(body))
+		})
+		c.client = srv
+		for _, a := range accs {
+			a.client = srv
 		}
-		_, _ = w.Write([]byte(userTweetsBody(snowflakeAt(time.Now()))))
-	})
-	_ = srv
-	c.client = srv
-	for _, a := range accs {
-		a.client = srv
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		_, err := c.GetUserTweets(ctx, "999", 20)
+		return err, accs, &hits
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	_, err := c.GetUserTweets(ctx, "999", 20)
-	require.NoError(t, err, "the second account must serve the call")
-	assert.EqualValues(t, 2, hits.Load())
-	active := 0
-	for _, a := range accs {
-		if a.IsActive() {
-			active++
+	t.Run("data_with_226_succeeds", func(t *testing.T) {
+		err, accs, hits := run(t, withErr)
+		require.NoError(t, err)
+		assert.EqualValues(t, 1, hits.Load())
+		for _, a := range accs {
+			assert.True(t, a.IsActive())
 		}
-	}
-	assert.Equal(t, 1, active, "the account that answered 226 must be benched")
+	})
+	t.Run("errors_only_226_is_unexpected_no_bench", func(t *testing.T) {
+		err, accs, hits := run(t, `{"errors":[{"code":226,"message":"This request looks like it might be automated."}]}`)
+		require.Error(t, err)
+		assert.ErrorIs(t, err, ErrUnexpectedResponse)
+		assert.EqualValues(t, 1, hits.Load(), "terminal: no rotation")
+		for _, a := range accs {
+			assert.True(t, a.IsActive(), "no account is benched on an unattributable code")
+		}
+	})
 }
 
 // --- #158.5: untested guards ---

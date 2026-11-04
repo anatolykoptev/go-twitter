@@ -12,7 +12,7 @@ Every request makes up to 3 attempts, rotating accounts on pool-based calls. Rec
 | Restricted | 88, `x-rate-limit-remaining` > 0 | Soft-deactivate for `BanCooldown`. |
 | Suspended | 64 | Permanent removal from the pool. |
 | Locked | 326 | With a `CaptchaSolver`, one relogin is attempted; otherwise, or on failure, soft-deactivate for `BanCooldown`. There is no dedicated unlock flow, so a locked account usually needs attention in a browser. |
-| Blocked / not authorized | 161, 185, 226, 179, 219 | Soft-deactivate for `AuthCooldown`. 185 (posting allowance used up) and 226 (the request looked automated) are verdicts about the serving account, so they bench and rotate like 161. |
+| Blocked / not authorized | 161, 179, 219 | Soft-deactivate for `AuthCooldown`. |
 | Internal error | 131 | Treated as success if the body still carries `data`; otherwise retried. |
 | Caller input rejected | 400 + GraphQL code 214 | `ErrBadRequest` — returned immediately: X rejected the request's own input (bad variable, cursor or handle), so another account would answer identically. No retry, no rotation, no account charge, no endpoint-fault bookkeeping. |
 | Errors-only 2xx, deterministic miss | `errors[]` only + a miss marker | `ErrNotFound` — returned immediately: the query ran and the resource is absent (see the miss markers under `ErrNotFound` below). No retry, no rotation, no guest fallback, no relogin, no account charge. |
@@ -32,14 +32,14 @@ Errors returned by the client wrap `*twitter.APIError` (`Status`, `Codes`, `Mess
 | `IsLocked` | code 326 |
 | `IsCSRF` | code 353 |
 | `IsAuthExpired` | code 32 |
-| `IsBlocked` | codes 161, 185, 226 |
+| `IsBlocked` | code 161 |
 | `IsNotAuthorized` | codes 179, 219 |
 | `IsInternal` | code 131 |
 | `IsForbidden` | HTTP 403 with no recognized code |
 
 `twitter.ErrNotFound` marks deterministic misses (deleted tweet, suspended or unavailable user): the account worked, the resource is not there. Besides the parser-level detections, an errors-only 2xx maps to `ErrNotFound` when any `errors[]` entry carries a miss marker: code `34`, `50`, `63` or `144` (top level or inside `extensions`), `name`/`kind` `NotFoundError` (top level or inside `extensions`), or a message starting with `_Missing:`. Test it with `errors.Is`.
 
-Account-specific codes that are not classified stay in `ErrUnexpectedResponse`: 37, 220 and 344 are deliberately left out of the account classes because their scope (serving account, target, or network) is not established, and a wrong mapping would bench healthy accounts. Their codes are on `APIError.Codes`.
+Codes 37, 185, 220, 226 and 344 are deliberately not classified as account verdicts: whether they speak for the serving account, the target, or something shared by every account (proxy, TLS fingerprint, request signature) is not established, and a wrong mapping would bench healthy accounts, or the whole pool. An errors-only answer carrying them is `ErrUnexpectedResponse` with the codes on `APIError.Codes`; an answer that also carries usable data still succeeds.
 
 `twitter.ErrUnexpectedResponse` marks any other errors-only 2xx: X answered the committed request with errors the library does not recognise. It is terminal — no retry, no rotation, no guest fallback, no relogin, no account charge — and is NOT an endpoint fault: the `errors[]` envelope proves the request shape executed. Match it with `errors.Is`.
 

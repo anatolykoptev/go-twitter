@@ -3,6 +3,7 @@ package twitter
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -37,6 +38,26 @@ type reloginFlight struct {
 	waiters atomic.Int32
 }
 
+// errReloginShared marks a relogin error a waiter took from another caller's
+// flight: the flight's leader already acted on it (benched the account).
+var errReloginShared = errors.New("shared relogin outcome")
+
+// errReloginAborted is a flight's outcome until doRelogin returns: a panic
+// inside it leaves this in place, so waiters never read a half-done flight as
+// a success.
+var errReloginAborted = errors.New("relogin aborted")
+
+// benchFailedRelogin takes acc out of rotation after its relogin failed. Only
+// the flight leader benches: a waiter's error carries errReloginShared, and N
+// callers of one failed relogin must produce one deactivation (and one
+// item_deactivated alert), not N.
+func (c *Client) benchFailedRelogin(acc *Account, reErr error) {
+	if errors.Is(reErr, errReloginShared) {
+		return
+	}
+	c.pool.SoftDeactivate(acc, c.cfg.AuthCooldown)
+}
+
 // relogin replaces the account's credentials with a fresh login, single-flight
 // per account: the first caller (the leader) runs the login; callers that
 // arrive while it is in progress wait for its outcome and use it, so N
@@ -47,22 +68,30 @@ type reloginFlight struct {
 // is not bound to any caller's ctx (it has its own timeout), so one caller
 // giving up never fails the relogin the others share.
 //
-// A caller that arrives after the flight finished starts a new one: it cannot
-// know whether the token its request failed with is the one the finished
-// flight replaced.
-func (c *Client) relogin(ctx context.Context, acc *Account) error {
+// failedTok is the auth token the caller's request was rejected with. When the
+// account already holds a different token, a relogin that finished since then
+// replaced it: the caller skips the login (returns nil) and retries with the
+// current credentials.
+func (c *Client) relogin(ctx context.Context, acc *Account, failedTok string) error {
+	if cur, _, _ := acc.Credentials(); failedTok != "" && cur != failedTok {
+		slog.Debug("relogin skipped: credentials already replaced", slog.String("user", acc.Username))
+		return nil
+	}
 	c.reloginMu.Lock()
 	if f, ok := c.reloginFlights[acc]; ok {
 		f.waiters.Add(1)
 		c.reloginMu.Unlock()
 		select {
 		case <-f.done:
-			return f.err
+			if f.err != nil {
+				return fmt.Errorf("%w: %w", errReloginShared, f.err)
+			}
+			return nil
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 	}
-	f := &reloginFlight{done: make(chan struct{})}
+	f := &reloginFlight{done: make(chan struct{}), err: errReloginAborted}
 	if c.reloginFlights == nil {
 		c.reloginFlights = make(map[*Account]*reloginFlight)
 	}

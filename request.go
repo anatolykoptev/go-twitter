@@ -579,12 +579,12 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 				continue
 			case errAuthExpired:
 				slog.Warn("auth expired (code 32), attempting relogin", slog.String("user", acc.Username))
-				if reErr := c.relogin(ctx, acc); reErr != nil {
+				if reErr := c.relogin(ctx, acc, authTok); reErr != nil {
 					if ctxErr := ctx.Err(); ctxErr != nil {
 						return nil, nil, ctxErr // caller gone: the relogin verdict is not an account charge
 					}
 					slog.Warn("relogin failed", slog.String("user", acc.Username), slog.Any("error", reErr))
-					c.pool.SoftDeactivate(acc, c.cfg.AuthCooldown)
+					c.benchFailedRelogin(acc, reErr)
 					lastErr = &APIError{Class: errAuthExpired, Err: reErr, Message: reErr.Error()}
 					continue
 				}
@@ -740,12 +740,12 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 
 		case errAuthExpired:
 			slog.Warn("auth expired (code 32), attempting relogin", slog.String("user", acc.Username))
-			if reErr := c.relogin(ctx, acc); reErr != nil {
+			if reErr := c.relogin(ctx, acc, authTok); reErr != nil {
 				if ctxErr := ctx.Err(); ctxErr != nil {
 					return nil, nil, ctxErr // caller gone: the relogin verdict is not an account charge
 				}
 				slog.Warn("relogin failed, soft-deactivating", slog.String("user", acc.Username), slog.Any("error", reErr))
-				c.pool.SoftDeactivate(acc, c.cfg.AuthCooldown)
+				c.benchFailedRelogin(acc, reErr)
 				lastErr = &APIError{Class: errAuthExpired, Err: reErr, Message: reErr.Error()}
 				continue
 			}
@@ -816,7 +816,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 			slog.Warn("account locked (code 326, captcha needed)", slog.String("user", acc.Username))
 			if c.cfg.CaptchaSolver != nil {
 				slog.Info("attempting CAPTCHA unlock via relogin", slog.String("user", acc.Username))
-				if reErr := c.relogin(ctx, acc); reErr != nil {
+				if reErr := c.relogin(ctx, acc, authTok); reErr != nil {
 					if ctxErr := ctx.Err(); ctxErr != nil {
 						return nil, nil, ctxErr // caller gone: the relogin verdict is not an account charge
 					}
@@ -967,6 +967,9 @@ func withAuthFailure(authErr error, guestMsg string) string {
 // Rotating to a random ct0 on a 353 is proven futile against an established
 // session (the live-reproduced killer), so it is never done here.
 func (c *Client) recoverCSRF(ctx context.Context, acc *Account, bc *stealth.BrowserClient, method, url string, payload []byte, endpoint string, respHdrs map[string]string, lastErr *error) ([]byte, map[string]string, bool) {
+	// The token this request failed with: a relogin another request already
+	// completed since then makes this one unnecessary.
+	failedTok, _, _ := acc.Credentials()
 	if serverCT0, ok := csrfRecoveryCT0(respHdrs); ok {
 		slog.Warn("CSRF error 353, adopting server ct0", slog.String("user", acc.Username))
 		acc.SetCT0(serverCT0)
@@ -997,12 +1000,12 @@ func (c *Client) recoverCSRF(ctx context.Context, acc *Account, bc *stealth.Brow
 	if ctx.Err() != nil {
 		return nil, nil, false // caller gone: no relogin, no charge on its way out
 	}
-	if reErr := c.relogin(ctx, acc); reErr != nil {
+	if reErr := c.relogin(ctx, acc, failedTok); reErr != nil {
 		if ctx.Err() != nil {
 			return nil, nil, false // relogin aborted by the caller's own ctx
 		}
 		slog.Warn("relogin after CSRF failed", slog.String("user", acc.Username), slog.Any("error", reErr))
-		c.pool.SoftDeactivate(acc, c.cfg.AuthCooldown)
+		c.benchFailedRelogin(acc, reErr)
 		*lastErr = &APIError{Class: errAuthExpired, Err: reErr, Message: reErr.Error()}
 		return nil, nil, false
 	}
@@ -1026,6 +1029,9 @@ func (c *Client) recoverCSRF(ctx context.Context, acc *Account, bc *stealth.Brow
 // generates a client-random ct0. Returns (body, true) on a recovered success;
 // (nil, false) when recovery failed — the caller sets lastErr and `continue`s.
 func (c *Client) recoverCSRFPost(ctx context.Context, acc *Account, bc *stealth.BrowserClient, url string, payload []byte, endpoint string, respHdrs map[string]string, lastErr *error) ([]byte, bool) {
+	// The token this request failed with: a relogin another request already
+	// completed since then makes this one unnecessary.
+	failedTok, _, _ := acc.Credentials()
 	if serverCT0, ok := csrfRecoveryCT0(respHdrs); ok {
 		slog.Warn("doPOST: CSRF error 353, adopting server ct0", slog.String("user", acc.Username))
 		acc.SetCT0(serverCT0)
@@ -1054,12 +1060,12 @@ func (c *Client) recoverCSRFPost(ctx context.Context, acc *Account, bc *stealth.
 	if ctx.Err() != nil {
 		return nil, false // caller gone: no relogin, no charge on its way out
 	}
-	if reErr := c.relogin(ctx, acc); reErr != nil {
+	if reErr := c.relogin(ctx, acc, failedTok); reErr != nil {
 		if ctx.Err() != nil {
 			return nil, false // relogin aborted by the caller's own ctx
 		}
 		slog.Warn("doPOST: relogin after CSRF failed", slog.String("user", acc.Username), slog.Any("error", reErr))
-		c.pool.SoftDeactivate(acc, c.cfg.AuthCooldown)
+		c.benchFailedRelogin(acc, reErr)
 		*lastErr = &APIError{Class: errAuthExpired, Err: reErr, Message: "relogin failed: " + reErr.Error()}
 		return nil, false
 	}
@@ -1152,12 +1158,12 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 				continue
 			case errAuthExpired:
 				slog.Warn("doPOST: auth expired, attempting relogin", slog.String("user", acc.Username))
-				if reErr := c.relogin(ctx, acc); reErr != nil {
+				if reErr := c.relogin(ctx, acc, authTok); reErr != nil {
 					if ctxErr := ctx.Err(); ctxErr != nil {
 						return nil, ctxErr // caller gone: the relogin verdict is not an account charge
 					}
 					slog.Warn("doPOST: relogin failed, soft-deactivating", slog.String("user", acc.Username), slog.Any("error", reErr))
-					c.pool.SoftDeactivate(acc, c.cfg.AuthCooldown)
+					c.benchFailedRelogin(acc, reErr)
 					lastErr = &APIError{Class: errAuthExpired, Err: reErr, Message: "relogin failed: " + reErr.Error()}
 					continue
 				}
