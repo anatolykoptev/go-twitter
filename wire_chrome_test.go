@@ -40,6 +40,7 @@ var (
 var oracleXHRValues = map[string]string{
 	"accept":          "*/*",
 	"accept-language": "en-US,en;q=0.9",
+	"priority":        "u=1, i",
 	"referer":         "https://x.com/",
 	"sec-fetch-mode":  "cors",
 	"sec-fetch-dest":  "empty",
@@ -105,7 +106,7 @@ func TestChromeWire_LoggedOutXHR(t *testing.T) {
 	h["cookie"] = "guest_id=v1%3A1" // the cookie jar adds this on the wire
 	_, _, _, _ = c.doRequestWithBody(ctx, nil, bc, "GET", "https://api.x.com/1.1/hashflags.json", h, nil)
 	got := rec.last()
-	assert.Equal(t, without(oracleXHRGet, "priority"), wireNames(got), "GET order")
+	assert.Equal(t, oracleXHRGet, wireNames(got), "GET order")
 	for k, v := range oracleXHRValues {
 		assert.Equal(t, v, got.Headers[k], k)
 	}
@@ -117,7 +118,7 @@ func TestChromeWire_LoggedOutXHR(t *testing.T) {
 	h["cookie"] = "guest_id=v1%3A1"
 	_, _, _, _ = c.doRequestWithBody(ctx, nil, bc, "POST", "https://api.x.com/1.1/flow/viewer.json", h, strings.NewReader("{}"))
 	got = rec.last()
-	assert.Equal(t, without(oracleXHRPost, "priority"), wireNames(got), "POST order")
+	assert.Equal(t, oracleXHRPost, wireNames(got), "POST order")
 }
 
 // An authenticated same-origin GET goes out as a same-origin fetch: no origin,
@@ -131,7 +132,7 @@ func TestChromeWire_AuthenticatedSameOriginGet(t *testing.T) {
 	_, _, _, _ = c.doRequestWithBody(context.Background(), nil, bc, "GET",
 		"https://x.com/i/api/graphql/q/Op", twitterHeaders("AUTH", "CT0", ua), nil)
 	got := rec.last()
-	assert.Equal(t, without(oracleSameOriginAuthedGet, "priority"), without(wireNames(got), "x-xp-forwarded-for"))
+	assert.Equal(t, oracleSameOriginAuthedGet, without(wireNames(got), "x-xp-forwarded-for"))
 	assert.Equal(t, "same-origin", got.Headers["sec-fetch-site"])
 	assert.NotContains(t, got.Headers, "origin")
 	assert.Contains(t, got.Headers, "x-xp-forwarded-for", "logged in: still sent")
@@ -194,20 +195,59 @@ func TestChromeWire_GuestAndLoginFlowCarryBrowserHeaders(t *testing.T) {
 	check("login flow step")
 }
 
-// priority belongs to the transport's fetch mode: go-stealth adds
-// `priority: u=1, i` together with the HTTP/2 HEADERS weight 220, and the pair
-// must arrive together (Chrome never sends the header with weight 256). So the
-// header is never set here, and its place stays in the order table at the
-// position Chrome writes it.
+// Priority and the HTTP/2 weight arrive together, from the transport's fetch
+// mode, and only for current identities: `priority: u=1, i` with weight 220 for
+// wireChrome; neither for legacy. go-twitter never sets the header itself.
 //
-// Mutation: wire.go shape — set h["priority"] = "u=1, i" => RED.
-func TestChromeWire_PriorityIsTheTransportsNotOurs(t *testing.T) {
+// Mutation: wire.go chromeClientOptions — empty (no WithFetchMode) => RED (a
+// current identity sends no priority and the navigation weight).
+func TestChromeWire_PriorityAndWeightFollowTheGeneration(t *testing.T) {
 	c, bc, rec, ua := chromeClient(t)
 	_, _, _, _ = c.doRequestWithBody(context.Background(), nil, bc, "GET", "https://x.com/i/api/graphql/q/Op", twitterHeaders("AUTH", "CT0", ua), nil)
-	_, has := rec.last().Headers["priority"]
-	assert.False(t, has, "present only when go-stealth's fetch mode adds it (chromeClientOptions=%d)", len(chromeClientOptions))
+	assert.Equal(t, "u=1, i", rec.last().Headers["priority"])
+	assert.True(t, rec.cfg.FetchMode, "HTTP/2 weight 220 (fetch mode) is on for a current identity")
 	assert.Equal(t, "priority", chromeHeaderOrder[len(chromeHeaderOrder)-1], "priority stays last, where Chrome writes it")
-	assert.Equal(t, oracleXHRGet[len(oracleXHRGet)-1], "priority")
+	assert.Equal(t, "priority", oracleXHRGet[len(oracleXHRGet)-1])
+	assert.Equal(t, chromeAcceptEncoding, rec.last().Headers["accept-encoding"])
+	assert.Contains(t, rec.last().Headers["accept-encoding"], "zstd")
+
+	h := map[string]string{}
+	wireChrome.shape("GET", "https://x.com/i/api/graphql/q/Op", h)
+	assert.NotContains(t, h, "priority", "go-twitter leaves priority to the transport")
+
+	lc, lbc, lrec := legacyClient(t)
+	_, _, _, _ = lc.doRequestWithBody(context.Background(), nil, lbc, "GET", apiGraphQL, twitterHeaders("AUTH", "CT0", legacyProfile.UserAgent), nil)
+	assert.NotContains(t, lrec.last().Headers, "priority")
+	assert.NotContains(t, lrec.last().Headers["accept-encoding"], "zstd")
+	assert.False(t, lrec.cfg.FetchMode)
+}
+
+// The clients a Client builds get the fetch mode by generation: current
+// accounts yes; the shared account-less client, a legacy-profile account and an
+// account whose profile is unstated, no.
+//
+// Mutation: client.go buildAccountClient — pass chromeClientOptions whatever
+// the account's generation => RED (the chrome_131 and unpaired accounts get
+// fetch mode).
+func TestFetchMode_OnlyForCurrentIdentities(t *testing.T) {
+	win := chromeProfile(t, stealth.ProfileChrome152, "chrome", "windows")
+	rec := &wireRecorder{}
+	c, err := NewClient(ClientConfig{
+		Accounts: []*Account{
+			{Username: "cur", AuthToken: "t", CT0: "c", Profile: win, UserAgent: win.UserAgent},
+			{Username: "old", AuthToken: "t", CT0: "c", Profile: legacyProfile, UserAgent: legacyProfile.UserAgent},
+			{Username: "odd", AuthToken: "t", CT0: "c", UserAgent: "Mozilla/5.0 (X11; Linux x86_64) Chrome/123.0.0.0 Safari/537.36"},
+		},
+		stealthOpts: []stealth.ClientOption{stealth.WithBackend(rec.factory)},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+	require.Len(t, rec.cfgs, 4)
+	var got []bool
+	for _, cfg := range rec.cfgs {
+		got = append(got, cfg.FetchMode)
+	}
+	assert.Equal(t, []bool{false, true, false, false}, got, "shared, cur, old, odd")
 }
 
 // Which identities get the new shape: the current Chrome/Edge profiles; the
@@ -308,12 +348,13 @@ func TestWireClientOptions_NeverForLegacy(t *testing.T) {
 // Mutation: wire.go accountlessWire — drop the ChromeWireForAccountlessClients
 // check (always follow the default profile) => RED on the default-config rows.
 func TestAccountlessClient_LegacyUnlessOptedIn(t *testing.T) {
+	var recCfg stealth.BackendConfig
 	run := func(t *testing.T, optIn bool) (guestGET, activate recordedReq) {
 		rec := &wireRecorder{}
 		c, err := NewClient(ClientConfig{
 			ChromeWireForAccountlessClients: optIn,
 			stealthOpts: []stealth.ClientOption{
-				stealth.WithBackend(func(stealth.BackendConfig) (stealth.HTTPDoer, error) { return rec, nil }),
+				stealth.WithBackend(rec.factory),
 			},
 		})
 		require.NoError(t, err)
@@ -328,6 +369,7 @@ func TestAccountlessClient_LegacyUnlessOptedIn(t *testing.T) {
 				guestGET = r
 			}
 		}
+		recCfg = rec.cfg
 		require.NotEmpty(t, activate.URL, "guest fallback never activated a token")
 		require.NotEmpty(t, guestGET.URL, "guest fallback never sent the GraphQL GET")
 		return guestGET, activate
@@ -349,9 +391,13 @@ func TestAccountlessClient_LegacyUnlessOptedIn(t *testing.T) {
 	assert.Equal(t, wantKeys(legacyActivateHeaders()), keys(act.Headers), "activate header set is v0.8.6's")
 	assert.Equal(t, "gzip, deflate, br", get.Headers["accept-encoding"])
 	assert.NotContains(t, get.Headers, "sec-fetch-site")
+	assert.NotContains(t, get.Headers, "priority", "no fetch mode on the legacy account-less client")
+	assert.False(t, recCfg.FetchMode)
 
 	get, act = run(t, true)
 	assert.NotEqual(t, legacyOrder, get.Order, "opted in: the Chrome order")
+	assert.Equal(t, "u=1, i", get.Headers["priority"], "opted in: fetch mode")
+	assert.True(t, recCfg.FetchMode)
 	assert.Equal(t, "cross-site", act.Headers["sec-fetch-site"])
 	assert.Contains(t, get.Headers, "sec-fetch-site")
 }

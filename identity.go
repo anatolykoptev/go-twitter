@@ -64,9 +64,10 @@ var identityShareWeights = map[string]float64{
 // here, in this table; a weight does not depend on the rest of the candidate
 // list, which is what lets a removed candidate move only its own accounts.
 var identityVersionWeights = map[string]float64{
-	"chrome/chrome_152": 0.85,
-	"chrome/chrome_150": 0.12,
-	"chrome/chrome_146": 0.03,
+	"chrome/chrome_156": 0.75,
+	"chrome/chrome_152": 0.20,
+	"chrome/chrome_150": 0.04,
+	"chrome/chrome_146": 0.01,
 	"edge/chrome_152":   1,
 }
 

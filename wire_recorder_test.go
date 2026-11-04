@@ -20,6 +20,18 @@ type recordedReq struct {
 type wireRecorder struct {
 	mu   sync.Mutex
 	reqs []recordedReq
+	cfg  stealth.BackendConfig   // the configuration of the last client built on this recorder (FetchMode = HTTP/2 weight 220)
+	cfgs []stealth.BackendConfig // every client built on it, in order
+}
+
+// factory is the backend factory that hands the client this recorder and keeps
+// the configuration it was built with.
+func (r *wireRecorder) factory(cfg stealth.BackendConfig) (stealth.HTTPDoer, error) {
+	r.mu.Lock()
+	r.cfg = cfg
+	r.cfgs = append(r.cfgs, cfg)
+	r.mu.Unlock()
+	return r, nil
 }
 
 func (r *wireRecorder) Do(req *stealth.Request) (*stealth.Response, error) {
@@ -53,11 +65,13 @@ func (r *wireRecorder) last() recordedReq {
 func recorderClient(t *testing.T, p stealth.BrowserProfile) (*stealth.BrowserClient, *wireRecorder) {
 	t.Helper()
 	rec := &wireRecorder{}
-	bc, err := stealth.NewClient(
+	// Built the way the Client builds an account's client of this profile.
+	opts := append([]stealth.ClientOption{
 		stealth.WithIdentity(stealth.BrowserIdentity{BrowserProfile: p}),
 		stealth.WithHeaderOrder(twitterHeaderOrder),
-		stealth.WithBackend(func(stealth.BackendConfig) (stealth.HTTPDoer, error) { return rec, nil }),
-	)
+		stealth.WithBackend(rec.factory),
+	}, wireClientOptions(wireGenFor(p.TLSProfile))...)
+	bc, err := stealth.NewClient(opts...)
 	if err != nil {
 		t.Fatalf("recorder client: %v", err)
 	}

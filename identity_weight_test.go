@@ -96,9 +96,9 @@ func TestProfileForAccountKey_NewestVersionDominates(t *testing.T) {
 		}
 	}
 	share := func(p stealth.TLSProfile) float64 { return float64(by[p]) / float64(chrome) }
-	assert.InDelta(t, 0.85, share(stealth.ProfileChrome152), 0.03)
-	assert.InDelta(t, 0.12, share(stealth.ProfileChrome150), 0.03)
-	assert.Less(t, share(stealth.ProfileChrome146), 0.06)
+	assert.InDelta(t, 0.75, share(stealth.ProfileChrome156), 0.03)
+	assert.InDelta(t, 0.20, share(stealth.ProfileChrome152), 0.03)
+	assert.Less(t, share(stealth.ProfileChrome150)+share(stealth.ProfileChrome146), 0.08)
 }
 
 // The hash-to-unit-interval map never reaches 0 or 1, so a score is always
@@ -159,8 +159,8 @@ func TestPickProfile_RemovingACandidateMovesOnlyItsAccounts(t *testing.T) {
 	}
 }
 
-// previousProfileForAccountKey is v0.8.6's choice (every candidate equally
-// likely), kept to measure how many derived identities the weighting moves.
+// previousProfileForAccountKey is v0.8.6's choice (every candidate of its
+// go-stealth, chrome_146/150/152 and Edge, equally likely), kept to measure how many derived identities the weighting moves.
 func previousProfileForAccountKey(key string) stealth.BrowserProfile {
 	var (
 		best      stealth.BrowserProfile
@@ -168,6 +168,9 @@ func previousProfileForAccountKey(key string) stealth.BrowserProfile {
 		found     bool
 	)
 	for _, p := range identityCandidates() {
+		if p.TLSProfile == stealth.ProfileChrome156 {
+			continue // v0.8.6 ran on go-stealth v1.26.1, which has no chrome_156
+		}
 		sum := sha256.Sum256([]byte(key + "\x00" + p.Browser + "\x00" + p.OS + "\x00" + string(p.TLSProfile)))
 		if score := binary.BigEndian.Uint64(sum[:8]); !found || score > bestScore {
 			best, bestScore, found = p, score, true
@@ -195,9 +198,9 @@ func TestProfileForAccountKey_MovedByWeighting(t *testing.T) {
 // when the weighting was introduced.
 var pinnedPicks = map[string]string{
 	"alice":  "chrome/macos/chrome_152",
-	"bob":    "chrome/windows/chrome_152",
+	"bob":    "edge/macos/chrome_152",
 	"carol":  "chrome/windows/chrome_152",
 	"dave":   "edge/windows/chrome_152",
-	"erin":   "chrome/windows/chrome_152",
-	"Frank ": "chrome/windows/chrome_150",
+	"erin":   "chrome/windows/chrome_156",
+	"Frank ": "chrome/macos/chrome_156",
 }

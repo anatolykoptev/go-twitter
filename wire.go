@@ -33,6 +33,7 @@ var wireChromeProfiles = map[stealth.TLSProfile]bool{
 	stealth.ProfileChrome146: true,
 	stealth.ProfileChrome150: true,
 	stealth.ProfileChrome152: true,
+	stealth.ProfileChrome156: true,
 }
 
 // wireGenFor is the one place that decides which generation a TLS profile gets.
@@ -101,10 +102,10 @@ func (g wireGen) shape(method, rawURL string, h map[string]string) []string {
 		h["accept-language"] = "en-US,en;q=0.9"
 	}
 	h["accept-encoding"] = chromeAcceptEncoding
-	// priority is NOT set here: go-stealth's fetch mode adds `priority: u=1, i`
-	// together with the HTTP/2 HEADERS weight 220, and the pair must arrive
-	// together (Chrome never sends the priority header with weight 256). It has
-	// its place in chromeHeaderOrder for when the transport adds it.
+	// priority is NOT set here: go-stealth's fetch mode (chromeClientOptions)
+	// adds `priority: u=1, i` together with the HTTP/2 HEADERS weight 220, and
+	// the pair must arrive together (Chrome never sends the priority header with
+	// weight 256). Its place is in chromeHeaderOrder.
 
 	// A logged-out page sends no x-xp-forwarded-for.
 	if h["x-guest-token"] != "" {
@@ -130,23 +131,17 @@ func fetchSite(rawURL string) string {
 	return "cross-site"
 }
 
-// chromeAcceptEncoding is what Chrome sends with ", zstd" appended. zstd is
-// withheld until the transport decodes it: go-stealth v1.26.1 decodes gzip and
-// deflate only, and a body it cannot decode would reach the parsers as garbage.
-const chromeAcceptEncoding = "gzip, deflate, br"
+// chromeAcceptEncoding is what Chrome sends; go-stealth v1.27.0 decodes zstd.
+// It applies to wireChrome only: the legacy generation keeps its own
+// accept-encoding without zstd.
+const chromeAcceptEncoding = "gzip, deflate, br, zstd"
 
 // chromeClientOptions are the client options every client of a wireChrome
 // identity is built with; wireClientOptions is the single hook for the
-// transport-level half of the shape (HTTP/2 HEADERS weight 220 and the XHR
-// priority), which go-stealth sets per client, not per request.
-//
-// Switch-on once a go-stealth release has WithFetchMode (not in v1.26.1):
-//
-//	var chromeClientOptions = []stealth.ClientOption{stealth.WithFetchMode()}
-//
-// and set chromeAcceptEncoding to "gzip, deflate, br, zstd" in the same change
-// (that release decodes zstd). Legacy profiles never receive these options.
-var chromeClientOptions []stealth.ClientOption
+// transport-level half of the shape. WithFetchMode sets the HTTP/2 HEADERS
+// weight to 220 and adds `priority: u=1, i` (the pair Chrome sends for an XHR).
+// Legacy profiles never receive these options.
+var chromeClientOptions = []stealth.ClientOption{stealth.WithFetchMode()}
 
 // wireClientOptions are the extra client options for a client of generation g.
 func wireClientOptions(g wireGen) []stealth.ClientOption {
