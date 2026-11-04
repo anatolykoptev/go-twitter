@@ -19,7 +19,7 @@ func isTerminalCursor(c string) bool {
 	return c == "0" || strings.HasPrefix(c, terminalCursorPrefix)
 }
 
-// noProgressLimit is how many pages of a call may add no new item (every item
+// noProgressLimit is how many consecutive pages may add no new item (every item
 // already seen, or every user unavailable) before the call gives up.
 const noProgressLimit = 5
 
@@ -31,27 +31,25 @@ const noProgressLimit = 5
 //   - an empty page, whatever cursor came with it;
 //   - X's terminal cursor ("0|...", or "0"): the page's own items are kept;
 //   - a cursor already followed in this call;
-//   - noProgressLimit pages that added no new item (items are deduplicated by id
-//     within the call, so a server repeating items under fresh cursors is caught);
-//   - the absolute page backstop, 4*ceil(maxCount/page size)+10.
+//   - noProgressLimit consecutive pages that added no new item (items are
+//     deduplicated by id within the call, so a server repeating items under fresh
+//     cursors is caught).
 //
 // A short page is not a stop reason: a list is followed while pages keep adding
-// new items, however small they get. A natural end is not an error: the caller
+// new items, however small they get. Every page either adds an item (at most
+// maxCount such pages) or extends the run of stalled ones, so the walk is bounded. A natural end is not an error: the caller
 // gets what was collected.
 type pageLoop struct {
 	maxCount    int
-	reqSize     int // items requested per page
 	pages       int
-	largestPage int
-	noProgress  int
+	noProgress  int // consecutive pages that added nothing new
 	seenCursors map[string]struct{}
 	seenIDs     map[string]struct{}
 }
 
-func newPageLoop(maxCount, reqSize int) *pageLoop {
+func newPageLoop(maxCount int) *pageLoop {
 	return &pageLoop{
 		maxCount:    maxCount,
-		reqSize:     max(reqSize, 1),
 		seenCursors: map[string]struct{}{},
 		seenIDs:     map[string]struct{}{},
 	}
@@ -67,20 +65,15 @@ func (l *pageLoop) fresh(id string) bool {
 	return true
 }
 
-// backstop is the absolute page ceiling for the count wanted.
-func (l *pageLoop) backstop() int {
-	size := min(l.reqSize, max(l.largestPage, 1))
-	return 4*((max(l.maxCount, 0)+size-1)/size) + 10
-}
-
 // after is called once per fetched page with the page's entry count, the number
 // of new items it added, the total collected so far and the page's Bottom
 // cursor. It returns the stop reason, or "" to continue with that cursor.
 func (l *pageLoop) after(entries, added, total int, next string) string {
 	l.pages++
-	l.largestPage = max(l.largestPage, entries)
 	if added == 0 {
 		l.noProgress++
+	} else {
+		l.noProgress = 0
 	}
 	switch {
 	case total >= l.maxCount:
@@ -96,7 +89,7 @@ func (l *pageLoop) after(entries, added, total int, next string) string {
 		return telemetry.StopRepeatedCursor
 	}
 	l.seenCursors[next] = struct{}{}
-	if l.noProgress >= noProgressLimit || l.pages >= l.backstop() {
+	if l.noProgress >= noProgressLimit {
 		return telemetry.StopPageCap
 	}
 	return ""

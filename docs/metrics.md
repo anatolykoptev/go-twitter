@@ -228,7 +228,7 @@ One record per finished call of a cursor-paginated read: `GetFollowers`, `GetFol
   - `empty_page`: the page held no items although a cursor came with it.
   - `repeated_cursor`: the cursor was one already followed in this call.
   - `terminal_cursor`: the cursor is X's end-of-timeline marker (`0|...` or a bare `0`).
-  - `page_cap`: 5 pages added no new item (items are deduplicated by id within the call), or the absolute page backstop `4*ceil(max/page size)+10` was hit.
+  - `page_cap`: 5 consecutive pages added no new item (items are deduplicated by id within the call).
   - `ctx`: the caller's context ended.
   - `error`: a request or parse failed.
 

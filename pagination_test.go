@@ -277,6 +277,45 @@ func TestPagination_ShrinkingPages_ReachMaxCount(t *testing.T) {
 	}
 }
 
+// A large first page then small ones: the walk follows progress to maxCount.
+func TestPagination_FirstPageLarge_ThenSmall_ReachesMaxCount(t *testing.T) {
+	for _, r := range readers {
+		t.Run(r.name, func(t *testing.T) {
+			p := newPagedFake(t, func(n int, _ *http.Request) string {
+				if n == 0 {
+					return r.page("cur-0", ids(1, 50)...)
+				}
+				return r.page(fmt.Sprintf("cur-%d", n), ids(100+10*n, 109+10*n)...)
+			})
+			got, err := r.fetch(pagCtx(t), p.f.c, 300)
+			require.NoError(t, err)
+			assert.Equal(t, 300, got)
+			assert.Equal(t, int32(26), p.hits.Load()) // 50, then 25 pages of 10; fixture account allows 50 requests
+			assert.Equal(t, int64(1), stopCount(t, p.f, r.op, telemetry.StopMaxCount))
+		})
+	}
+}
+
+// Pages that add nothing new, scattered through a walk, do not end it: only a
+// run of noProgressLimit consecutive ones does.
+func TestPagination_InterleavedNoProgressPages_DoNotStop(t *testing.T) {
+	for _, r := range readers {
+		t.Run(r.name, func(t *testing.T) {
+			p := newPagedFake(t, func(n int, _ *http.Request) string {
+				if n%2 == 1 {
+					return r.page(fmt.Sprintf("cur-%d", n), ids(1, 1)...) // seen before: no progress
+				}
+				return r.page(fmt.Sprintf("cur-%d", n), ids(1+n, 1+n)...)
+			})
+			got, err := r.fetch(pagCtx(t), p.f.c, 10)
+			require.NoError(t, err)
+			assert.Equal(t, 10, got)
+			assert.Equal(t, int32(19), p.hits.Load())
+			assert.Equal(t, int64(1), stopCount(t, p.f, r.op, telemetry.StopMaxCount))
+		})
+	}
+}
+
 // A server repeating the same items under fresh cursors adds nothing new: the
 // items are deduplicated and the call gives up after noProgressLimit such pages.
 func TestPagination_RepeatedItemsFreshCursors_StopsOnNoProgress(t *testing.T) {
