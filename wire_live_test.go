@@ -185,3 +185,32 @@ func TestLive_AccountNavigationAndXHR(t *testing.T) {
 	assert.Equal(t, 220, got.weight)
 	assert.Equal(t, "u=1, i", got.values["priority"])
 }
+
+// A cookie the server put in the jar and the explicit session cookies reach a
+// real server as one Cookie header with each name once. httpbin.org is the echo
+// service here because tls.peet.ws sets no cookie to put in the jar.
+func TestLive_CookiesEachNameOnce(t *testing.T) {
+	const base = "https://httpbin.org"
+	p := chromeProfile(t, stealth.ProfileChrome156, "chrome", "macos")
+	bc := liveClient(t, p)
+
+	_, _, status, err := bc.Do("GET", base+"/cookies/set?ct0=ROTATED&guest_id=g1", map[string]string{}, nil)
+	require.NoError(t, err, "echo service unreachable")
+	require.Equal(t, 302, status, "set-cookie answer (redirect not followed)")
+	require.Equal(t, "ROTATED", bc.GetCookieValue(base+"/headers", "ct0"), "the jar holds the server's ct0")
+
+	h := twitterHeaders("dummyauth", "OLDCT0", p.UserAgent)
+	singleSourceCookies(bc, base+"/headers", h)
+	order := wireChrome.shape("GET", base+"/headers", h)
+	body, _, status, err := bc.DoWithHeaderOrder("GET", base+"/headers", h, nil, order)
+	require.NoError(t, err)
+	require.Equal(t, 200, status)
+	var echo struct {
+		Headers map[string]string `json:"headers"`
+	}
+	require.NoError(t, json.Unmarshal(body, &echo))
+	t.Logf("cookie names on the wire: %v", cookieNames(echo.Headers["Cookie"]))
+	assert.ElementsMatch(t, []string{"auth_token", "ct0", "guest_id"}, cookieNames(echo.Headers["Cookie"]))
+	assert.Contains(t, echo.Headers["Cookie"], "ct0=ROTATED")
+	assert.NotContains(t, echo.Headers["Cookie"], "OLDCT0")
+}

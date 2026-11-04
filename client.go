@@ -742,6 +742,9 @@ func (c *Client) doRequestWithBody(ctx context.Context, acc *Account, bc *stealt
 	}
 
 	currentCall(ctx).ready()
+	if c.wireFor(acc, bc) == wireChrome {
+		singleSourceCookies(bc, urlStr, headers)
+	}
 	order := c.wireFor(acc, bc).shapeFor(method, urlStr, headers, c.pageSourceFor(acc, bc, method, body))
 	return bc.DoWithHeaderOrderCtx(ctx, method, urlStr, headers, body, order)
 }
