@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.8.3](https://github.com/anatolykoptev/go-twitter/compare/v0.8.2...v0.8.3) (2026-11-04)
+
+
+### Bug Fixes
+
+* keep credentials until a relogin succeeds; make proxy backoff race-free ([#155](https://github.com/anatolykoptev/go-twitter/issues/155)) ([eb7a574](https://github.com/anatolykoptev/go-twitter/commit/eb7a574ea90123f55f56644c5c1ebce0be841323))
+* **parse:** keep pinned, module and replaced tweets; mark replies, retweets, quotes and edits ([#152](https://github.com/anatolykoptev/go-twitter/issues/152)) ([a4ca52d](https://github.com/anatolykoptev/go-twitter/commit/a4ca52d7fa443c7037623526b8e3436db77424da))
+* surface errors-only 200s, keep the post-relogin error class, encode query values fully ([#157](https://github.com/anatolykoptev/go-twitter/issues/157)) ([4300907](https://github.com/anatolykoptev/go-twitter/commit/43009077c213fd910dd9964a23d2c9c586a94db7))
+
 ## [0.8.2](https://github.com/anatolykoptev/go-twitter/compare/v0.8.1...v0.8.2) (2026-11-03)
 
 
