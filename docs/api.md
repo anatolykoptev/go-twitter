@@ -76,6 +76,7 @@ All methods below are on `*twitter.Client`. Every one of them needs an authentic
 | `Pool()` | The underlying account pool. |
 | `Close()` | Closes the idle connections of every HTTP client the `Client` built and unregisters its metrics callback, so a replacement client can report on the same `MeterProvider`. Does not stop in-flight requests or background refreshes; the `Client` stays usable. |
 | `Account.SetPickPace(stealth.Jitter{Min, Max})` / `PickPace()` | Pool picks of the account are separated by a random gap in `[Min, Max)` (zero value = off, the default; `Max <= Min` = fixed `Min`). Other accounts serve meanwhile; a call with no other account waits for the gap. Runtime-safe; pool picks only (not account-pinned writes or media). See [Rate limits](rate-limits.md). |
+| `WireFor(stealth.TLSProfile)` / `Account.Wire()` | The request shape an identity sends: `"chrome"` (`WireChrome`) for the current desktop Chrome profiles (chrome_146, 150, 152, 156), `"legacy"` (`WireLegacy`, the frozen v0.8.6 shape) for every other profile. The client applies this same rule; call it instead of copying the profile set. `Account.Wire()` follows the profile stated on the account, so an account no `Client` has completed yet and that states none reports `"legacy"`. |
 | `ValidateAccount(ctx, acc)` | Check an account's credentials against the account settings endpoint. |
 | `SetAutoReloginGate(gate)` | Replace the relogin circuit breaker (see below). |
 

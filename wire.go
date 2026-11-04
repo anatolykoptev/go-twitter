@@ -45,6 +45,35 @@ func wireGenFor(p stealth.TLSProfile) wireGen {
 	return wireLegacy
 }
 
+// Wire names of the generations, as WireFor and Account.Wire report them.
+const (
+	WireChrome = "chrome"
+	WireLegacy = "legacy"
+)
+
+func (g wireGen) String() string {
+	if g == wireChrome {
+		return WireChrome
+	}
+	return WireLegacy
+}
+
+// WireFor reports which request shape an account on TLS profile p sends: WireChrome
+// for the current desktop Chrome profiles, WireLegacy (the frozen v0.8.6 shape)
+// for every other profile. It is the rule the client itself applies, so a
+// consumer labelling identities calls this instead of keeping its own copy of
+// the profile set.
+func WireFor(p stealth.TLSProfile) string { return wireGenFor(p).String() }
+
+// Wire reports the request shape the account sends, decided from the TLS profile
+// stated on it. NewClient completes an account's identity; an account no Client
+// has seen yet and that states no profile reports WireLegacy until then.
+func (a *Account) Wire() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return accountWire(a).String()
+}
+
 // accountWire is the generation an account sends, decided from the profile
 // STATED on the account (set by the caller, or paired with its user agent by
 // ensureIdentity), never from a TLS profile the transport defaulted to: an
