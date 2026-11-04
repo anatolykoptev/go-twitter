@@ -377,6 +377,7 @@ func TestRateLimitHeaders_SocialReportCarriesObservedWindow(t *testing.T) {
 	_, err := GetUserTweetsWithSocial(context.Background(), r.sc, "tesla", 5)
 	require.NoError(t, err)
 
+	flushReports(t)
 	r.reportsMu.Lock()
 	defer r.reportsMu.Unlock()
 	require.Equal(t, []string{"endpoint=UserTweets"}, r.acquireQueries, "acquire must hint the operation")
@@ -393,6 +394,7 @@ func TestRateLimitHeaders_SocialReportWithoutHeadersIsLegacyBody(t *testing.T) {
 	_, err := GetUserWithSocial(context.Background(), r.sc, "tesla")
 	require.NoError(t, err)
 
+	flushReports(t)
 	r.reportsMu.Lock()
 	defer r.reportsMu.Unlock()
 	require.Len(t, r.reportBodies, 1)

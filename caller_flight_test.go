@@ -37,6 +37,7 @@ func TestWithSocial_CallerCancel_ReportsNothingAndStops(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, context.Canceled), "want context.Canceled, got %v", err)
 
+	flushReports(t)
 	r.reportsMu.Lock()
 	defer r.reportsMu.Unlock()
 	for _, rep := range r.reports {
@@ -98,6 +99,7 @@ func TestWithSocial_BadRequest_NoRetryReportsSuccess(t *testing.T) {
 	assert.True(t, errors.Is(err, ErrBadRequest), "want ErrBadRequest, got %v", err)
 	assert.EqualValues(t, 1, hits.Load(), "one request only: no retry on the same lease")
 	assert.EqualValues(t, 1, r.acquire.Load(), "deterministic caller error must not burn another lease")
+	flushReports(t)
 	r.reportsMu.Lock()
 	defer r.reportsMu.Unlock()
 	require.Len(t, r.reports, 1)

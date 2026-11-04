@@ -129,6 +129,7 @@ func TestSocial_EndpointFault_NeverReportsAuthError(t *testing.T) {
 	assert.EqualValues(t, socialEndpointFaultStop, r.acquire.Load(),
 		"two different leases both faulting proves the fault endpoint-wide: the call stops early")
 
+	flushReports(t)
 	r.reportsMu.Lock()
 	defer r.reportsMu.Unlock()
 	require.NotEmpty(t, r.reports, "every lease must be reported")
@@ -255,6 +256,7 @@ func TestSocial_OverloadedNeverReportsSuccess(t *testing.T) {
 	assert.EqualValues(t, maxSocialRetries, r.acquire.Load(),
 		"overload is not provably endpoint-wide: the full lease budget still rotates")
 
+	flushReports(t)
 	r.reportsMu.Lock()
 	defer r.reportsMu.Unlock()
 	assert.Empty(t, r.reports,
@@ -372,6 +374,7 @@ func TestSocial_LeaseProxyMalformed_FailsClosedNoEgress(t *testing.T) {
 	assert.EqualValues(t, 0, xHits.Load(),
 		"a lease whose proxy cannot be built must never reach X — its creds would egress direct")
 
+	flushReports(t)
 	r.reportsMu.Lock()
 	defer r.reportsMu.Unlock()
 	require.NotEmpty(t, r.reports)

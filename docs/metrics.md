@@ -34,6 +34,7 @@ metrics.
 | `twitter.client.queryid.age` | gauge | `s` | none |
 | `twitter.client.queryid.refresh.duration` | histogram | `s` | `twitter.trigger`, `twitter.result` |
 | `twitter.client.xtid.failures` | counter | `{failure}` | none |
+| `twitter.client.usage_report.dropped` | counter | `{report}` | none |
 
 No instrument ever carries an account handle, user ID, list ID, search query or
 URL as an attribute.
@@ -160,6 +161,13 @@ because generating it failed (the keys could not be built or the init is in its
 negative-cache backoff). The request is not blocked; a sustained non-zero rate
 means the generator is broken and X will likely answer 404s. The client also logs
 one warning per failure streak, at most once every 5 minutes.
+
+### `twitter.client.usage_report.dropped`
+`*WithSocial` helpers send their usage report to the credential service in the
+background, at most 16 in flight. A report that arrives when all 16 slots are
+busy (the service is slow or stuck) is dropped, and this counter is incremented.
+A sustained non-zero rate means the credential service is not keeping up and its
+view of lease health is lagging. Reported on the `SetSocialMeterProvider` provider.
 
 ### `twitter.client.queryid.refreshes` / `.changed` / `.age`
 

@@ -152,6 +152,7 @@ func TestWithSocial_NotFoundNoRetry(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrNotFound)
 	assert.Equal(t, 1, acquires, "not-found must not retry across accounts")
+	flushReports(t)
 	assert.Equal(t, "success", lastReport, "not-found is a healthy-account outcome")
 }
 
@@ -296,6 +297,10 @@ type socialRig struct {
 	// keepPacer keeps the production account pacer on the per-call clients
 	// (the rig otherwise disables it to stay fast).
 	sameAccount, keepPacer bool
+
+	// reportHook, when set, runs inside the fake go-social's report handler
+	// before the report is recorded — the seam for a slow usage endpoint.
+	reportHook func(*http.Request)
 }
 
 func newSocialRig(t *testing.T) *socialRig {
@@ -319,6 +324,9 @@ func newSocialRigX(t *testing.T, xHandler http.HandlerFunc) *socialRig {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		if req.Method == http.MethodPost {
+			if r.reportHook != nil {
+				r.reportHook(req)
+			}
 			var rep struct {
 				Status string `json:"status"`
 			}

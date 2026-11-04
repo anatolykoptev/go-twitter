@@ -41,6 +41,7 @@ const (
 	MetricQIDAge              = "twitter.client.queryid.age"
 	MetricQIDWalk             = "twitter.client.queryid.refresh.duration"
 	MetricXtidFailures        = "twitter.client.xtid.failures"
+	MetricUsageReportsDropped = "twitter.client.usage_report.dropped"
 
 	// Attribute keys.
 	AttrOperation    = "twitter.operation"
@@ -128,6 +129,7 @@ type Metrics struct {
 	qidAge          metric.Float64Gauge
 	qidWalk         metric.Float64Histogram
 	xtidFailures    metric.Int64Counter
+	reportsDropped  metric.Int64Counter
 }
 
 // instrumentationVersion reports this module's version as seen by the
@@ -256,6 +258,12 @@ func New(mp metric.MeterProvider) *Metrics {
 		metric.WithDescription("Requests sent without x-client-transaction-id because generating it failed.")); err != nil {
 		fail(MetricXtidFailures, err)
 		m.xtidFailures = noop.Int64Counter{}
+	}
+	if m.reportsDropped, err = meter.Int64Counter(MetricUsageReportsDropped,
+		metric.WithUnit("{report}"),
+		metric.WithDescription("Credential-service usage reports dropped because too many were already in flight.")); err != nil {
+		fail(MetricUsageReportsDropped, err)
+		m.reportsDropped = noop.Int64Counter{}
 	}
 	return m
 }
@@ -423,6 +431,15 @@ func (m *Metrics) RecordXtidFailure() {
 		return
 	}
 	m.xtidFailures.Add(context.Background(), 1)
+}
+
+// RecordUsageReportDropped counts one *WithSocial usage report dropped at the
+// in-flight cap.
+func (m *Metrics) RecordUsageReportDropped() {
+	if m == nil {
+		return
+	}
+	m.reportsDropped.Add(context.Background(), 1)
 }
 
 func (m *Metrics) RecordProxyFailure() {
