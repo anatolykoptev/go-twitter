@@ -68,7 +68,7 @@ const (
 	errCSRF                     // 353 — csrf token mismatch
 	errAuthExpired              // 32 — could not authenticate
 	errBlocked                  // 161 — blocked from performing action
-	errNotAuthorized            // 179, 219 — not authorized
+	errNotAuthorized            // 37, 179, 219 — not authorized
 	errInternal                 // 131 — Twitter internal error
 	errForbidden                // 403 — forbidden (no recognized error code)
 	errEndpoint                 // HTTP 404/410 or GraphQL-shaped 400 — endpoint-wide fault, not the account's
@@ -76,6 +76,7 @@ const (
 	errBadRequest               // HTTP 400 with an input-validation marker — the caller's own error, deterministic
 	errNotFound                 // errors-only 2xx with a deterministic-miss marker — the resource is absent (terminal)
 	errUnexpected               // errors-only 2xx with no recognized class — X answered, the library does not recognise it (terminal)
+	errAutomated                // 226 — X flagged the request as possibly automated; account-scoped, graduated bench (AuthCooldown, then BanCooldown on a repeat)
 
 	// errClassCount is one past the last class; metrics_test iterates [0, errClassCount)
 	// to prove every class has a twitter.outcome mapping. Keep it LAST.
@@ -125,6 +126,14 @@ func rateLimitRemaining(hdrs map[string]string) (int, bool) {
 // bench a dead account before it burns a full cooldown cycle of retries.
 const headerless88BanThreshold = 3
 
+// automatedCode is X's "this request looks like it might be automated" error
+// code (226). It is X's earliest verdict about an account's traffic, issued
+// mostly on writes; see errAutomated.
+const automatedCode = 226
+
+// accessRefusedCode is X's access/credentials refusal (37).
+const accessRefusedCode = 37
+
 // classifyError inspects a response body (and its headers, for code 88) for
 // known Twitter error codes.
 func classifyError(body []byte, hdrs map[string]string) errorClass {
@@ -157,8 +166,10 @@ func classifyError(body []byte, hdrs map[string]string) errorClass {
 			return errAuthExpired
 		case 161:
 			return errBlocked
-		case 179, 219:
+		case accessRefusedCode, 179, 219:
 			return errNotAuthorized
+		case automatedCode:
+			return errAutomated
 		case 131:
 			return errInternal
 		}
@@ -430,11 +441,22 @@ func IsBlocked(err error) bool {
 	return false
 }
 
-// IsNotAuthorized reports a not-authorized condition (codes 179 / 219).
+// IsNotAuthorized reports a not-authorized condition (codes 37 / 179 / 219).
 func IsNotAuthorized(err error) bool {
 	var ae *APIError
 	if errors.As(err, &ae) {
 		return ae.Class == errNotAuthorized
+	}
+	return false
+}
+
+// IsAutomated reports X's "this request looks like it might be automated"
+// verdict (code 226). The serving account has been benched for a cooldown;
+// callers should treat it as an account-scoped warning, not retry it.
+func IsAutomated(err error) bool {
+	var ae *APIError
+	if errors.As(err, &ae) {
+		return ae.Class == errAutomated
 	}
 	return false
 }
@@ -470,6 +492,26 @@ func partialSuccessClass(c errorClass) bool {
 		return true
 	}
 	return false
+}
+
+// partialSuccess extends partialSuccessClass with code 37 riding next to usable
+// data: 37 may refer to the target (a protected or restricted object) rather
+// than the viewer, so only an errors-only 37 is an account verdict. 226 and the
+// other account-dead codes stay verdicts even with data.
+func partialSuccess(c errorClass, body []byte) bool {
+	if partialSuccessClass(c) {
+		return true
+	}
+	if c != errNotAuthorized {
+		return false
+	}
+	codes := extractErrorCodes(body)
+	for _, code := range codes {
+		if code != accessRefusedCode {
+			return false
+		}
+	}
+	return len(codes) > 0
 }
 
 // minRateLimitBlock floors a parsed reset: a reset already in the past (clock

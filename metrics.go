@@ -223,6 +223,13 @@ func (m *clientMetrics) recordXtidFailure() {
 	m.t.RecordXtidFailure()
 }
 
+func (m *clientMetrics) recordAutomatedSharedSuspect() {
+	if m == nil {
+		return
+	}
+	m.t.RecordAutomatedSharedSuspect()
+}
+
 func (m *clientMetrics) recordProxyFailure() {
 	if m == nil {
 		return
@@ -318,6 +325,8 @@ func outcomeForClass(c errorClass) string {
 		return telemetry.OutcomeNotFound
 	case errUnexpected:
 		return telemetry.OutcomeUnexpected
+	case errAutomated:
+		return telemetry.OutcomeAutomated
 	}
 	return telemetry.OutcomeOther
 }

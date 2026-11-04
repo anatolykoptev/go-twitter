@@ -456,60 +456,17 @@ func TestPostRelogin_5xxErrorsOnlyRetry_StaysRetryable(t *testing.T) {
 
 // --- #158.2: account-specific codes stay unclassified ---
 
-// 37, 185, 220, 226 and 344 are not verdicts we can attribute to the serving
-// account (see docs/errors.md), so classifyError leaves them alone.
+// 185, 220 and 344 are not verdicts we can attribute to the serving account
+// (see docs/errors.md), so classifyError leaves them alone. 37 and 226 were
+// promoted to account verdicts (errNotAuthorized / errAutomated): see
+// automated_test.go.
 //
-// Mutation: errors.go classifyError — `case 161, 226:` => RED for code 226.
+// Mutation: errors.go classifyError — `case 161, 185:` => RED for code 185.
 func TestClassifyError_UnattributableCodesStayUnclassified(t *testing.T) {
-	for _, code := range []int{37, 185, 220, 226, 344} {
+	for _, code := range []int{185, 220, 344} {
 		body := []byte(`{"errors":[{"code":` + strconv.Itoa(code) + `,"message":"m"}]}`)
 		assert.Equal(t, errNone, classifyError(body, nil), "code %d", code)
 	}
-}
-
-// A 200 carrying usable data next to a code-226 entry still succeeds, and an
-// errors-only 226 is a terminal ErrUnexpectedResponse that benches nobody.
-//
-// Mutation: errors.go classifyError — `case 161, 226:` (226 => errBlocked) =>
-// RED: the data answer is discarded and the account benched; the errors-only
-// answer rotates instead of surfacing ErrUnexpectedResponse.
-func TestCode226_DataStillSucceeds_ErrorsOnlyIsUnexpected(t *testing.T) {
-	good := userTweetsBody(snowflakeAt(time.Now()))
-	withErr := `{"errors":[{"code":226,"message":"This request looks like it might be automated."}],` + strings.TrimPrefix(good, "{")
-	run := func(t *testing.T, body string) (error, []*Account, *atomic.Int32) {
-		var hits atomic.Int32
-		c, accs := newPoolWaitClient(t, 2)
-		srv := startFakeX(t, func(w http.ResponseWriter, _ *http.Request) {
-			hits.Add(1)
-			_, _ = w.Write([]byte(body))
-		})
-		c.client = srv
-		for _, a := range accs {
-			a.client = srv
-		}
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_, err := c.GetUserTweets(ctx, "999", 20)
-		return err, accs, &hits
-	}
-
-	t.Run("data_with_226_succeeds", func(t *testing.T) {
-		err, accs, hits := run(t, withErr)
-		require.NoError(t, err)
-		assert.EqualValues(t, 1, hits.Load())
-		for _, a := range accs {
-			assert.True(t, a.IsActive())
-		}
-	})
-	t.Run("errors_only_226_is_unexpected_no_bench", func(t *testing.T) {
-		err, accs, hits := run(t, `{"errors":[{"code":226,"message":"This request looks like it might be automated."}]}`)
-		require.Error(t, err)
-		assert.ErrorIs(t, err, ErrUnexpectedResponse)
-		assert.EqualValues(t, 1, hits.Load(), "terminal: no rotation")
-		for _, a := range accs {
-			assert.True(t, a.IsActive(), "no account is benched on an unattributable code")
-		}
-	})
 }
 
 // --- #158.5: untested guards ---
