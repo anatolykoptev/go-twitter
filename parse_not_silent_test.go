@@ -306,3 +306,31 @@ func TestTweetNotifications_ResultWithoutRestID_DroppedAndCounted(t *testing.T) 
 	require.Len(t, tweets, 1)
 	assert.Equal(t, map[string]int64{"no_id": 1}, parseDrops(t, f, "tweetNotificationsQuery"))
 }
+
+// D3 — the x-web notifications timeline dates a tweet without
+// details.created_at_ms by its snowflake id (the consumer measures latency from
+// CreatedAt); one no source can date is dropped and counted.
+//
+// Mutation: internal/parse/devicefollow.go TweetNotifications — delete the
+// `else if ts, err := SnowflakeTime(r.RestID)` branch => RED (the dated
+// tweet is dropped too: `"[]" should have 1 item(s), but has 0`).
+func TestTweetNotifications_NoCreatedAtMs_UsesSnowflakeOrDrops(t *testing.T) {
+	var f *metricsFixture
+	f = newMetricsFixture(t, func(w http.ResponseWriter, r *http.Request) {
+		id := snowflakeAt(f.now.Add(-time.Minute))
+		entry := func(eid, result string) string {
+			return `{"entry_id":"` + eid + `","content":{"content":{"__typename":"TimelineTweet","tweet_results":{"result":` + result + `}}}}`
+		}
+		_, _ = w.Write([]byte(`{"data":{"viewer_v2":{"user_results":{"result":{"tweet_notification_timeline":{"timeline":{"instructions":[{"entries":[` +
+			entry("tweet-undatable", `{"__typename":"Tweet","rest_id":"not-a-snowflake","details":{"full_text":"x"}}`) + `,` +
+			entry("tweet-snow", `{"__typename":"Tweet","rest_id":"`+id+`","details":{"full_text":"ok"}}`) +
+			`]}]}}}}}}}`))
+	}, "d3_acc")
+
+	tweets, err := f.c.GetTweetNotifications(context.Background(), 20)
+	require.NoError(t, err)
+	require.Len(t, tweets, 1)
+	assert.True(t, tweets[0].CreatedAt.Equal(f.now.Add(-time.Minute).Truncate(time.Millisecond)),
+		"CreatedAt = %v, want the snowflake time", tweets[0].CreatedAt)
+	assert.Equal(t, map[string]int64{"no_created_at": 1}, parseDrops(t, f, "tweetNotificationsQuery"))
+}

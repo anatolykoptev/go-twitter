@@ -257,8 +257,16 @@ func TweetNotifications(body []byte, opts ...Option) ([]*model.Tweet, string, er
 				authorID = r.Legacy.UserIDStr
 			}
 			t := &model.Tweet{ID: r.RestID, AuthorID: authorID, AuthorHandle: author.screenName(), AuthorName: author.displayName(), Text: text}
+			// Same rule as the timeline path: details.created_at_ms, then the
+			// snowflake time of the id, else the tweet is dropped (counted).
 			if r.Details.CreatedAtMs > 0 {
 				t.CreatedAt = time.UnixMilli(r.Details.CreatedAtMs).UTC()
+			} else if ts, err := SnowflakeTime(r.RestID); err == nil {
+				t.CreatedAt = ts
+			} else {
+				o.drop(DropNoCreatedAt)
+				slog.Debug("skip notification tweet without creation time", slog.String("entry", e.EntryID))
+				continue
 			}
 			tweets = append(tweets, t)
 		}
