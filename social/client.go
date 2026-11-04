@@ -36,6 +36,32 @@ type Credentials struct {
 	Credentials map[string]string `json:"credentials"`
 	Proxy       string            `json:"proxy"`
 	ExpiresIn   int               `json:"expires_in"`
+	// Identity is the browser identity the service presents this session as.
+	// Optional: nil when the service did not state one.
+	Identity *Identity `json:"identity,omitempty"`
+}
+
+// Identity is the concrete browser identity an account service presents a
+// session as, so every process using that session presents the same one. The
+// consumer applies it as stated and never derives a substitute.
+type Identity struct {
+	// Mode records how the service chose the identity (for example "legacy" or
+	// "derived"). It is informational and does not change how it is applied.
+	Mode string `json:"mode,omitempty"`
+	// TLSProfile names the TLS fingerprint profile (for example "chrome_131").
+	TLSProfile string `json:"tls_profile"`
+	// UserAgent is the User-Agent header the service presents.
+	UserAgent string `json:"user_agent"`
+	// Browser is the browser family ("chrome", "edge", ...).
+	Browser string `json:"browser,omitempty"`
+	// OS is the operating system ("windows", "macos", ...).
+	OS string `json:"os,omitempty"`
+}
+
+// IsZero reports whether no field of the identity is set; an empty object is
+// treated like an absent one.
+func (i *Identity) IsZero() bool {
+	return i == nil || *i == Identity{}
 }
 
 // AcquireAccount gets the next healthy account for the given platform.

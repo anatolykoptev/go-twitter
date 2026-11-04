@@ -293,6 +293,12 @@ type socialRig struct {
 	// go-social hands out — the seam for a malformed/dead-proxy lease.
 	leaseProxy string
 
+	// leaseIdentity and leaseUser, when set, are stamped onto every Credentials
+	// the fake go-social hands out (the account service's stated identity, and
+	// a fixed username so the library's own derivation is known).
+	leaseIdentity *social.Identity
+	leaseUser     string
+
 	// sameAccount makes the fake go-social lease one account every time, and
 	// keepPacer keeps the production account pacer on the per-call clients
 	// (the rig otherwise disables it to stay fast).
@@ -351,11 +357,16 @@ func newSocialRigX(t *testing.T, xHandler http.HandlerFunc) *socialRig {
 		if r.acquire.Add(1)%2 == 0 && !r.sameAccount {
 			who = "b"
 		}
+		user := "user_" + who
+		if r.leaseUser != "" {
+			user = r.leaseUser
+		}
 		_ = json.NewEncoder(w).Encode(social.Credentials{
-			ID:    "acc-" + who,
-			Proxy: r.leaseProxy,
+			ID:       "acc-" + who,
+			Proxy:    r.leaseProxy,
+			Identity: r.leaseIdentity,
 			Credentials: map[string]string{
-				"username": "user_" + who, "auth_token": "tok" + who, "ct0": "ct0" + who,
+				"username": user, "auth_token": "tok" + who, "ct0": "ct0" + who,
 			},
 		})
 	}))
