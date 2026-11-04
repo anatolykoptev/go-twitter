@@ -89,9 +89,9 @@ func NewClient(cfg ClientConfig, clientOpts ...ClientOption) (*Client, error) {
 	}
 	m := newClientMetrics(cfg.MeterProvider)
 
-	opts := []stealth.ClientOption{
+	opts := append([]stealth.ClientOption{
 		stealth.WithHeaderOrder(twitterHeaderOrder),
-	}
+	}, wireClientOptions(defaultTLSProfile)...)
 	if cfg.DefaultProxy != "" {
 		opts = append(opts, stealth.WithProxy(cfg.DefaultProxy))
 	}
@@ -289,6 +289,11 @@ func buildAccountClient(cfg ClientConfig, acc *Account) (*stealth.BrowserClient,
 	// The caller has completed the identity (ensureIdentity); the account's
 	// mutex may be held, so it is read directly.
 	opts := []stealth.ClientOption{stealth.WithHeaderOrder(twitterHeaderOrder)}
+	if p := acc.Profile.TLSProfile; p != "" {
+		opts = append(opts, wireClientOptions(p)...)
+	} else {
+		opts = append(opts, wireClientOptions(defaultTLSProfile)...)
+	}
 	if acc.Profile.TLSProfile != "" {
 		// Profile and UA go in together, so the client's reported identity (used
 		// by the login flow) is exactly what every later request sends.
@@ -626,7 +631,7 @@ func (c *Client) doRequestWithBody(ctx context.Context, acc *Account, bc *stealt
 	}
 
 	currentCall(ctx).ready()
-	return bc.DoWithHeaderOrderCtx(ctx, method, urlStr, headers, body, twitterHeaderOrder)
+	return bc.DoWithHeaderOrderCtx(ctx, method, urlStr, headers, body, wireOrderFor(bc, method, urlStr, headers))
 }
 
 // xpffFor returns the generator for a request: the account's own when the

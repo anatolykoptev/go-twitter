@@ -351,9 +351,9 @@ done:
 
 // loginOpenAccount creates an anonymous Twitter session.
 func (c *Client) loginOpenAccount(ctx context.Context) (*Account, error) {
-	bc, err := stealth.NewClient(
+	bc, err := stealth.NewClient(append([]stealth.ClientOption{
 		stealth.WithHeaderOrder(twitterHeaderOrder),
-	)
+	}, wireClientOptions(defaultTLSProfile)...)...)
 	if err != nil {
 		return nil, fmt.Errorf("new client: %w", err)
 	}
@@ -372,9 +372,9 @@ func (c *Client) openAccountOn(bc *stealth.BrowserClient) (*Account, error) {
 	}
 
 	headers := loginFlowHeaders(guestToken, "", clientUA(bc))
-	body, _, status, err := bc.DoWithHeaderOrder("POST",
-		twitterAPIURL+"/1.1/onboarding/task.json?flow_name=welcome",
-		headers, strings.NewReader(openAccountPayload), twitterHeaderOrder,
+	welcomeURL := twitterAPIURL + "/1.1/onboarding/task.json?flow_name=welcome"
+	body, _, status, err := bc.DoWithHeaderOrder("POST", welcomeURL,
+		headers, strings.NewReader(openAccountPayload), wireOrderFor(bc, "POST", welcomeURL, headers),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("welcome init: %w", err)
@@ -397,9 +397,9 @@ func (c *Client) openAccountOn(bc *stealth.BrowserClient) (*Account, error) {
 	for _, st := range flowResp.Subtasks {
 		if st.SubtaskID == "LoginJsInstrumentationSubtask" {
 			payload := fmt.Sprintf(`{"flow_token":%q,"subtask_inputs":[{"subtask_id":"LoginJsInstrumentationSubtask","js_instrumentation":{"response":"{\"rf\":{\"a\":\"b\"},\"s\":\"s\"}","link":"next_link"}}]}`, flowToken)
-			body2, _, status2, err := bc.DoWithHeaderOrder("POST",
-				twitterAPIURL+"/1.1/onboarding/task.json",
-				headers, strings.NewReader(payload), twitterHeaderOrder,
+			stepURL := twitterAPIURL + "/1.1/onboarding/task.json"
+			body2, _, status2, err := bc.DoWithHeaderOrder("POST", stepURL,
+				headers, strings.NewReader(payload), wireOrderFor(bc, "POST", stepURL, headers),
 			)
 			if err != nil {
 				return nil, fmt.Errorf("js instrumentation: %w", err)
@@ -455,7 +455,8 @@ func (c *Client) getGuestToken(client *stealth.BrowserClient) (string, error) {
 		"content-type":  "application/json",
 		"user-agent":    ua,
 	}, ua)
-	body, _, status, err := client.DoWithHeaderOrder("POST", twitterAPIURL+"/1.1/guest/activate.json", headers, nil, twitterHeaderOrder)
+	activateURL := twitterAPIURL + "/1.1/guest/activate.json"
+	body, _, status, err := client.DoWithHeaderOrder("POST", activateURL, headers, nil, wireOrderFor(client, "POST", activateURL, headers))
 	if err != nil {
 		return "", err
 	}
@@ -553,11 +554,11 @@ func (c *Client) initLoginFlowFull(client *stealth.BrowserClient, guestToken str
 	headers := loginFlowHeaders(guestToken, "", clientUA(client))
 	payload := `{"input_flow_data":{"flow_context":{"debug_overrides":{},"start_location":{"location":"splash_screen"}}},"subtask_versions":{"action_list":2,"alert_dialog":1,"app_download_cta":1,"check_logged_in_account":1,"choice_selection":3,"contacts_live_sync_permission_prompt":0,"cta":7,"email_verification":2,"end_flow":1,"enter_date":1,"enter_email":2,"enter_password":5,"enter_phone":2,"enter_recaptcha":1,"enter_text":5,"enter_username":2,"generic_urt":3,"in_app_notification":1,"interest_picker":3,"js_instrumentation":1,"menu_dialog":1,"notifications_permission_prompt":2,"open_account":2,"open_home_timeline":1,"open_link":1,"phone_verification":4,"privacy_options":1,"security_key":3,"select_avatar":4,"select_banner":2,"settings_list":7,"show_code":1,"sign_up":2,"sign_up_review":4,"tweet_selection_urt":1,"update_users":1,"upload_media":1,"user_recommendations_list":4,"user_recommendations_urt":1,"wait_spinner":3,"web_modal":1}}`
 
-	body, _, status, err := client.DoWithHeaderOrder("POST",
-		twitterAPIURL+"/1.1/onboarding/task.json?flow_name=login",
+	initURL := twitterAPIURL + "/1.1/onboarding/task.json?flow_name=login"
+	body, _, status, err := client.DoWithHeaderOrder("POST", initURL,
 		headers,
 		strings.NewReader(payload),
-		twitterHeaderOrder,
+		wireOrderFor(client, "POST", initURL, headers),
 	)
 	if err != nil {
 		return nil, err
@@ -570,11 +571,11 @@ func (c *Client) initLoginFlowFull(client *stealth.BrowserClient, guestToken str
 
 func (c *Client) submitFlowStep(client *stealth.BrowserClient, guestToken, payload string) (*flowResponse, error) {
 	headers := loginFlowHeaders(guestToken, "", clientUA(client))
-	body, _, status, err := client.DoWithHeaderOrder("POST",
-		twitterAPIURL+"/1.1/onboarding/task.json",
+	stepURL := twitterAPIURL + "/1.1/onboarding/task.json"
+	body, _, status, err := client.DoWithHeaderOrder("POST", stepURL,
 		headers,
 		strings.NewReader(payload),
-		twitterHeaderOrder,
+		wireOrderFor(client, "POST", stepURL, headers),
 	)
 	if err != nil {
 		return nil, err

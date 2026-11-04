@@ -404,7 +404,7 @@ func withBuiltinProfiles(t *testing.T, profiles []stealth.BrowserProfile) {
 
 // A profile's identity is browser + OS + TLS fingerprint, not its UA text:
 // editing UA strings in go-stealth moves no account, and adding one profile
-// moves only the accounts it wins (about 1/(n+1)).
+// moves only the accounts it wins (its weight over the new total).
 //
 // Mutation: identity.go profileForAccountKey — put p.UserAgent back into the
 // hashed key => RED (editing UA text reshuffles the assignment).
@@ -421,7 +421,10 @@ func TestProfileAssignment_KeysOnProfileIdentityNotUserAgentText(t *testing.T) {
 	withBuiltinProfiles(t, edited)
 	assert.Equal(t, base, assignmentFor(users), "editing UA text must move no account")
 
-	n := len(identityCandidates())
+	var total float64
+	for _, p := range identityCandidates() {
+		total += identityShareWeights[osBrowserKey(p)]
+	}
 	added := append(append([]stealth.BrowserProfile(nil), orig...), stealth.BrowserProfile{
 		UserAgent: "x", TLSProfile: "chrome_999", Browser: "chrome", OS: "windows",
 	})
@@ -433,8 +436,9 @@ func TestProfileAssignment_KeysOnProfileIdentityNotUserAgentText(t *testing.T) {
 			assert.Equal(t, "chrome/windows/chrome_999", a, "an account may only move to the newcomer")
 		}
 	}
-	want := float64(users) / float64(n+1)
-	assert.InDelta(t, want, float64(moved), want*0.4, "adding a profile should move about 1/(n+1) of accounts")
+	newcomer := identityShareWeights["chrome/windows"]
+	want := float64(users) * newcomer / (total + newcomer)
+	assert.InDelta(t, want, float64(moved), want*0.25, "adding a profile should move about its weight's share of accounts")
 }
 
 // Login-flow requests (guest activation, flow init, every step) go out on the
