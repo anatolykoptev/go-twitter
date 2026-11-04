@@ -11,7 +11,10 @@ import (
 // epCheckSession labels CheckSession in rate windows, metrics and events.
 const epCheckSession = "CheckSession"
 
-// accountSettingsPath is the REST path the web app reads on load.
+// accountSettingsPath is the REST path the web app reads on load. The signed-in
+// capture in testdata/wire_loggedin_oracle.json records host (api.x.com), path,
+// header order and values for it, but not the query string; the request is sent
+// without one, which is unverified against a real browser.
 const accountSettingsPath = "/1.1/account/settings.json"
 
 // SessionInfo is the identity a live session belongs to.

@@ -26,6 +26,7 @@ metrics.
 | `twitter.client.relogins` | counter | `{relogin}` | `twitter.outcome` |
 | `twitter.client.proxy.failures` | counter | `{failure}` | none |
 | `twitter.client.proxy.client_failures` | counter | `{failure}` | none |
+| `twitter.client.automated.shared_suspect` | counter | `{signal}` | none |
 | `twitter.client.ratelimit.remaining` | histogram | `{request}` | `twitter.operation` |
 | `twitter.client.ratelimit.limit` | histogram | `{request}` | `twitter.operation` |
 | `twitter.client.ratelimit.holds` | counter | `{hold}` | `twitter.operation` |
@@ -70,7 +71,7 @@ instrumented.
 | `suspended` | code 64 |
 | `locked` | code 326 |
 | `blocked` | code 161 |
-| `automated` | code 226 — X flagged the request as possibly automated; the account is benched for a cooldown no shorter than `BanCooldown` |
+| `automated` | code 226 — X flagged the request as possibly automated; the account is benched (`AuthCooldown`, then `BanCooldown` on a repeat within 24 h) |
 | `forbidden` | HTTP 403 without a recognized code |
 | `internal` | code 131 (recorded as `internal` even when the client then accepts usable data) |
 | `not_found` | two populations under one label: HTTP 404 — the historical dead-route label (an endpoint fault under the hood: never charged to the account) — and an errors-only 2xx carrying a deterministic-miss marker (`ErrNotFound`, an absent resource). It is no longer the raw 404 rate; an alert on it counts both |
@@ -335,6 +336,10 @@ with `SetAutoReloginGate` - refused the attempt).
 
 Incremented at the same site that emits the `proxy.down` pool alert: a
 proxy-layer failure that puts an account's proxy into backoff.
+
+### `twitter.client.automated.shared_suspect`
+
+Incremented once each time the number of DISTINCT accounts that answered code 226 within the last 10 minutes reaches 2 or more (and again only after it has dropped below 2). Fired alongside one error log line and the `automated.shared_suspect` pool alert. A shared cause (proxy, request signature) is suspected; the signal is detection only.
 
 ### `twitter.client.proxy.client_failures`
 

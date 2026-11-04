@@ -488,6 +488,7 @@ func (c *Client) doMediaRequest(ctx context.Context, acc *Account, method, urlSt
 				Message: fmt.Sprintf("%s errors-only %d: %s", epUploadMedia, status, truncateBytes(body, 200))}
 		}
 		if cls == errAutomated {
+			c.recordAPICall(epUploadMedia, false, false)
 			return nil, c.benchAutomated(acc, epUploadMedia, status, body, respHdrs)
 		}
 		if cls != errNone {

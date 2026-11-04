@@ -49,8 +49,9 @@ type Account struct {
 	ct0RefreshedAt     time.Time
 	proxyBackoff       time.Time
 	proxyConsecFails   int
-	consecHeaderless88 int // consecutive code-88s with no parseable x-rate-limit-remaining
-	inFlight           int // requests currently holding this account's slot (ClientConfig.MaxInFlightPerAccount)
+	consecHeaderless88 int       // consecutive code-88s with no parseable x-rate-limit-remaining
+	automatedUntil     time.Time // end of this account's last 226 bench (zero = never flagged); decides repeat escalation
+	inFlight           int       // requests currently holding this account's slot (ClientConfig.MaxInFlightPerAccount)
 	rateLimiter        *ratelimit.Limiter
 	xpffGen            *xpff.Generator // this account's x-xp-forwarded-for generator (see xpffGenerator)
 	xpffGuestID        string          // guest id xpffGen was built for

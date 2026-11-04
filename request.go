@@ -694,7 +694,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 		// 64 suspended, 88 banned/limited) riding alongside data must take its
 		// class arm below, never count as a healthy success. A 200 with errors
 		// and NO usable data still fails through the class switch below.
-		if partialSuccessClass(errClass) && hasResponseData(body) {
+		if partialSuccess(errClass, body) && hasResponseData(body) {
 			if newCT0 := extractCT0FromHeaders(respHdrs); newCT0 != "" && newCT0 != ct0 {
 				acc.SetCT0(newCT0)
 				authTok2, ct02, _ := acc.Credentials()
@@ -860,6 +860,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 			continue
 
 		case errAutomated:
+			c.recordAPICall(endpoint, false, false)
 			lastErr = c.benchAutomated(acc, endpoint, http.StatusOK, body, respHdrs)
 			continue
 
@@ -1234,7 +1235,7 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 		// the same X-side-classes-only rule as doPoolRequest: account-dead
 		// verdicts (326, 64, 88) take their class arm below even with data.
 		// Errors with no usable data still fail through the class switch.
-		if partialSuccessClass(errClass) && hasResponseData(body) {
+		if partialSuccess(errClass, body) && hasResponseData(body) {
 			if newCT0 := extractCT0FromHeaders(respHdrs); newCT0 != "" && newCT0 != ct0 {
 				acc.SetCT0(newCT0)
 				authTok2, ct02, _ := acc.Credentials()
@@ -1295,6 +1296,7 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 		case errAutomated:
 			// A write is never replayed on another account; the verdict is
 			// final for this one.
+			c.recordAPICall(endpoint, false, false)
 			return nil, c.benchAutomated(acc, endpoint, http.StatusOK, body, respHdrs)
 		default:
 			c.recordAPICall(endpoint, false, false)
@@ -1431,7 +1433,7 @@ func (c *Client) postReloginFailure(acc *Account, endpoint string, status int, b
 	case cls == errLocked || cls == errBanned:
 		c.pool.SoftDeactivate(acc, c.cfg.BanCooldown)
 	case cls == errAutomated:
-		c.pool.SoftDeactivate(acc, automatedCooldown(c.cfg.BanCooldown))
+		c.pool.SoftDeactivate(acc, c.automatedBenchFor(acc))
 	case cls == errRateLimited:
 		acc.MarkEndpointRateLimited(endpoint, parseRateLimitReset(hdrs[xRateLimitReset]))
 	case cls == errNotFound || cls == errUnexpected:
@@ -1523,7 +1525,7 @@ func (c *Client) attributeTransportError(acc *Account, err error) {
 // account-scoped too, but it is a transport error and tracked by the caller.
 func accountScopedFailure(err error) bool {
 	switch failureClass(err) {
-	case errBanned, errRateLimited, errSuspended, errLocked, errCSRF, errAuthExpired, errBlocked, errNotAuthorized, errAutomated:
+	case errBanned, errRateLimited, errSuspended, errLocked, errCSRF, errAuthExpired, errBlocked, errNotAuthorized:
 		return true
 	}
 	return false

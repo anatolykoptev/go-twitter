@@ -3,6 +3,9 @@ package twitter
 import (
 	"context"
 	"net/http"
+	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -41,49 +44,102 @@ func TestOutcomeForClass_Automated(t *testing.T) {
 	assert.Equal(t, telemetry.OutcomeAutomated, attemptOutcome(200, []byte(automated226Only), nil, nil, false))
 }
 
-// 226 in an errors-only 200 and in a 200 that also carries data: both benchmark
-// the serving account (BanCooldown floor, jitter ceiling +25%) and neither is a
-// success. The data-bearing body must not take the partial-success bypass.
+// Distinct cooldowns make every bench assertion name WHICH cooldown applied:
+// the first-226 window [2h, 2.5h] and the repeat window [5h, 6.25h] cannot
+// overlap, and neither equals the 1h default a fixture might coast on.
+const (
+	testAuthCooldown = 2 * time.Hour
+	testBanCooldown  = 5 * time.Hour
+)
+
+func newAutomatedClient(t *testing.T, n int) (*Client, []*Account) {
+	t.Helper()
+	c, accs := newPoolWaitClient(t, n)
+	c.cfg.AuthCooldown = testAuthCooldown
+	c.cfg.BanCooldown = testBanCooldown
+	return c, accs
+}
+
+func pointTwitterBase(t *testing.T, url string) {
+	t.Helper()
+	orig := twitterBase
+	twitterBase = url + "/i/api/graphql"
+	t.Cleanup(func() { twitterBase = orig })
+}
+
+// The FIRST 226 on an account benches it for AuthCooldown (+ up to 25%
+// jitter); a SECOND within 24h of that bench ending escalates to BanCooldown.
+// Errors-only and data-bearing bodies behave alike and neither is a success.
 //
 // Mutation: errors.go classifyError — delete the `case automatedCode:` arm
-// (226 falls through to errNone) => RED on both subtests (errors-only reads as
-// ErrUnexpectedResponse, data+226 reads as a healthy success).
-func TestDoGET_226_BenchesAccount(t *testing.T) {
+// (226 falls through to errNone) => RED on every subtest. Mutation:
+// automated.go automatedBenchFor — `base := c.cfg.BanCooldown` for the first
+// 226 => RED on the first-window assertion; drop the `if repeat` => RED on the
+// repeat window.
+func TestDoGET_226_GraduatedBench(t *testing.T) {
 	for name, body := range map[string]string{"errors_only": automated226Only, "with_data": automated226Data} {
 		t.Run(name, func(t *testing.T) {
 			fake := newPoolWaitFake(t)
 			fake.body = body
-			c, accs := newPoolWaitClient(t, 1)
-			origBase := twitterBase
-			twitterBase = fake.srv.URL + "/i/api/graphql"
-			t.Cleanup(func() { twitterBase = origBase })
+			c, accs := newAutomatedClient(t, 1)
+			pointTwitterBase(t, fake.srv.URL)
 
 			_, err := c.GetUserTweets(context.Background(), "999", 20)
 			require.Error(t, err)
 			assert.True(t, IsAutomated(err), "got %v", err)
-			assertBenched(t, accs[0], time.Hour, time.Hour/4)
+			assertBenched(t, accs[0], testAuthCooldown, testAuthCooldown/4)
+
+			accs[0].SetActive(true) // the bench ended; the account serves again
+			_, err = c.GetUserTweets(context.Background(), "999", 20)
+			require.Error(t, err)
+			assert.True(t, IsAutomated(err), "got %v", err)
+			assertBenched(t, accs[0], testBanCooldown, testBanCooldown/4)
 		})
 	}
 }
 
-// 226 usually arrives as HTTP 403: the 401/403 arm must bench too.
+// 226 usually arrives as HTTP 403: the 401/403 arm must bench too, and record
+// the attempt with the legacy MetricsHook exactly once.
 //
 // Mutation: request.go doPoolRequest 401/403 switch — delete the
-// `case errAutomated:` arm => RED (falls to default: RecordFailure only, the
-// account stays active).
-func TestDoGET_226_On403_BenchesAccount(t *testing.T) {
+// `case errAutomated:` arm => RED (default arm: RecordFailure only, account
+// stays active). Mutation: automated.go benchAutomated — re-add
+// `c.recordAPICall(endpoint, false, false)` => RED (two hook calls).
+func TestDoGET_226_On403_BenchesOnce(t *testing.T) {
 	fake := newPoolWaitFake(t)
 	fake.body = automated226Only
 	fake.status.Store(http.StatusForbidden)
-	c, accs := newPoolWaitClient(t, 1)
-	origBase := twitterBase
-	twitterBase = fake.srv.URL + "/i/api/graphql"
-	t.Cleanup(func() { twitterBase = origBase })
+	c, accs := newAutomatedClient(t, 1)
+	var calls atomic.Int32
+	c.cfg.MetricsHook = func(string, bool, bool) { calls.Add(1) }
+	pointTwitterBase(t, fake.srv.URL)
 
 	_, err := c.GetUserTweets(context.Background(), "999", 20)
 	require.Error(t, err)
 	assert.True(t, IsAutomated(err), "got %v", err)
-	assertBenched(t, accs[0], time.Hour, time.Hour/4)
+	assertBenched(t, accs[0], testAuthCooldown, testAuthCooldown/4)
+	assert.EqualValues(t, 1, calls.Load(), "one MetricsHook record per attempt")
+}
+
+// The 200 arm records the attempt once as well.
+//
+// Mutation: request.go doPoolRequest 200 `case errAutomated:` — delete its
+// `c.recordAPICall(...)` => RED (zero hook calls); delete the whole arm =>
+// RED (default arm benches for AuthCooldown with a different error message
+// path, and the repeat-escalation in TestDoGET_226_GraduatedBench).
+func TestDoGET_226_On200_BenchesOnce(t *testing.T) {
+	fake := newPoolWaitFake(t)
+	fake.body = automated226Only
+	c, accs := newAutomatedClient(t, 1)
+	var calls atomic.Int32
+	c.cfg.MetricsHook = func(string, bool, bool) { calls.Add(1) }
+	pointTwitterBase(t, fake.srv.URL)
+
+	_, err := c.GetUserTweets(context.Background(), "999", 20)
+	require.Error(t, err)
+	assert.True(t, IsAutomated(err), "got %v", err)
+	assertBenched(t, accs[0], testAuthCooldown, testAuthCooldown/4)
+	assert.EqualValues(t, 1, calls.Load(), "one MetricsHook record per attempt")
 }
 
 // The write path: a pinned POST is never replayed, and the verdict benches the
@@ -104,24 +160,49 @@ func TestDoPOST_226_BenchesAccount(t *testing.T) {
 			fake := newPoolWaitFake(t)
 			fake.body = tc.body
 			fake.status.Store(int32(tc.status))
-			c, accs := newPoolWaitClient(t, 2)
+			c, accs := newAutomatedClient(t, 2)
+			var calls atomic.Int32
+			c.cfg.MetricsHook = func(string, bool, bool) { calls.Add(1) }
 			body, err := c.doPOST(context.Background(), accs[0], "CreateTweet",
 				fake.srv.URL+"/i/api/graphql/x/CreateTweet", []byte(`{}`))
 			require.Error(t, err)
 			assert.Nil(t, body, "226 next to data is still the verdict")
 			assert.True(t, IsAutomated(err), "got %v", err)
 			assert.EqualValues(t, 1, fake.hits.Load(), "a write is never replayed")
-			assertBenched(t, accs[0], time.Hour, time.Hour/4)
+			assert.EqualValues(t, 1, calls.Load(), "one MetricsHook record per attempt")
+			assertBenched(t, accs[0], testAuthCooldown, testAuthCooldown/4)
 			assert.True(t, accs[1].IsActive(), "the verdict is account-scoped")
 		})
 	}
 }
 
-// The 226 cooldown must never undercut the 326 (lock) path's.
+// The retry that follows a relogin meets 226: the account just logged in is
+// benched with the same graduated cooldown, not charged a plain auth failure.
 //
-// Mutation: automated.go automatedCooldown — `return base - time.Duration(...)`
-// (or base/2) => RED.
-func TestAutomatedCooldown_NeverShorterThanBase(t *testing.T) {
+// Mutation: request.go postReloginFailure — delete the
+// `case cls == errAutomated:` arm => RED (falls to fallbackCooldown 1h: the
+// bench window assertion fails).
+func TestPostReloginFailure_226_Benches(t *testing.T) {
+	c, accs := newAutomatedClient(t, 1)
+	ae := c.postReloginFailure(accs[0], "UserTweets", http.StatusOK, []byte(automated226Only), nil, nil, errAuthExpired, time.Hour, "post-relogin request failed")
+	assert.Equal(t, errAutomated, ae.Class)
+	assertBenched(t, accs[0], testAuthCooldown, testAuthCooldown/4)
+}
+
+// 226 is account-scoped for benching, but NOT for the 1 s retry-backoff skip:
+// skipping it would let a shared cause burn several accounts within one call.
+//
+// Mutation: request.go accountScopedFailure — add errAutomated to the case
+// list => RED.
+func TestAccountScopedFailure_AutomatedKeepsBackoff(t *testing.T) {
+	assert.False(t, accountScopedFailure(&APIError{Class: errAutomated}))
+	assert.True(t, accountScopedFailure(&APIError{Class: errLocked}), "control: a lock is account-scoped")
+}
+
+// Jitter only lengthens the base.
+//
+// Mutation: automated.go automatedCooldown — `base - ...` => RED.
+func TestAutomatedCooldown_JitterOnlyLengthens(t *testing.T) {
 	for range 200 {
 		d := automatedCooldown(6 * time.Hour)
 		require.GreaterOrEqual(t, d, 6*time.Hour)
@@ -130,24 +211,94 @@ func TestAutomatedCooldown_NeverShorterThanBase(t *testing.T) {
 	assert.Zero(t, automatedCooldown(0))
 }
 
-// 37 is an access refusal: the same account-scoped AuthCooldown bench as 179/219.
+// Shared-cause detection: 2 DISTINCT accounts within the window fire it once
+// (log, counter, pool alert); the same account twice does not; a third distinct
+// account in the same crossing does not fire again.
 //
-// Mutation: errors.go classifyError — change `case 37, 179, 219:` to
-// `case 179, 219:` => RED (errors-only 200 reads as ErrUnexpectedResponse, the
-// account stays active).
-func TestDoGET_37_BenchesWithAuthCooldown(t *testing.T) {
-	fake := newPoolWaitFake(t)
-	fake.body = notAuth37Only
-	c, accs := newPoolWaitClient(t, 1)
-	c.cfg.AuthCooldown = 2 * time.Hour // distinct from BanCooldown (1h): proves WHICH cooldown applied
-	origBase := twitterBase
-	twitterBase = fake.srv.URL + "/i/api/graphql"
-	t.Cleanup(func() { twitterBase = origBase })
+// Mutation: automated.go noteAutomatedHit — key the map by endpoint instead of
+// acc.ID() => RED (same-account case fires, or two accounts collapse).
+func TestAutomatedSharedSuspect(t *testing.T) {
+	newC := func(n int) (*Client, []*Account, *[]string) {
+		c, accs := newAutomatedClient(t, n)
+		var topics []string
+		var mu sync.Mutex
+		c.alertHook = func(topic string, _ any) {
+			mu.Lock()
+			topics = append(topics, topic)
+			mu.Unlock()
+		}
+		return c, accs, &topics
+	}
+	body := []byte(automated226Only)
 
-	_, err := c.GetUserTweets(context.Background(), "999", 20)
-	require.Error(t, err)
-	assert.True(t, IsNotAuthorized(err), "got %v", err)
-	assertBenched(t, accs[0], 2*time.Hour, 0)
+	t.Run("two_distinct_fire_once", func(t *testing.T) {
+		c, accs, topics := newC(3)
+		c.benchAutomated(accs[0], "UserTweets", 200, body, nil)
+		assert.Empty(t, *topics, "one account is not a shared signal")
+		c.benchAutomated(accs[1], "UserTweets", 200, body, nil)
+		assert.Equal(t, []string{"automated.shared_suspect"}, *topics)
+		c.benchAutomated(accs[2], "SearchTimeline", 200, body, nil)
+		assert.Len(t, *topics, 1, "one signal per window crossing")
+	})
+	t.Run("same_account_twice_does_not", func(t *testing.T) {
+		c, accs, topics := newC(2)
+		c.benchAutomated(accs[0], "UserTweets", 200, body, nil)
+		c.benchAutomated(accs[0], "UserTweets", 200, body, nil)
+		assert.Empty(t, *topics)
+	})
+	t.Run("window_expiry_rearms", func(t *testing.T) {
+		c, accs, topics := newC(2)
+		c.benchAutomated(accs[0], "UserTweets", 200, body, nil)
+		c.benchAutomated(accs[1], "UserTweets", 200, body, nil)
+		c.automated.mu.Lock()
+		for id, h := range c.automated.hits {
+			h.at = h.at.Add(-2 * sharedSuspectWindow)
+			c.automated.hits[id] = h
+		}
+		c.automated.mu.Unlock()
+		c.benchAutomated(accs[0], "UserTweets", 200, body, nil)
+		assert.Len(t, *topics, 1, "an old window does not count")
+		c.benchAutomated(accs[1], "UserTweets", 200, body, nil)
+		assert.Len(t, *topics, 2, "a fresh crossing fires again")
+	})
+}
+
+// Code 37 next to usable data is NOT a verdict (it may refer to the target):
+// the data is returned and nobody is benched. An errors-only 37 still benches
+// with AuthCooldown (the account's own cooldown, distinct from BanCooldown).
+//
+// Mutation: errors.go partialSuccess — delete the 37 branch (return false for
+// errNotAuthorized) => RED on with_data (the data is discarded, the account
+// benched). Mutation: errors.go classifyError — `case 179, 219:` => RED on
+// errors_only.
+func TestDoGET_37(t *testing.T) {
+	good := userTweetsBody(snowflakeAt(time.Now()))
+	withData := `{"errors":[{"code":37,"message":"m"}],` + strings.TrimPrefix(good, "{")
+
+	t.Run("with_data_succeeds_no_bench", func(t *testing.T) {
+		fake := newPoolWaitFake(t)
+		fake.body = withData
+		c, accs := newAutomatedClient(t, 1)
+		pointTwitterBase(t, fake.srv.URL)
+		_, err := c.GetUserTweets(context.Background(), "999", 20)
+		require.NoError(t, err)
+		assert.True(t, accs[0].IsActive())
+	})
+	t.Run("errors_only_benches_with_auth_cooldown", func(t *testing.T) {
+		fake := newPoolWaitFake(t)
+		fake.body = notAuth37Only
+		c, accs := newAutomatedClient(t, 1)
+		pointTwitterBase(t, fake.srv.URL)
+		_, err := c.GetUserTweets(context.Background(), "999", 20)
+		require.Error(t, err)
+		assert.True(t, IsNotAuthorized(err), "got %v", err)
+		assertBenched(t, accs[0], testAuthCooldown, 0)
+	})
+	t.Run("other_account_code_beside_37_still_verdict", func(t *testing.T) {
+		assert.False(t, partialSuccess(errNotAuthorized, []byte(`{"errors":[{"code":37},{"code":219}],"data":{"x":1}}`)))
+		assert.True(t, partialSuccess(errNotAuthorized, []byte(`{"errors":[{"code":37}],"data":{"x":1}}`)))
+		assert.False(t, partialSuccess(errAutomated, []byte(automated226Data)), "226 with data stays a verdict")
+	})
 }
 
 const settingsOK = `{"screen_name":"viewer_one","protected":false}`
@@ -222,12 +373,15 @@ func TestDoMediaRequest_226_BenchesAccount(t *testing.T) {
 			fake := newPoolWaitFake(t)
 			fake.body = automated226Only
 			fake.status.Store(int32(status))
-			c, accs := newPoolWaitClient(t, 1)
+			c, accs := newAutomatedClient(t, 1)
+			var calls atomic.Int32
+			c.cfg.MetricsHook = func(string, bool, bool) { calls.Add(1) }
 			_, err := c.doMediaRequest(context.Background(), accs[0], "POST",
 				fake.srv.URL+"/1.1/media/upload.json?command=INIT", nil, "application/x-www-form-urlencoded")
 			require.Error(t, err)
 			assert.True(t, IsAutomated(err), "got %v", err)
-			assertBenched(t, accs[0], time.Hour, time.Hour/4)
+			assert.EqualValues(t, 1, calls.Load(), "one MetricsHook record per attempt")
+			assertBenched(t, accs[0], testAuthCooldown, testAuthCooldown/4)
 		})
 	}
 }
