@@ -369,7 +369,7 @@ func TestAccountlessClient_LegacyUnlessOptedIn(t *testing.T) {
 				guestGET = r
 			}
 		}
-		recCfg = rec.cfg
+		recCfg = rec.cfgs[0] // the shared client is the first one built; an opted-in Client also builds a navigation client after it
 		require.NotEmpty(t, activate.URL, "guest fallback never activated a token")
 		require.NotEmpty(t, guestGET.URL, "guest fallback never sent the GraphQL GET")
 		return guestGET, activate

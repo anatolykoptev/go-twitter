@@ -3,6 +3,7 @@
 package twitter
 
 import (
+	"context"
 	"encoding/json"
 	"strings"
 	"testing"
@@ -146,4 +147,41 @@ func TestLive_LegacyIdentityMatchesV086(t *testing.T) {
 	assert.Equal(t, strings.Split(wireFlowPOST, ","), got.names)
 	assert.Equal(t, 256, got.weight)
 	assert.NotContains(t, got.values, "priority")
+}
+
+// One current-identity account, both shapes through the real TLS transport: the
+// warm-page navigation from its navigation client (HEADERS weight 256,
+// priority u=0, i, navigate/document/none) and an XHR from its own client
+// (weight 220, u=1, i). The clients are the ones the Client builds.
+func TestLive_AccountNavigationAndXHR(t *testing.T) {
+	p := chromeProfile(t, stealth.ProfileChrome156, "chrome", "macos")
+	acc := &Account{Username: "live", AuthToken: "dummy", CT0: "dummy", Profile: p}
+	c, err := NewClient(ClientConfig{Accounts: []*Account{acc}})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+
+	nav := c.navClientFor(acc)
+	require.NotNil(t, nav)
+	h, order := navigationRequest(nav.ChromeHeaders(), "GET", map[string]string{"cookie": "auth_token=dummy; ct0=dummy"})
+	resp, _, status, err := nav.DoWithHeaderOrderCtx(context.Background(), "GET", echoURL, h, nil, order)
+	require.NoError(t, err, "echo service unreachable")
+	require.Equal(t, 200, status)
+	got := parseSeen(t, resp)
+	t.Logf("warm navigation: weight=%d %v", got.weight, got.names)
+	assert.Equal(t, oracleNavigationGet, got.names)
+	assert.Equal(t, 256, got.weight)
+	assert.Equal(t, "u=0, i", got.values["priority"])
+	assert.Equal(t, "document", got.values["sec-fetch-dest"])
+	assert.Equal(t, "navigate", got.values["sec-fetch-mode"])
+	assert.Equal(t, "none", got.values["sec-fetch-site"])
+	assert.Equal(t, "?1", got.values["sec-fetch-user"])
+	assert.Equal(t, oracleNavigationAccept156, got.values["accept"])
+
+	xh := twitterHeaders("dummy", "dummy", p.UserAgent)
+	xh["x-client-transaction-id"] = "dummy"
+	got = send(t, acc.client, wireChrome, "GET", "https://x.com/i/api/graphql/q/Op", xh, "")
+	t.Logf("same account, XHR: weight=%d %v", got.weight, got.names)
+	assert.Equal(t, oracleSameOriginAuthedGet, got.names)
+	assert.Equal(t, 220, got.weight)
+	assert.Equal(t, "u=1, i", got.values["priority"])
 }

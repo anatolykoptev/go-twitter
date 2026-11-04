@@ -282,3 +282,51 @@ var chromeHeaderOrder = []string{
 	"cookie",
 	"priority",
 }
+
+// chromeNavigationOrder is the order Chrome writes the headers of a top-level
+// document navigation to x.com. Provenance: Google Chrome 156.0.8078.80 (macOS,
+// headful) loading https://x.com/NASA logged out, from the browser's network
+// log (cookies are stripped from that log, so the position of cookie is the one
+// it has in the same browser's subresource requests: after accept-language, before
+// priority). HTTP/2 HEADERS weight 256.
+var chromeNavigationOrder = []string{
+	"sec-ch-ua",
+	"sec-ch-ua-mobile",
+	"sec-ch-ua-platform",
+	"upgrade-insecure-requests",
+	"user-agent",
+	"accept",
+	"sec-fetch-site",
+	"sec-fetch-mode",
+	"sec-fetch-user",
+	"sec-fetch-dest",
+	"accept-encoding",
+	"accept-language",
+	"cookie",
+	"priority",
+}
+
+// chromeNavigationPostOrder is the order of a form-submission navigation (the
+// x.com/x/migrate hop of a warm fetch). NOT captured: it is Chrome's order for
+// a POST navigation as known from other sites (content-length, cache-control and
+// origin/content-type ahead of user-agent, referer after sec-fetch-dest).
+var chromeNavigationPostOrder = []string{
+	"content-length",
+	"sec-ch-ua",
+	"sec-ch-ua-mobile",
+	"sec-ch-ua-platform",
+	"upgrade-insecure-requests",
+	"origin",
+	"content-type",
+	"user-agent",
+	"accept",
+	"sec-fetch-site",
+	"sec-fetch-mode",
+	"sec-fetch-user",
+	"sec-fetch-dest",
+	"referer",
+	"accept-encoding",
+	"accept-language",
+	"cookie",
+	"priority",
+}

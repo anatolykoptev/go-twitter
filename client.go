@@ -151,7 +151,20 @@ func NewClient(cfg ClientConfig, clientOpts ...ClientOption) (*Client, error) {
 	// alert fires once per ok->failed transition, never per request.
 	mgr := cfg.sharedXtid
 	if mgr == nil {
-		fetcher := &bundle.StealthFetcher{Client: bc, UserAgent: clientUA(bc)}
+		var warm warmDoer = bc
+		if sharedWire == wireChrome {
+			// Opt-in current wire for account-less clients: their warm pages are
+			// navigations too (see warmRouter).
+			navOpts := []stealth.ClientOption{stealth.WithHeaderOrder(chromeNavigationOrder)}
+			if cfg.DefaultProxy != "" {
+				navOpts = append(navOpts, stealth.WithProxy(cfg.DefaultProxy))
+			}
+			if nav, navErr := stealth.NewClient(append(navOpts, cfg.stealthOpts...)...); navErr == nil {
+				owned.add(nav)
+				warm = &warmRouter{page: nav, other: bc}
+			}
+		}
+		fetcher := &bundle.StealthFetcher{Client: warm, UserAgent: clientUA(bc)}
 		mgr = xtid.NewManager(fetcher)
 		if cfg.XtidKeySource != xtid.KeySourceAccountPage {
 			mgr.SetKeySource(cfg.XtidKeySource)
@@ -287,14 +300,28 @@ func proxyBuildFailure(proxy string) (label, reason string) {
 // the lazy path in clientForAccount both build through it, so they cannot
 // drift. It returns the proxy URL the client was built for ("" = direct).
 func buildAccountClient(cfg ClientConfig, acc *Account) (*stealth.BrowserClient, string, error) {
+	return buildAccountClientFor(cfg, acc, false)
+}
+
+// buildAccountClientFor is buildAccountClient with a choice of transport mode.
+// navigation builds the account's second client: the same identity and proxy,
+// but without fetch mode, so its HTTP/2 HEADERS carry the document-navigation
+// weight (256) and it can issue the warm-page navigations (see warmRouter). It
+// is only meaningful for a wireChrome account.
+func buildAccountClientFor(cfg ClientConfig, acc *Account, navigation bool) (*stealth.BrowserClient, string, error) {
 	proxy := acc.Proxy
 	if proxy == "" {
 		proxy = cfg.DefaultProxy
 	}
 	// The caller has completed the identity (ensureIdentity); the account's
 	// mutex may be held, so it is read directly.
-	opts := []stealth.ClientOption{stealth.WithHeaderOrder(twitterHeaderOrder)}
-	opts = append(opts, wireClientOptions(accountWire(acc))...)
+	var opts []stealth.ClientOption
+	if navigation {
+		opts = []stealth.ClientOption{stealth.WithHeaderOrder(chromeNavigationOrder)}
+	} else {
+		opts = []stealth.ClientOption{stealth.WithHeaderOrder(twitterHeaderOrder)}
+		opts = append(opts, wireClientOptions(accountWire(acc))...)
+	}
 	if acc.Profile.TLSProfile != "" {
 		// Profile and UA go in together, so the client's reported identity (used
 		// by the login flow) is exactly what every later request sends.
@@ -373,6 +400,36 @@ func (c *Client) clientForAccount(acc *Account) (*stealth.BrowserClient, error) 
 	c.owned.setWire(bc, accountWire(acc))
 	acc.client = bc
 	return bc, nil
+}
+
+// navClientFor returns the account's navigation client, building it on first
+// use: nil for an account that is not on a current identity (its warm fetches
+// stay on its own client, byte for byte as before) or when the client cannot be
+// built (the warm fetch then falls back to the account's client, and the
+// failure is logged once per account). Like clientForAccount it serialises on
+// the account and lists the client with the Client that built it, so Close
+// releases its connections.
+func (c *Client) navClientFor(acc *Account) *stealth.BrowserClient {
+	acc.mu.Lock()
+	defer acc.mu.Unlock()
+	if accountWire(acc) != wireChrome {
+		return nil
+	}
+	if acc.navClient != nil {
+		return acc.navClient
+	}
+	if acc.navClientFailed {
+		return nil
+	}
+	nav, _, err := buildAccountClientFor(c.cfg, acc, true)
+	if err != nil {
+		acc.navClientFailed = true
+		slog.Warn("navigation client build failed, warm fetches use the account client", slog.String("user", acc.Username))
+		return nil
+	}
+	c.owned.add(nav)
+	acc.navClient = nav
+	return nav
 }
 
 // clientSet is the BrowserClients one Client built. Close walks it instead of
@@ -615,12 +672,19 @@ type warmDoer interface {
 
 // warmClient picks the client the warm-page fetch goes through: the request
 // account's own (bc), or the test override.
-func (c *Client) warmClient(bc *stealth.BrowserClient) warmDoer {
+func (c *Client) warmClient(acc *Account, bc *stealth.BrowserClient) warmDoer {
 	if c.warmDoerOverride != nil {
 		return c.warmDoerOverride
 	}
 	if bc == nil {
 		return nil
+	}
+	// A current identity fetches x.com pages the way Chrome navigates to them,
+	// which a fetch-mode transport cannot (HTTP/2 weight is per client).
+	if acc != nil {
+		if nav := c.navClientFor(acc); nav != nil { // nil unless the account is on a current identity
+			return &warmRouter{page: nav, other: bc}
+		}
 	}
 	return bc
 }
@@ -646,7 +710,7 @@ func (c *Client) doRequestWithBody(ctx context.Context, acc *Account, bc *stealt
 		delete(headers, "content-type")
 	}
 	qid := c.qidRefresh()
-	wf := qid.Shared(warmFetcher(c.warmClient(bc), headers))
+	wf := qid.Shared(warmFetcher(c.warmClient(acc, bc), headers))
 	if txID, txErr := c.xtidMgr.GenerateIDWith(ctx, method, urlPath, wf); txErr == nil {
 		headers["x-client-transaction-id"] = txID
 		c.xtidFail.onSuccess()
