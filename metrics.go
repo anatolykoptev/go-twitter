@@ -161,6 +161,19 @@ func (m *clientMetrics) recordRateLimit(endpoint string, obs rateLimitObs) {
 	m.t.RecordRateLimit(endpoint, obs.remaining, obs.limit)
 }
 
+// parseOption returns the parse option that reports the parser's drops and
+// snowflake-dated tweets under endpoint; a nil m yields an option that records
+// nothing.
+func (m *clientMetrics) parseOption(endpoint string) parse.Option {
+	if m == nil {
+		return nil
+	}
+	return parse.WithObserver(parse.Observer{
+		Drop:              func(reason string) { m.t.RecordParseDrop(endpoint, reason) },
+		CreatedAtFallback: func() { m.t.RecordCreatedAtFallback(endpoint) },
+	})
+}
+
 // recordHold counts one proactive hold: an endpoint taken out of rotation on an
 // account because a response showed its window spent.
 func (m *clientMetrics) recordHold(endpoint string) {

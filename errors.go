@@ -44,14 +44,17 @@ var ErrOverloaded = errors.New("twitter: x overloaded")
 // errors.Is.
 var ErrBadRequest = errors.New("twitter: bad request (input rejected)")
 
-// ErrUnexpectedResponse marks a 2xx response X answered with only errors the
-// library does not recognise: the query ran — the errors[] envelope proves
+// ErrUnexpectedResponse marks a 2xx response the library cannot read as the
+// requested data. Either X answered with only errors the library does not
+// recognise: the query ran — the errors[] envelope proves
 // the committed request shape executed — but no error entry matches a known
 // class or a deterministic-miss marker. The class is terminal and
 // account/endpoint-neutral: no retry, no rotation, no guest fallback, no
-// relogin, no account charge, and NOT an endpoint fault. Match with
-// errors.Is.
-var ErrUnexpectedResponse = errors.New("twitter: unexpected response (unrecognized errors-only body)")
+// relogin, no account charge, and NOT an endpoint fault. Or the data arrived
+// without the timeline object a timeline read requires (for example
+// {"data":{"user":{}}}): an empty list there would read as "no new tweets", so
+// the parser returns this error instead. Match with errors.Is.
+var ErrUnexpectedResponse = model.ErrUnexpectedResponse
 
 // errorClass categorizes Twitter API error responses for targeted handling.
 type errorClass int

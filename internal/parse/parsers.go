@@ -105,7 +105,7 @@ func RetweeterList(body []byte) ([]*model.TwitterUser, string, error) {
 // result is a deterministic miss — ErrNotFound, not a silently substituted
 // tweets[0] (a deleted focal still returns ancestors/replies that would
 // otherwise be misidentified as the requested tweet).
-func TweetDetail(body []byte, focalID string) ([]*model.Tweet, error) {
+func TweetDetail(body []byte, focalID string, opts ...Option) ([]*model.Tweet, error) {
 	type itemContentRef = json.RawMessage
 	type moduleItem struct {
 		EntryID string `json:"entryId"`
@@ -178,7 +178,7 @@ func TweetDetail(body []byte, focalID string) ([]*model.Tweet, error) {
 		}
 		tl.Instructions = append(tl.Instructions, ti)
 	}
-	tweets, err := extractTweets(tl, "", false)
+	tweets, err := extractTweets(tl, "", false, newOptions(opts))
 	if err != nil {
 		return nil, err
 	}
@@ -215,16 +215,24 @@ func isPromotedEntryID(entryID string) bool {
 }
 
 // TweetTimeline parses UserTweets timeline response.
-func TweetTimeline(body []byte, authorID string) ([]*model.Tweet, error) {
+//
+// A response whose data carries no timeline object at all (`{"data":{"user":{}}}`,
+// a user result without a timeline) is NOT an empty profile: it returns an error
+// wrapping model.ErrUnexpectedResponse, so a poller cannot read it as "no new
+// tweets". A timeline object that exists with zero entries is a legitimately
+// empty profile and succeeds with an empty list. A user X reports as unavailable
+// returns model.ErrNotFound.
+func TweetTimeline(body []byte, authorID string, opts ...Option) ([]*model.Tweet, error) {
 	var raw struct {
 		Data struct {
 			User struct {
 				Result struct {
+					TypeName string `json:"__typename"`
 					Timeline struct {
-						Timeline timelineObj `json:"timeline"`
+						Timeline *timelineObj `json:"timeline"`
 					} `json:"timeline"`
 					TimelineV2 struct {
-						Timeline timelineObj `json:"timeline"`
+						Timeline *timelineObj `json:"timeline"`
 					} `json:"timeline_v2"`
 				} `json:"result"`
 			} `json:"user"`
@@ -233,15 +241,25 @@ func TweetTimeline(body []byte, authorID string) ([]*model.Tweet, error) {
 	if err := json.Unmarshal(body, &raw); err != nil {
 		return nil, fmt.Errorf("unmarshal tweet timeline: %w", err)
 	}
-	tl := raw.Data.User.Result.Timeline.Timeline
-	if len(tl.Instructions) == 0 {
-		tl = raw.Data.User.Result.TimelineV2.Timeline
+	res := raw.Data.User.Result
+	if res.TypeName == "UserUnavailable" {
+		return nil, fmt.Errorf("%w: user unavailable (suspended or restricted)", model.ErrNotFound)
 	}
-	return extractTweetsFromTimeline(tl, authorID)
+	// Presence of the timeline object, not its content, tells an empty profile
+	// from a response that lost its timeline.
+	tl := res.Timeline.Timeline
+	if tl == nil || (len(tl.Instructions) == 0 && res.TimelineV2.Timeline != nil) {
+		tl = res.TimelineV2.Timeline
+	}
+	if tl == nil {
+		return nil, fmt.Errorf("%w: UserTweets response carries no timeline (user result typename=%q)",
+			model.ErrUnexpectedResponse, res.TypeName)
+	}
+	return extractTweetsFromTimeline(*tl, authorID, opts...)
 }
 
 // SearchTimeline parses SearchTimeline response.
-func SearchTimeline(body []byte) ([]*model.Tweet, error) {
+func SearchTimeline(body []byte, opts ...Option) ([]*model.Tweet, error) {
 	var raw struct {
 		Data struct {
 			SearchByRawQuery struct {
@@ -264,7 +282,7 @@ func SearchTimeline(body []byte) ([]*model.Tweet, error) {
 	if len(raw.Errors) > 0 {
 		slog.Debug("search timeline errors[] alongside data", slog.String("first", raw.Errors[0].Message))
 	}
-	return extractTweetsFromTimeline(tl, "")
+	return extractTweetsFromTimeline(tl, "", opts...)
 }
 
 // --- T5 read-cluster timeline parsers ---
@@ -282,7 +300,7 @@ func SearchTimeline(body []byte) ([]*model.Tweet, error) {
 // rootFn finds no instructions it falls back to the recursive scan and logs a
 // warning tagged with op, so a rotated/broken typed root key is observable (the
 // happy typed-path hit stays silent — no log noise).
-func timelineTweetParse(body []byte, op string, rootFn func(json.RawMessage) timelineObj) ([]*model.Tweet, string, error) {
+func timelineTweetParse(body []byte, op string, rootFn func(json.RawMessage) timelineObj, opts []Option) ([]*model.Tweet, string, error) {
 	var env struct {
 		Data   json.RawMessage `json:"data"`
 		Errors []struct {
@@ -306,7 +324,7 @@ func timelineTweetParse(body []byte, op string, rootFn func(json.RawMessage) tim
 	if len(env.Errors) > 0 {
 		slog.Debug("timeline errors[] alongside data", slog.String("op", op), slog.String("first", env.Errors[0].Message))
 	}
-	tweets, err := extractTweetsFromTimeline(tl, "")
+	tweets, err := extractTweetsFromTimeline(tl, "", opts...)
 	if err != nil {
 		return nil, "", err
 	}
@@ -317,7 +335,7 @@ func timelineTweetParse(body []byte, op string, rootFn func(json.RawMessage) tim
 // Root: data.bookmark_timeline_v2.timeline.instructions — CONFIRMED against
 // imperatrona/twitter-scraper (bookmark_timeline_v2 struct) + twscrape's
 // graphql_timeline_v2_bookmark_timeline feature flag.
-func Bookmarks(body []byte) ([]*model.Tweet, string, error) {
+func Bookmarks(body []byte, opts ...Option) ([]*model.Tweet, string, error) {
 	return timelineTweetParse(body, "Bookmarks", func(data json.RawMessage) timelineObj {
 		var r struct {
 			BookmarkTimeline struct {
@@ -326,13 +344,13 @@ func Bookmarks(body []byte) ([]*model.Tweet, string, error) {
 		}
 		_ = json.Unmarshal(data, &r)
 		return r.BookmarkTimeline.Timeline
-	})
+	}, opts)
 }
 
 // HomeTimeline parses HomeTimeline / HomeLatestTimeline responses (same shape).
 // Root: data.home.home_timeline_urt.instructions — canonical home-timeline shape
 // (trevorhobenshield/twitter-api-client home_timeline_urt).
-func HomeTimeline(body []byte) ([]*model.Tweet, string, error) {
+func HomeTimeline(body []byte, opts ...Option) ([]*model.Tweet, string, error) {
 	return timelineTweetParse(body, "HomeTimeline", func(data json.RawMessage) timelineObj {
 		var r struct {
 			Home struct {
@@ -341,13 +359,13 @@ func HomeTimeline(body []byte) ([]*model.Tweet, string, error) {
 		}
 		_ = json.Unmarshal(data, &r)
 		return r.Home.HomeTimelineURT
-	})
+	}, opts)
 }
 
 // ListTweets parses the ListLatestTweetsTimeline response.
 // Root: data.list.tweets_timeline.timeline.instructions — canonical list shape
 // (vladkens/twscrape ListLatestTweetsTimeline).
-func ListTweets(body []byte) ([]*model.Tweet, string, error) {
+func ListTweets(body []byte, opts ...Option) ([]*model.Tweet, string, error) {
 	return timelineTweetParse(body, "ListLatestTweetsTimeline", func(data json.RawMessage) timelineObj {
 		var r struct {
 			List struct {
@@ -358,7 +376,7 @@ func ListTweets(body []byte) ([]*model.Tweet, string, error) {
 		}
 		_ = json.Unmarshal(data, &r)
 		return r.List.TweetsTimeline.Timeline
-	})
+	}, opts)
 }
 
 // CommunityTweets parses the CommunityTweetsTimeline response.
@@ -368,7 +386,7 @@ func ListTweets(body []byte) ([]*model.Tweet, string, error) {
 // UNVERIFIED root key — confirm against a live authed response (smoke test). The
 // recursive fallback in timelineTweetParse keeps the parser working if the exact
 // wrapper key differs at runtime.
-func CommunityTweets(body []byte) ([]*model.Tweet, string, error) {
+func CommunityTweets(body []byte, opts ...Option) ([]*model.Tweet, string, error) {
 	return timelineTweetParse(body, "CommunityTweetsTimeline", func(data json.RawMessage) timelineObj {
 		var r struct {
 			CommunityResults struct {
@@ -381,7 +399,7 @@ func CommunityTweets(body []byte) ([]*model.Tweet, string, error) {
 		}
 		_ = json.Unmarshal(data, &r)
 		return r.CommunityResults.Result.RankedCommunityTimeline.Timeline
-	})
+	}, opts)
 }
 
 // bottomCursor returns the bottom pagination cursor from a timeline, or "" when
@@ -687,6 +705,14 @@ type tweetResult struct {
 			Result userResult `json:"result"`
 		} `json:"user_results"`
 	} `json:"core"`
+	// Details carries the text and creation time in the x-web response shape,
+	// where legacy keeps only conversation metadata (testdata/
+	// tweet_notifications.json, xwebTweetResult). A fallback: legacy stays
+	// authoritative while it carries the field.
+	Details struct {
+		FullText    string `json:"full_text"`
+		CreatedAtMs int64  `json:"created_at_ms"`
+	} `json:"details"`
 	Legacy struct {
 		FullText      string `json:"full_text"`
 		CreatedAt     string `json:"created_at"`
@@ -695,6 +721,10 @@ type tweetResult struct {
 		QuoteCount    int    `json:"quote_count"`
 		ReplyCount    int    `json:"reply_count"`
 		UserIDStr     string `json:"user_id_str"`
+		// Entities and ExtendedEntities carry the attached media; a media-only
+		// tweet legitimately has empty text.
+		Entities         mediaEntities `json:"entities"`
+		ExtendedEntities mediaEntities `json:"extended_entities"`
 		// InReplyToStatusID, QuotedStatusID: relationship markers.
 		InReplyToStatusID string `json:"in_reply_to_status_id_str"`
 		QuotedStatusID    string `json:"quoted_status_id_str"`
@@ -704,6 +734,8 @@ type tweetResult struct {
 			Result *tweetResult `json:"result"`
 		} `json:"retweeted_status_result"`
 	} `json:"legacy"`
+	// Card is the link/poll card of a tweet; a tweet may carry only that.
+	Card json.RawMessage `json:"card"`
 	// NoteTweet holds the untruncated text of a long tweet; legacy.full_text
 	// is cut at ~280 characters for those.
 	NoteTweet struct {
@@ -817,14 +849,14 @@ func (ins timelineInstruction) items() []timelineItem {
 	return out
 }
 
-func extractTweetsFromTimeline(tl timelineObj, defaultAuthorID string) ([]*model.Tweet, error) {
-	return extractTweets(tl, defaultAuthorID, true)
+func extractTweetsFromTimeline(tl timelineObj, defaultAuthorID string, opts ...Option) ([]*model.Tweet, error) {
+	return extractTweets(tl, defaultAuthorID, true, newOptions(opts))
 }
 
 // extractTweets walks the timeline. dedupe collapses repeated ids; TweetDetail
 // turns it off because the focal tweet legitimately reappears as the anchor of
 // its own conversation module (see SplitConversation).
-func extractTweets(tl timelineObj, defaultAuthorID string, dedupe bool) ([]*model.Tweet, error) {
+func extractTweets(tl timelineObj, defaultAuthorID string, dedupe bool, o options) ([]*model.Tweet, error) {
 	var tweets []*model.Tweet
 	// entryId (and module entry id) -> indexes in tweets, for TimelineReplaceEntry.
 	byEntry := map[string][]int{}
@@ -857,12 +889,14 @@ func extractTweets(tl timelineObj, defaultAuthorID string, dedupe bool) ([]*mode
 				switch item.TypeName {
 				case "TimelineUser", "TimelinePrompt", "TimelineMessagePrompt", "TimelineTimelineCursor":
 				default:
+					o.drop(DropUnhandledType)
 					slog.Debug("skip timeline item of unhandled type", slog.String("entry", it.entryID), slog.String("type", item.TypeName))
 				}
 				continue
 			}
-			t, err := parseTweetResult(item.TweetResults.Result, defaultAuthorID)
+			t, err := parseTweetResult(item.TweetResults.Result, defaultAuthorID, o)
 			if err != nil {
+				o.drop(dropReason(err))
 				slog.Debug("skip tweet parse error", slog.String("entry", it.entryID), slog.Any("error", err))
 				continue
 			}
@@ -941,7 +975,7 @@ func parseUserResult(r userResult) (*model.TwitterUser, error) {
 	}, nil
 }
 
-func parseTweetResult(r tweetResult, defaultAuthorID string) (*model.Tweet, error) {
+func parseTweetResult(r tweetResult, defaultAuthorID string, o options) (*model.Tweet, error) {
 	// Unwrap *Results shells (TweetWithVisibilityResults for sensitive
 	// tweets): the payload nests the real tweet one level down. Loop —
 	// not a fixed depth — so a stacked wrapper still decodes.
@@ -949,7 +983,11 @@ func parseTweetResult(r tweetResult, defaultAuthorID string) (*model.Tweet, erro
 		r = *r.Tweet
 	}
 	if r.RestID == "" {
-		return nil, fmt.Errorf("empty tweet rest_id (typename=%s)", r.TypeName)
+		reason := DropNoID
+		if r.TypeName == "TweetTombstone" || r.TypeName == "TweetUnavailable" {
+			reason = DropTombstone
+		}
+		return nil, &dropError{reason: reason, err: fmt.Errorf("empty tweet rest_id (typename=%s)", r.TypeName)}
 	}
 
 	// The tweet's own author wins over the profile owner the caller passed in:
@@ -961,7 +999,22 @@ func parseTweetResult(r tweetResult, defaultAuthorID string) (*model.Tweet, erro
 		authorID = r.Legacy.UserIDStr
 	}
 
+	// Creation time: legacy.created_at, then details.created_at_ms, then the
+	// time encoded in the snowflake id. A tweet none of them dates is dropped
+	// (counted) rather than returned with a zero time.
 	createdAt := parseTwitterTime(r.Legacy.CreatedAt, "tweet")
+	if createdAt.IsZero() && r.Details.CreatedAtMs > 0 {
+		createdAt = time.UnixMilli(r.Details.CreatedAtMs).UTC()
+	}
+	if createdAt.IsZero() {
+		if ts, err := SnowflakeTime(r.RestID); err == nil {
+			createdAt = ts
+			o.createdAtFallback()
+		}
+	}
+	if createdAt.IsZero() {
+		return nil, &dropError{reason: DropNoCreatedAt, err: fmt.Errorf("tweet %s has no creation time", r.RestID)}
+	}
 
 	views := 0
 	if r.Views.Count != "" {
@@ -973,6 +1026,9 @@ func parseTweetResult(r tweetResult, defaultAuthorID string) (*model.Tweet, erro
 
 	// legacy.full_text is cut for long tweets; note_tweet holds the whole text.
 	text := r.Legacy.FullText
+	if text == "" {
+		text = r.Details.FullText
+	}
 	if nt := r.NoteTweet.Results.Result.Text; nt != "" {
 		text = nt
 	}
@@ -999,7 +1055,7 @@ func parseTweetResult(r tweetResult, defaultAuthorID string) (*model.Tweet, erro
 	}
 	if rs := r.Legacy.RetweetedStatus.Result; rs != nil {
 		t.RetweetOfID = innerRestID(rs)
-		if orig, err := parseTweetResult(*rs, ""); err == nil {
+		if orig, err := parseTweetResult(*rs, "", options{}); err == nil {
 			t.RetweetOf = orig
 			t.RetweetOfID = orig.ID
 			// The retweet's own full_text is the "RT @user: …" form X cuts
@@ -1011,8 +1067,23 @@ func parseTweetResult(r tweetResult, defaultAuthorID string) (*model.Tweet, erro
 			slog.Debug("retweet original not decodable", slog.String("retweet", t.ID), slog.Any("error", err))
 		}
 	}
+	// Empty text with nothing to explain it (media, card, quote, retweet) is
+	// likely a blanked parse: count it, but keep the tweet.
+	if t.Text == "" && !r.hasAttachment() && t.QuotedID == "" && t.RetweetOfID == "" {
+		o.drop(DropBlankText)
+	}
 	t.TokenMentions = extractTokenMentions(t.Text)
 	return t, nil
+}
+
+// mediaEntities is the media list of an entities block.
+type mediaEntities struct {
+	Media []json.RawMessage `json:"media"`
+}
+
+// hasAttachment reports media or a card on the tweet.
+func (r tweetResult) hasAttachment() bool {
+	return len(r.Legacy.Entities.Media) > 0 || len(r.Legacy.ExtendedEntities.Media) > 0 || hasJSONValue(r.Card)
 }
 
 // innerRestID returns the rest_id of a result after unwrapping *Results

@@ -42,6 +42,8 @@ const (
 	MetricQIDWalk             = "twitter.client.queryid.refresh.duration"
 	MetricXtidFailures        = "twitter.client.xtid.failures"
 	MetricUsageReportsDropped = "twitter.client.usage_report.dropped"
+	MetricParseDropped        = "twitter.client.parse.dropped"
+	MetricCreatedAtFallbacks  = "twitter.client.parse.created_at_fallbacks"
 
 	// Attribute keys.
 	AttrOperation    = "twitter.operation"
@@ -49,6 +51,7 @@ const (
 	AttrAccountState = "twitter.account.state"
 	AttrResult       = "twitter.result"
 	AttrTrigger      = "twitter.trigger"
+	AttrReason       = "twitter.reason"
 )
 
 // Request/relogin outcome values (twitter.outcome). Bounded: request outcomes
@@ -130,6 +133,8 @@ type Metrics struct {
 	qidWalk         metric.Float64Histogram
 	xtidFailures    metric.Int64Counter
 	reportsDropped  metric.Int64Counter
+	parseDropped    metric.Int64Counter
+	createdAtFallbk metric.Int64Counter
 }
 
 // instrumentationVersion reports this module's version as seen by the
@@ -264,6 +269,18 @@ func New(mp metric.MeterProvider) *Metrics {
 		metric.WithDescription("Credential-service usage reports dropped because too many were already in flight.")); err != nil {
 		fail(MetricUsageReportsDropped, err)
 		m.reportsDropped = noop.Int64Counter{}
+	}
+	if m.parseDropped, err = meter.Int64Counter(MetricParseDropped,
+		metric.WithUnit("{entry}"),
+		metric.WithDescription("Timeline entries the parser dropped instead of returning as tweets, by operation and reason.")); err != nil {
+		fail(MetricParseDropped, err)
+		m.parseDropped = noop.Int64Counter{}
+	}
+	if m.createdAtFallbk, err = meter.Int64Counter(MetricCreatedAtFallbacks,
+		metric.WithUnit("{tweet}"),
+		metric.WithDescription("Tweets dated from their snowflake id because no created_at field carried a time (the tweet is kept), by operation.")); err != nil {
+		fail(MetricCreatedAtFallbacks, err)
+		m.createdAtFallbk = noop.Int64Counter{}
 	}
 	return m
 }
@@ -447,4 +464,24 @@ func (m *Metrics) RecordProxyFailure() {
 		return
 	}
 	m.proxyFailures.Add(context.Background(), 1)
+}
+
+// RecordParseDrop counts one timeline entry the parser dropped. reason is one
+// of the fixed parse.Drop* values, so the label stays low-cardinality.
+func (m *Metrics) RecordParseDrop(endpoint, reason string) {
+	if m == nil {
+		return
+	}
+	m.parseDropped.Add(context.Background(), 1, metric.WithAttributes(
+		attribute.String(AttrOperation, endpoint),
+		attribute.String(AttrReason, reason),
+	))
+}
+
+// RecordCreatedAtFallback counts one tweet dated from its snowflake id.
+func (m *Metrics) RecordCreatedAtFallback(endpoint string) {
+	if m == nil {
+		return
+	}
+	m.createdAtFallbk.Add(context.Background(), 1, metric.WithAttributes(attribute.String(AttrOperation, endpoint)))
 }
