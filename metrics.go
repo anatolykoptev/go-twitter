@@ -215,7 +215,7 @@ func (m *clientMetrics) recordProxyClientFailure() {
 	m.t.RecordProxyClientFailure()
 }
 
-// recordXtidFailure counts one request sent without x-client-transaction-id.
+// recordXtidFailure counts one request whose x-client-transaction-id could not be generated.
 func (m *clientMetrics) recordXtidFailure() {
 	if m == nil {
 		return
