@@ -64,9 +64,9 @@ func liveClient(t *testing.T, p stealth.BrowserProfile) *stealth.BrowserClient {
 }
 
 // send shapes h as a request to shapeURL and sends it to the echo service.
-func send(t *testing.T, bc *stealth.BrowserClient, method, shapeURL string, h map[string]string, body string) []string {
+func send(t *testing.T, bc *stealth.BrowserClient, gen wireGen, method, shapeURL string, h map[string]string, body string) []string {
 	t.Helper()
-	order := wireOrderFor(bc, method, shapeURL, h)
+	order := gen.shape(method, shapeURL, h)
 	var rd *strings.Reader
 	var resp []byte
 	var status int
@@ -88,25 +88,25 @@ func TestLive_CurrentIdentityMatchesChrome(t *testing.T) {
 
 	h := twitterHeaders("dummy", "dummy", p.UserAgent)
 	h["x-client-transaction-id"] = "dummy"
-	got := send(t, bc, "GET", "https://x.com/i/api/graphql/q/Op", h, "")
+	got := send(t, bc, wireChrome, "GET", "https://x.com/i/api/graphql/q/Op", h, "")
 	t.Logf("authenticated same-origin GET: %v", got)
 	// x-xp-forwarded-for has no captured position and is not sent here.
-	assert.Equal(t, oracleSameOriginAuthedGet, got)
+	assert.Equal(t, without(oracleSameOriginAuthedGet, "priority"), got)
 
 	h = guestHeaders("dummy", p.UserAgent)
 	h["x-client-transaction-id"] = "dummy"
 	h["cookie"] = "guest_id=dummy"
 	delete(h, "content-type")
-	got = send(t, bc, "GET", "https://api.x.com/1.1/hashflags.json", h, "")
+	got = send(t, bc, wireChrome, "GET", "https://api.x.com/1.1/hashflags.json", h, "")
 	t.Logf("logged-out XHR GET: %v", got)
-	assert.Equal(t, oracleXHRGet, got)
+	assert.Equal(t, without(oracleXHRGet, "priority"), got)
 
 	h = guestHeaders("dummy", p.UserAgent)
 	h["x-client-transaction-id"] = "dummy"
 	h["cookie"] = "guest_id=dummy"
-	got = send(t, bc, "POST", "https://api.x.com/1.1/flow/viewer.json", h, "{}")
+	got = send(t, bc, wireChrome, "POST", "https://api.x.com/1.1/flow/viewer.json", h, "{}")
 	t.Logf("logged-out XHR POST: %v", got)
-	assert.Equal(t, oracleXHRPost, got)
+	assert.Equal(t, without(oracleXHRPost, "priority"), got)
 }
 
 func TestLive_LegacyIdentityMatchesV086(t *testing.T) {
@@ -116,11 +116,11 @@ func TestLive_LegacyIdentityMatchesV086(t *testing.T) {
 	h := twitterHeaders("dummy", "dummy", ua)
 	h["x-client-transaction-id"] = "dummy"
 	h["x-xp-forwarded-for"] = "dummy"
-	got := send(t, bc, "GET", "https://x.com/i/api/graphql/q/Op", h, "")
+	got := send(t, bc, wireLegacy, "GET", "https://x.com/i/api/graphql/q/Op", h, "")
 	t.Logf("legacy authenticated GET: %v", got)
 	assert.Equal(t, strings.Split(wireAuthGET, ","), got)
 
-	got = send(t, bc, "POST", apiFlowInit, loginFlowHeaders("dummy", "", ua), "{}")
+	got = send(t, bc, wireLegacy, "POST", apiFlowInit, loginFlowHeaders("dummy", "", ua), "{}")
 	t.Logf("legacy login-flow POST: %v", got)
 	assert.Equal(t, strings.Split(wireFlowPOST, ","), got)
 }

@@ -423,8 +423,12 @@ func TestProfileAssignment_KeysOnProfileIdentityNotUserAgentText(t *testing.T) {
 
 	var total float64
 	for _, p := range identityCandidates() {
-		total += identityShareWeights[osBrowserKey(p)]
+		w, _ := candidateWeight(p)
+		total += w
 	}
+	// The newcomer is sized in the table for this test: weight 63 * 0.2.
+	identityVersionWeights["chrome/chrome_999"] = 0.2
+	t.Cleanup(func() { delete(identityVersionWeights, "chrome/chrome_999") })
 	added := append(append([]stealth.BrowserProfile(nil), orig...), stealth.BrowserProfile{
 		UserAgent: "x", TLSProfile: "chrome_999", Browser: "chrome", OS: "windows",
 	})
@@ -436,7 +440,8 @@ func TestProfileAssignment_KeysOnProfileIdentityNotUserAgentText(t *testing.T) {
 			assert.Equal(t, "chrome/windows/chrome_999", a, "an account may only move to the newcomer")
 		}
 	}
-	newcomer := identityShareWeights["chrome/windows"]
+	// (newcomer: chrome/windows share times its version weight)
+	newcomer := identityShareWeights["chrome/windows"] * 0.2
 	want := float64(users) * newcomer / (total + newcomer)
 	assert.InDelta(t, want, float64(moved), want*0.25, "adding a profile should move about its weight's share of accounts")
 }

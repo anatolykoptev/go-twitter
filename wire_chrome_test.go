@@ -2,6 +2,7 @@ package twitter
 
 import (
 	"context"
+	"sort"
 	"strings"
 	"testing"
 
@@ -39,7 +40,6 @@ var (
 var oracleXHRValues = map[string]string{
 	"accept":          "*/*",
 	"accept-language": "en-US,en;q=0.9",
-	"priority":        "u=1, i",
 	"referer":         "https://x.com/",
 	"sec-fetch-mode":  "cors",
 	"sec-fetch-dest":  "empty",
@@ -66,6 +66,7 @@ func chromeClient(t *testing.T) (*Client, *stealth.BrowserClient, *wireRecorder,
 	t.Cleanup(func() { _ = c.Close() })
 	c.warmDoerOverride = &fakeWarmBackend{}
 	bc, rec := recorderClient(t, p)
+	c.owned.setWire(bc, wireGenFor(p.TLSProfile)) // as the Client does for the clients it builds
 	// One authenticated request initialises the transaction-id keys from the
 	// local page set, so later logged-out requests get an id without any fetch.
 	_, _, _, _ = c.doRequestWithBody(context.Background(), nil, bc, "GET", "https://x.com/i/api/graphql/w/Warm", twitterHeaders("W", "W", p.UserAgent), nil)
@@ -104,7 +105,7 @@ func TestChromeWire_LoggedOutXHR(t *testing.T) {
 	h["cookie"] = "guest_id=v1%3A1" // the cookie jar adds this on the wire
 	_, _, _, _ = c.doRequestWithBody(ctx, nil, bc, "GET", "https://api.x.com/1.1/hashflags.json", h, nil)
 	got := rec.last()
-	assert.Equal(t, oracleXHRGet, wireNames(got), "GET order")
+	assert.Equal(t, without(oracleXHRGet, "priority"), wireNames(got), "GET order")
 	for k, v := range oracleXHRValues {
 		assert.Equal(t, v, got.Headers[k], k)
 	}
@@ -116,7 +117,7 @@ func TestChromeWire_LoggedOutXHR(t *testing.T) {
 	h["cookie"] = "guest_id=v1%3A1"
 	_, _, _, _ = c.doRequestWithBody(ctx, nil, bc, "POST", "https://api.x.com/1.1/flow/viewer.json", h, strings.NewReader("{}"))
 	got = rec.last()
-	assert.Equal(t, oracleXHRPost, wireNames(got), "POST order")
+	assert.Equal(t, without(oracleXHRPost, "priority"), wireNames(got), "POST order")
 }
 
 // An authenticated same-origin GET goes out as a same-origin fetch: no origin,
@@ -130,7 +131,7 @@ func TestChromeWire_AuthenticatedSameOriginGet(t *testing.T) {
 	_, _, _, _ = c.doRequestWithBody(context.Background(), nil, bc, "GET",
 		"https://x.com/i/api/graphql/q/Op", twitterHeaders("AUTH", "CT0", ua), nil)
 	got := rec.last()
-	assert.Equal(t, oracleSameOriginAuthedGet, without(wireNames(got), "x-xp-forwarded-for"))
+	assert.Equal(t, without(oracleSameOriginAuthedGet, "priority"), without(wireNames(got), "x-xp-forwarded-for"))
 	assert.Equal(t, "same-origin", got.Headers["sec-fetch-site"])
 	assert.NotContains(t, got.Headers, "origin")
 	assert.Contains(t, got.Headers, "x-xp-forwarded-for", "logged in: still sent")
@@ -170,17 +171,16 @@ func TestChromeWire_FetchSiteAndOriginRule(t *testing.T) {
 // The unauthenticated flows of a current identity carry fetch metadata, an
 // explicit accept-encoding and priority like every other XHR.
 //
-// Mutation: wire.go shape — skip priority/sec-fetch for requests without a
+// Mutation: wire.go shape — skip the fetch metadata for requests without a
 // csrf token => RED.
 func TestChromeWire_GuestAndLoginFlowCarryBrowserHeaders(t *testing.T) {
 	c, bc, rec, _ := chromeClient(t)
 	check := func(name string) {
 		t.Helper()
 		got := rec.last()
-		for _, k := range []string{"sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest", "accept-encoding", "priority", "accept-language", "accept"} {
+		for _, k := range []string{"sec-fetch-site", "sec-fetch-mode", "sec-fetch-dest", "accept-encoding", "accept-language", "accept"} {
 			assert.NotEmpty(t, got.Headers[k], "%s: %s", name, k)
 		}
-		assert.Equal(t, "u=1, i", got.Headers["priority"], name)
 		assert.Equal(t, chromeAcceptEncoding, got.Headers["accept-encoding"], name)
 	}
 	_, err := c.getGuestToken(bc)
@@ -192,6 +192,22 @@ func TestChromeWire_GuestAndLoginFlowCarryBrowserHeaders(t *testing.T) {
 	_, err = c.submitFlowStep(bc, "GT", `{}`)
 	require.NoError(t, err)
 	check("login flow step")
+}
+
+// priority belongs to the transport's fetch mode: go-stealth adds
+// `priority: u=1, i` together with the HTTP/2 HEADERS weight 220, and the pair
+// must arrive together (Chrome never sends the header with weight 256). So the
+// header is never set here, and its place stays in the order table at the
+// position Chrome writes it.
+//
+// Mutation: wire.go shape — set h["priority"] = "u=1, i" => RED.
+func TestChromeWire_PriorityIsTheTransportsNotOurs(t *testing.T) {
+	c, bc, rec, ua := chromeClient(t)
+	_, _, _, _ = c.doRequestWithBody(context.Background(), nil, bc, "GET", "https://x.com/i/api/graphql/q/Op", twitterHeaders("AUTH", "CT0", ua), nil)
+	_, has := rec.last().Headers["priority"]
+	assert.False(t, has, "present only when go-stealth's fetch mode adds it (chromeClientOptions=%d)", len(chromeClientOptions))
+	assert.Equal(t, "priority", chromeHeaderOrder[len(chromeHeaderOrder)-1], "priority stays last, where Chrome writes it")
+	assert.Equal(t, oracleXHRGet[len(oracleXHRGet)-1], "priority")
 }
 
 // Which identities get the new shape: the current Chrome/Edge profiles; the
@@ -208,33 +224,134 @@ func TestWireGenFor(t *testing.T) {
 	} {
 		assert.Equal(t, wireLegacy, wireGenFor(p), "profile %q must stay on the frozen shape", p)
 	}
-	assert.Equal(t, wireLegacy, wireGenOf(nil))
+	assert.Equal(t, wireLegacy, (*clientSet)(nil).wireOf(nil))
+	assert.Equal(t, wireLegacy, (&clientSet{}).wireOf(&stealth.BrowserClient{}), "an unregistered client is legacy")
+}
+
+// An account's generation follows the profile STATED on it (set by the caller or
+// paired with its user agent), never the transport's defaulted profile: an
+// account whose profile was not stated and could not be paired stays legacy.
+//
+// Mutation: wire.go accountWire — fall back to defaultTLSProfile when the
+// account states none => RED (the unpaired-UA account gets the Chrome shape).
+func TestAccountWire_FollowsTheStatedProfile(t *testing.T) {
+	win := chromeProfile(t, stealth.ProfileChrome152, "chrome", "windows")
+	mk := func(a *Account) *Client {
+		c, err := NewClient(ClientConfig{Accounts: []*Account{a}, DefaultProxy: deadProxy})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = c.Close() })
+		return c
+	}
+	// A user agent no built-in profile presents: no profile can be paired.
+	odd := &Account{Username: "odd", AuthToken: "t", CT0: "c", UserAgent: "Mozilla/5.0 (X11; Linux x86_64) Chrome/123.0.0.0 Safari/537.36"}
+	c := mk(odd)
+	assert.Empty(t, odd.Profile.TLSProfile)
+	assert.Equal(t, wireLegacy, c.owned.wireOf(odd.client), "unpaired UA stays legacy")
+
+	// A user agent a built-in profile presents is paired, so it is stated.
+	paired := &Account{Username: "paired", AuthToken: "t", CT0: "c", UserAgent: win.UserAgent}
+	c = mk(paired)
+	assert.Equal(t, stealth.ProfileChrome152, paired.Profile.TLSProfile)
+	assert.Equal(t, wireChrome, c.owned.wireOf(paired.client))
+
+	// No profile, no UA: derived, hence current.
+	derived := &Account{Username: "derived", AuthToken: "t", CT0: "c"}
+	c = mk(derived)
+	assert.Equal(t, wireChrome, c.owned.wireOf(derived.client))
+
+	// An account added after NewClient gets its client lazily, with the same rule.
+	c, err := NewClient(ClientConfig{DefaultProxy: deadProxy})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = c.Close() })
+	lateOdd := &Account{Username: "lateodd", AuthToken: "t", CT0: "c", UserAgent: odd.UserAgent}
+	bc, err := c.clientForAccount(lateOdd)
+	require.NoError(t, err)
+	assert.Equal(t, wireLegacy, c.owned.wireOf(bc))
+	late := &Account{Username: "late", AuthToken: "t", CT0: "c"}
+	bc, err = c.clientForAccount(late)
+	require.NoError(t, err)
+	assert.Equal(t, wireChrome, c.owned.wireOf(bc))
+
+	// An explicitly stated legacy profile stays legacy.
+	old := &Account{Username: "old", AuthToken: "t", CT0: "c", Profile: legacyProfile}
+	c = mk(old)
+	assert.Equal(t, wireLegacy, c.owned.wireOf(old.client))
 }
 
 // Every identity this package can derive for an account without one is a
 // profile wireGenFor knows (a derived identity never lands on the frozen shape
-// by omission), and a client's generation follows its own TLS profile.
+// by omission).
 func TestWireGen_DerivedIdentitiesAreCurrent(t *testing.T) {
 	for _, p := range identityCandidates() {
 		assert.Equal(t, wireChrome, wireGenFor(p.TLSProfile), "%s/%s/%s", p.Browser, p.OS, p.TLSProfile)
 	}
-	bc, _ := recorderClient(t, chromeProfile(t, stealth.ProfileChrome150, "chrome", "linux"))
-	assert.Equal(t, wireChrome, wireGenOf(bc))
-	bc, _ = recorderClient(t, legacyProfile)
-	assert.Equal(t, wireLegacy, wireGenOf(bc))
 }
 
 // The transport-level options reach current identities only: whatever
 // chromeClientOptions holds (WithFetchMode once go-stealth has it) is never
-// applied to a legacy or unlisted profile.
+// applied to a legacy generation.
 //
-// Mutation: wire.go wireClientOptions — drop the wireGenFor check => RED.
+// Mutation: wire.go wireClientOptions — drop the generation check => RED.
 func TestWireClientOptions_NeverForLegacy(t *testing.T) {
 	old := chromeClientOptions
 	chromeClientOptions = []stealth.ClientOption{stealth.WithTimeout(1)}
 	t.Cleanup(func() { chromeClientOptions = old })
-	assert.Len(t, wireClientOptions(stealth.ProfileChrome152), 1)
-	assert.Empty(t, wireClientOptions(stealth.ProfileChrome131))
-	assert.Empty(t, wireClientOptions(stealth.ProfileBrave146))
-	assert.Empty(t, wireClientOptions(""))
+	assert.Len(t, wireClientOptions(wireChrome), 1)
+	assert.Empty(t, wireClientOptions(wireLegacy))
+}
+
+// The shared account-less client (the guest-token fallback) keeps the v0.8.6
+// shape unless the consumer opts in, whatever TLS profile go-stealth gives it by
+// default: a deployment that hosts only legacy accounts must not start
+// presenting the new shape from its guest fallback.
+//
+// Mutation: wire.go accountlessWire — drop the ChromeWireForAccountlessClients
+// check (always follow the default profile) => RED on the default-config rows.
+func TestAccountlessClient_LegacyUnlessOptedIn(t *testing.T) {
+	run := func(t *testing.T, optIn bool) (guestGET, activate recordedReq) {
+		rec := &wireRecorder{}
+		c, err := NewClient(ClientConfig{
+			ChromeWireForAccountlessClients: optIn,
+			stealthOpts: []stealth.ClientOption{
+				stealth.WithBackend(func(stealth.BackendConfig) (stealth.HTTPDoer, error) { return rec, nil }),
+			},
+		})
+		require.NoError(t, err)
+		t.Cleanup(func() { _ = c.Close() })
+		// No pooled account: the call falls back to a guest token.
+		_, _, _ = c.doPoolRequest(context.Background(), "GET", "TestEndpoint", "https://x.com/i/api/graphql/test/TestOp", nil)
+		for _, r := range rec.reqs {
+			switch {
+			case strings.HasSuffix(r.URL, "/1.1/guest/activate.json"):
+				activate = r
+			case strings.Contains(r.URL, "/graphql/") && r.Headers["x-guest-token"] != "":
+				guestGET = r
+			}
+		}
+		require.NotEmpty(t, activate.URL, "guest fallback never activated a token")
+		require.NotEmpty(t, guestGET.URL, "guest fallback never sent the GraphQL GET")
+		return guestGET, activate
+	}
+	keys := func(h map[string]string) []string {
+		var out []string
+		for k := range sansGenerated(h) {
+			out = append(out, k)
+		}
+		sort.Strings(out)
+		return out
+	}
+	wantKeys := func(h map[string]string) []string { return keys(h) }
+
+	get, act := run(t, false)
+	assert.Equal(t, legacyOrder, get.Order, "guest GET order is the v0.8.6 list")
+	assert.Equal(t, legacyOrder, act.Order)
+	assert.Equal(t, wantKeys(legacyGuestHeaders()), keys(get.Headers), "guest GET header set is v0.8.6's")
+	assert.Equal(t, wantKeys(legacyActivateHeaders()), keys(act.Headers), "activate header set is v0.8.6's")
+	assert.Equal(t, "gzip, deflate, br", get.Headers["accept-encoding"])
+	assert.NotContains(t, get.Headers, "sec-fetch-site")
+
+	get, act = run(t, true)
+	assert.NotEqual(t, legacyOrder, get.Order, "opted in: the Chrome order")
+	assert.Equal(t, "cross-site", act.Headers["sec-fetch-site"])
+	assert.Contains(t, get.Headers, "sec-fetch-site")
 }

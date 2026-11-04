@@ -43,19 +43,33 @@ func wireGenFor(p stealth.TLSProfile) wireGen {
 	return wireLegacy
 }
 
-// wireGenOf is the generation of the client that sends a request.
-func wireGenOf(bc *stealth.BrowserClient) wireGen {
-	if bc == nil {
-		return wireLegacy
+// accountWire is the generation an account sends, decided from the profile
+// STATED on the account (set by the caller, or paired with its user agent by
+// ensureIdentity), never from a TLS profile the transport defaulted to: an
+// account whose profile was not stated and could not be paired stays legacy.
+// Like buildAccountClient it reads the account without locking; the caller has
+// completed the identity.
+func accountWire(acc *Account) wireGen {
+	return wireGenFor(acc.Profile.TLSProfile)
+}
+
+// accountlessWire is the generation of the clients that carry no account: the
+// legacy shape unless ClientConfig.ChromeWireForAccountlessClients opts in, in
+// which case it follows the transport's default profile.
+func accountlessWire(cfg ClientConfig) wireGen {
+	if cfg.ChromeWireForAccountlessClients {
+		return wireGenFor(defaultTLSProfile)
 	}
-	return wireGenFor(bc.Identity().TLSProfile)
+	return wireLegacy
 }
 
 // wireOrderFor shapes headers (in place) for a request bc will send to rawURL
 // and returns the header order to pass to the transport. Every request that
-// carries twitterHeaders, guestHeaders or loginFlowHeaders goes through it.
-func wireOrderFor(bc *stealth.BrowserClient, method, rawURL string, headers map[string]string) []string {
-	return wireGenOf(bc).shape(method, rawURL, headers)
+// carries twitterHeaders, guestHeaders or loginFlowHeaders goes through it. The
+// generation is the one registered for bc when the Client built it; a client
+// built elsewhere is legacy.
+func (c *Client) wireOrderFor(bc *stealth.BrowserClient, method, rawURL string, headers map[string]string) []string {
+	return c.owned.wireOf(bc).shape(method, rawURL, headers)
 }
 
 // shape prepares headers for a request of this generation and returns the order
@@ -87,7 +101,10 @@ func (g wireGen) shape(method, rawURL string, h map[string]string) []string {
 		h["accept-language"] = "en-US,en;q=0.9"
 	}
 	h["accept-encoding"] = chromeAcceptEncoding
-	h["priority"] = "u=1, i"
+	// priority is NOT set here: go-stealth's fetch mode adds `priority: u=1, i`
+	// together with the HTTP/2 HEADERS weight 220, and the pair must arrive
+	// together (Chrome never sends the priority header with weight 256). It has
+	// its place in chromeHeaderOrder for when the transport adds it.
 
 	// A logged-out page sends no x-xp-forwarded-for.
 	if h["x-guest-token"] != "" {
@@ -131,9 +148,9 @@ const chromeAcceptEncoding = "gzip, deflate, br"
 // (that release decodes zstd). Legacy profiles never receive these options.
 var chromeClientOptions []stealth.ClientOption
 
-// wireClientOptions are the extra client options for a client presenting p.
-func wireClientOptions(p stealth.TLSProfile) []stealth.ClientOption {
-	if wireGenFor(p) != wireChrome {
+// wireClientOptions are the extra client options for a client of generation g.
+func wireClientOptions(g wireGen) []stealth.ClientOption {
+	if g != wireChrome {
 		return nil
 	}
 	return chromeClientOptions

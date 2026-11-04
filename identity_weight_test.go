@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"strings"
 	"testing"
 
 	stealth "github.com/anatolykoptev/go-stealth"
@@ -38,7 +39,7 @@ func TestProfileForAccountKey_FollowsDesktopShare(t *testing.T) {
 	var total float64
 	perKey := map[string]float64{}
 	for _, p := range identityCandidates() {
-		w := identityShareWeights[osBrowserKey(p)]
+		w, _ := candidateWeight(p)
 		perKey[osBrowserKey(p)] += w
 		total += w
 	}
@@ -50,22 +51,67 @@ func TestProfileForAccountKey_FollowsDesktopShare(t *testing.T) {
 	assert.Greater(t, 100*float64(count["chrome/windows"]+count["edge/windows"])/n, 60.0, "Windows is the majority")
 }
 
-// Every candidate has a weight in the table: a profile go-stealth adds for an
-// OS or browser the table does not name would otherwise get the fallback
-// silently.
+// Every candidate has a weight in both tables: a profile go-stealth adds for an
+// OS, browser or TLS version the tables do not name would otherwise get the
+// fallback silently.
 //
 // Mutation: identity.go identityShareWeights — delete the "edge/macos" entry => RED.
 func TestIdentityShareWeights_CoverEveryCandidate(t *testing.T) {
 	for _, p := range identityCandidates() {
-		_, ok := identityShareWeights[osBrowserKey(p)]
-		assert.True(t, ok, "no share weight for %s (%s)", osBrowserKey(p), p.TLSProfile)
+		_, ok := candidateWeight(p)
+		assert.True(t, ok, "no weight for %s (%s)", osBrowserKey(p), p.TLSProfile)
 	}
 	for key := range identityShareWeights {
 		found := false
 		for _, p := range identityCandidates() {
 			found = found || osBrowserKey(p) == key
 		}
-		assert.True(t, found, "weight %q names no candidate", key)
+		assert.True(t, found, "share weight %q names no candidate", key)
+	}
+	// A browser's version factors add up to 1, so the OS shares stay the mix.
+	sum := map[string]float64{}
+	for key, v := range identityVersionWeights {
+		b, _, _ := strings.Cut(key, "/")
+		sum[b] += v
+	}
+	for b, s := range sum {
+		assert.InDelta(t, 1.0, s, 1e-9, "%s version factors", b)
+	}
+}
+
+// Versions are weighted by recency: among Chrome accounts, the newest profile
+// dominates, the previous one is small and older ones are near zero.
+//
+// Mutation: identity.go identityVersionWeights — make the three Chrome factors
+// equal (1/3 each) => RED.
+func TestProfileForAccountKey_NewestVersionDominates(t *testing.T) {
+	const n = 10000
+	by := map[stealth.TLSProfile]int{}
+	chrome := 0
+	for _, u := range syntheticUsernames(n) {
+		p := profileForAccountKey(accountKey(u))
+		if p.Browser == "chrome" {
+			by[p.TLSProfile]++
+			chrome++
+		}
+	}
+	share := func(p stealth.TLSProfile) float64 { return float64(by[p]) / float64(chrome) }
+	assert.InDelta(t, 0.85, share(stealth.ProfileChrome152), 0.03)
+	assert.InDelta(t, 0.12, share(stealth.ProfileChrome150), 0.03)
+	assert.Less(t, share(stealth.ProfileChrome146), 0.06)
+}
+
+// The hash-to-unit-interval map never reaches 0 or 1, so a score is always
+// finite, even for the extreme hashes.
+//
+// Mutation: identity.go unitInterval — use (x+0.5)/2^53 over 53 bits (the old
+// form, which rounds to 1.0 for the largest hash) => RED.
+func TestUnitInterval_StrictlyInsideZeroOne(t *testing.T) {
+	for _, h := range []uint64{0, 1, 1 << 11, 1<<63 - 1, 1 << 63, ^uint64(0) - 1, ^uint64(0)} {
+		u := unitInterval(h)
+		assert.Greater(t, u, 0.0, "h=%x", h)
+		assert.Less(t, u, 1.0, "h=%x", h)
+		assert.False(t, math.IsInf(-1/math.Log(u), 0), "h=%x", h)
 	}
 }
 
@@ -148,10 +194,10 @@ func TestProfileForAccountKey_MovedByWeighting(t *testing.T) {
 // pinnedPicks are the identities picked for a fixed sample of names, recorded
 // when the weighting was introduced.
 var pinnedPicks = map[string]string{
-	"alice":  "chrome/windows/chrome_146",
-	"bob":    "edge/macos/chrome_152",
-	"carol":  "chrome/macos/chrome_146",
+	"alice":  "chrome/macos/chrome_152",
+	"bob":    "chrome/windows/chrome_152",
+	"carol":  "chrome/windows/chrome_152",
 	"dave":   "edge/windows/chrome_152",
-	"erin":   "chrome/windows/chrome_146",
+	"erin":   "chrome/windows/chrome_152",
 	"Frank ": "chrome/windows/chrome_150",
 }
