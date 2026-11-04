@@ -32,7 +32,8 @@ type Account struct {
 	active       bool
 	reactivateAt time.Time
 	client       *stealth.BrowserClient
-	navClient    *stealth.BrowserClient // current identities: same identity and proxy as client, built without fetch mode, for warm-page navigations (navClientFor)
+	jar          atomic.Pointer[sessionJar] // current identities: the cookie store both clients share (sessionJarFor)
+	navClient    *stealth.BrowserClient     // current identities: same identity and proxy as client, built without fetch mode, for warm-page navigations (navClientFor)
 
 	// proxyClientFailed marks an account whose pinned per-account proxy client
 	// could not be built in NewClient. Deliberately NOT the soft-deactivation
@@ -181,6 +182,7 @@ func (a *Account) SetCT0(ct0 string) {
 	defer a.mu.Unlock()
 	a.CT0 = ct0
 	a.ct0RefreshedAt = time.Now()
+	a.jar.Load().sync(a.AuthToken, a.CT0)
 }
 
 // Credentials returns a snapshot of (authToken, ct0, userAgent) under lock.
@@ -210,6 +212,7 @@ func (a *Account) SetCredentials(authToken, ct0 string) {
 	a.AuthToken = authToken
 	a.CT0 = ct0
 	a.ct0RefreshedAt = time.Now()
+	a.jar.Load().sync(a.AuthToken, a.CT0)
 }
 
 // RecordSuccess records a successful request and clears the consecutive
