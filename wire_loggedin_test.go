@@ -152,7 +152,7 @@ func TestPageReferer(t *testing.T) {
 		{"profile", withVars("UserByScreenName", `{"screen_name":"NASA"}`), "https://x.com/NASA"},
 		{"profile handle is path-escaped", withVars("UserByScreenName", `{"screen_name":"a/b?c"}`), "https://x.com/a%2Fb%3Fc"},
 		{"user tweets: only an id is known", withVars("UserTweets", `{"userId":"1"}`), "https://x.com/home"},
-		{"search", withVars("SearchTimeline", `{"rawQuery":"go lang & x"}`), "https://x.com/search?q=go+lang+%26+x"},
+		{"search", withVars("SearchTimeline", `{"rawQuery":"go lang & x"}`), "https://x.com/search?q=go%20lang%20%26%20x"},
 		{"tweet detail", withVars("TweetDetail", `{"focalTweetId":"123"}`), "https://x.com/i/status/123"},
 		{"notifications", "https://x.com/i/api/graphql/ID/tweetNotificationsQuery", "https://x.com/notifications"},
 		{"bookmarks", withVars("Bookmarks", `{}`), "https://x.com/i/bookmarks"},
@@ -165,7 +165,7 @@ func TestPageReferer(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, pageReferer(tc.url))
+			assert.Equal(t, tc.want, pageReferer(tc.url, pageSource{}))
 		})
 	}
 }

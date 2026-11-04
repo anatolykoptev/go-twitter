@@ -1,6 +1,7 @@
 package twitter
 
 import (
+	"io"
 	"sync"
 	"testing"
 
@@ -13,15 +14,18 @@ type recordedReq struct {
 	Method, URL string
 	Headers     map[string]string
 	Order       []string
+	Body        []byte // the request body as the transport read it
 }
 
 // wireRecorder is a transport that records every request and answers a fixed
 // body, so the headers a code path sends can be asserted without a network.
 type wireRecorder struct {
-	mu   sync.Mutex
-	reqs []recordedReq
-	cfg  stealth.BackendConfig   // the configuration of the last client built on this recorder (FetchMode = HTTP/2 weight 220)
-	cfgs []stealth.BackendConfig // every client built on it, in order
+	mu    sync.Mutex
+	reqs  []recordedReq
+	cfg   stealth.BackendConfig   // the configuration of the last client built on this recorder (FetchMode = HTTP/2 weight 220)
+	cfgs  []stealth.BackendConfig // every client built on it, in order
+	reply []byte                  // when set, the body every request is answered with
+	jar   map[string]string       // cookies GetCookieValue serves, keyed "<origin> <name>"
 }
 
 // factory is the backend factory that hands the client this recorder and keeps
@@ -39,21 +43,29 @@ func (r *wireRecorder) Do(req *stealth.Request) (*stealth.Response, error) {
 	for k, v := range req.Headers {
 		h[k] = v
 	}
+	var body []byte
+	if req.Body != nil {
+		body, _ = io.ReadAll(req.Body)
+	}
 	r.mu.Lock()
 	r.reqs = append(r.reqs, recordedReq{
 		Method: req.Method, URL: req.URL, Headers: h,
-		Order: append([]string(nil), req.HeaderOrder...),
+		Order: append([]string(nil), req.HeaderOrder...), Body: body,
 	})
 	r.mu.Unlock()
+	reply := r.reply
+	if reply == nil {
+		reply = []byte(`{"guest_token":"gt-test","flow_token":"ft-test","subtasks":[]}`)
+	}
 	return &stealth.Response{
 		StatusCode: 200,
-		Body:       []byte(`{"guest_token":"gt-test","flow_token":"ft-test","subtasks":[]}`),
+		Body:       reply,
 		Headers:    map[string]string{},
 	}, nil
 }
 
-func (r *wireRecorder) SetProxy(string) error             { return nil }
-func (r *wireRecorder) GetCookieValue(_, _ string) string { return "" }
+func (r *wireRecorder) SetProxy(string) error                { return nil }
+func (r *wireRecorder) GetCookieValue(u, name string) string { return r.jar[u+" "+name] }
 func (r *wireRecorder) last() recordedReq {
 	r.mu.Lock()
 	defer r.mu.Unlock()

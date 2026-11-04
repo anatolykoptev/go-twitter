@@ -66,10 +66,10 @@ func (c *Client) qidRefresh() *queryid.Refresher {
 // noteEndpointFault reports one errEndpoint response for op to the refresher,
 // with the credentials of the account that saw it (its cookie authenticates the
 // refresh's page fetch; the cookie is never logged).
-func (c *Client) noteEndpointFault(op string, bc *stealth.BrowserClient, authTok, ct0, ua string) {
+func (c *Client) noteEndpointFault(op string, acc *Account, bc *stealth.BrowserClient, authTok, ct0, ua string) {
 	r := c.qidRefresh()
 	r.OnEndpointFault(op, func() bundle.Fetcher {
-		return r.Shared(warmFetcher(c.warmClient(bc), twitterHeaders(authTok, ct0, ua)))
+		return r.Shared(warmFetcher(c.warmClient(acc, bc), twitterHeaders(authTok, ct0, ua)))
 	}, c.metrics.instruments())
 }
 

@@ -32,6 +32,7 @@ type Account struct {
 	active       bool
 	reactivateAt time.Time
 	client       *stealth.BrowserClient
+	navClient    *stealth.BrowserClient // current identities: same identity and proxy as client, built without fetch mode, for warm-page navigations (navClientFor)
 
 	// proxyClientFailed marks an account whose pinned per-account proxy client
 	// could not be built in NewClient. Deliberately NOT the soft-deactivation
@@ -39,6 +40,9 @@ type Account struct {
 	// (SetActive(true)), which would resurrect it. This flag is write-once and
 	// gates IsActive, so no reactivation path can make the account selectable.
 	proxyClientFailed bool
+
+	// navClientFailed: the navigation client could not be built; not retried.
+	navClientFailed bool
 
 	mu                 sync.Mutex
 	ct0RefreshedAt     time.Time

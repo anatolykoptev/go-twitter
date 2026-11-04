@@ -328,14 +328,8 @@ func (c *Client) login(acc *Account, client *stealth.BrowserClient) error {
 	}
 
 done:
-	authToken := client.GetCookieValue("https://api.twitter.com", "auth_token")
-	if authToken == "" {
-		authToken = client.GetCookieValue("https://twitter.com", "auth_token")
-	}
-	ct0 := client.GetCookieValue("https://api.twitter.com", "ct0")
-	if ct0 == "" {
-		ct0 = client.GetCookieValue("https://twitter.com", "ct0")
-	}
+	authToken := sessionCookie(client, "auth_token")
+	ct0 := sessionCookie(client, "ct0")
 	if ct0 == "" {
 		ct0 = GenerateCT0()
 	}
@@ -375,9 +369,9 @@ func (c *Client) openAccountOn(bc *stealth.BrowserClient) (*Account, error) {
 	}
 
 	headers := loginFlowHeaders(guestToken, "", clientUA(bc))
-	welcomeURL := twitterAPIURL + "/1.1/onboarding/task.json?flow_name=welcome"
+	welcomeURL := c.apiURL(bc, "/1.1/onboarding/task.json?flow_name=welcome")
 	body, _, status, err := bc.DoWithHeaderOrder("POST", welcomeURL,
-		headers, strings.NewReader(openAccountPayload), c.wireOrderFor(bc, "POST", welcomeURL, headers),
+		headers, strings.NewReader(openAccountPayload), c.wireOrderFor(nil, bc, "POST", welcomeURL, headers),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("welcome init: %w", err)
@@ -400,9 +394,9 @@ func (c *Client) openAccountOn(bc *stealth.BrowserClient) (*Account, error) {
 	for _, st := range flowResp.Subtasks {
 		if st.SubtaskID == "LoginJsInstrumentationSubtask" {
 			payload := fmt.Sprintf(`{"flow_token":%q,"subtask_inputs":[{"subtask_id":"LoginJsInstrumentationSubtask","js_instrumentation":{"response":"{\"rf\":{\"a\":\"b\"},\"s\":\"s\"}","link":"next_link"}}]}`, flowToken)
-			stepURL := twitterAPIURL + "/1.1/onboarding/task.json"
+			stepURL := c.apiURL(bc, "/1.1/onboarding/task.json")
 			body2, _, status2, err := bc.DoWithHeaderOrder("POST", stepURL,
-				headers, strings.NewReader(payload), c.wireOrderFor(bc, "POST", stepURL, headers),
+				headers, strings.NewReader(payload), c.wireOrderFor(nil, bc, "POST", stepURL, headers),
 			)
 			if err != nil {
 				return nil, fmt.Errorf("js instrumentation: %w", err)
@@ -422,14 +416,8 @@ func (c *Client) openAccountOn(bc *stealth.BrowserClient) (*Account, error) {
 
 	_ = flowToken
 
-	authToken := bc.GetCookieValue("https://api.twitter.com", "auth_token")
-	if authToken == "" {
-		authToken = bc.GetCookieValue("https://twitter.com", "auth_token")
-	}
-	ct0 := bc.GetCookieValue("https://api.twitter.com", "ct0")
-	if ct0 == "" {
-		ct0 = bc.GetCookieValue("https://twitter.com", "ct0")
-	}
+	authToken := sessionCookie(bc, "auth_token")
+	ct0 := sessionCookie(bc, "ct0")
 
 	if authToken == "" {
 		return nil, fmt.Errorf("open account: no auth_token in cookies after welcome flow")
@@ -458,8 +446,8 @@ func (c *Client) getGuestToken(client *stealth.BrowserClient) (string, error) {
 		"content-type":  "application/json",
 		"user-agent":    ua,
 	}, ua)
-	activateURL := twitterAPIURL + "/1.1/guest/activate.json"
-	body, _, status, err := client.DoWithHeaderOrder("POST", activateURL, headers, nil, c.wireOrderFor(client, "POST", activateURL, headers))
+	activateURL := c.apiURL(client, "/1.1/guest/activate.json")
+	body, _, status, err := client.DoWithHeaderOrder("POST", activateURL, headers, nil, c.wireOrderFor(nil, client, "POST", activateURL, headers))
 	if err != nil {
 		return "", err
 	}
@@ -557,11 +545,11 @@ func (c *Client) initLoginFlowFull(client *stealth.BrowserClient, guestToken str
 	headers := loginFlowHeaders(guestToken, "", clientUA(client))
 	payload := `{"input_flow_data":{"flow_context":{"debug_overrides":{},"start_location":{"location":"splash_screen"}}},"subtask_versions":{"action_list":2,"alert_dialog":1,"app_download_cta":1,"check_logged_in_account":1,"choice_selection":3,"contacts_live_sync_permission_prompt":0,"cta":7,"email_verification":2,"end_flow":1,"enter_date":1,"enter_email":2,"enter_password":5,"enter_phone":2,"enter_recaptcha":1,"enter_text":5,"enter_username":2,"generic_urt":3,"in_app_notification":1,"interest_picker":3,"js_instrumentation":1,"menu_dialog":1,"notifications_permission_prompt":2,"open_account":2,"open_home_timeline":1,"open_link":1,"phone_verification":4,"privacy_options":1,"security_key":3,"select_avatar":4,"select_banner":2,"settings_list":7,"show_code":1,"sign_up":2,"sign_up_review":4,"tweet_selection_urt":1,"update_users":1,"upload_media":1,"user_recommendations_list":4,"user_recommendations_urt":1,"wait_spinner":3,"web_modal":1}}`
 
-	initURL := twitterAPIURL + "/1.1/onboarding/task.json?flow_name=login"
+	initURL := c.apiURL(client, "/1.1/onboarding/task.json?flow_name=login")
 	body, _, status, err := client.DoWithHeaderOrder("POST", initURL,
 		headers,
 		strings.NewReader(payload),
-		c.wireOrderFor(client, "POST", initURL, headers),
+		c.wireOrderFor(nil, client, "POST", initURL, headers),
 	)
 	if err != nil {
 		return nil, err
@@ -574,11 +562,11 @@ func (c *Client) initLoginFlowFull(client *stealth.BrowserClient, guestToken str
 
 func (c *Client) submitFlowStep(client *stealth.BrowserClient, guestToken, payload string) (*flowResponse, error) {
 	headers := loginFlowHeaders(guestToken, "", clientUA(client))
-	stepURL := twitterAPIURL + "/1.1/onboarding/task.json"
+	stepURL := c.apiURL(client, "/1.1/onboarding/task.json")
 	body, _, status, err := client.DoWithHeaderOrder("POST", stepURL,
 		headers,
 		strings.NewReader(payload),
-		c.wireOrderFor(client, "POST", stepURL, headers),
+		c.wireOrderFor(nil, client, "POST", stepURL, headers),
 	)
 	if err != nil {
 		return nil, err
@@ -633,3 +621,22 @@ func (c *Client) submitGenericStep(client *stealth.BrowserClient, guestToken, fl
 
 // Ensure captcha import is used
 var _ captcha.Solver
+
+// sessionCookieURLs are the origins a login can leave the session cookies under:
+// the legacy hosts first (so a legacy account reads exactly what it always
+// did), then the x.com hosts a current identity logs in through (api.x.com).
+var sessionCookieURLs = []string{
+	"https://api.twitter.com", "https://twitter.com",
+	"https://api.x.com", "https://x.com",
+}
+
+// sessionCookie is the value of the named cookie in bc's jar, searched across
+// sessionCookieURLs; "" when none holds it.
+func sessionCookie(bc *stealth.BrowserClient, name string) string {
+	for _, u := range sessionCookieURLs {
+		if v := bc.GetCookieValue(u, name); v != "" {
+			return v
+		}
+	}
+	return ""
+}

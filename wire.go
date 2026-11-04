@@ -45,6 +45,35 @@ func wireGenFor(p stealth.TLSProfile) wireGen {
 	return wireLegacy
 }
 
+// Wire names of the generations, as WireFor and Account.Wire report them.
+const (
+	WireChrome = "chrome"
+	WireLegacy = "legacy"
+)
+
+func (g wireGen) String() string {
+	if g == wireChrome {
+		return WireChrome
+	}
+	return WireLegacy
+}
+
+// WireFor reports which request shape an account on TLS profile p sends: WireChrome
+// for the current desktop Chrome profiles, WireLegacy (the frozen v0.8.6 shape)
+// for every other profile. It is the rule the client itself applies, so a
+// consumer labelling identities calls this instead of keeping its own copy of
+// the profile set.
+func WireFor(p stealth.TLSProfile) string { return wireGenFor(p).String() }
+
+// Wire reports the request shape the account sends, decided from the TLS profile
+// stated on it. NewClient completes an account's identity; an account no Client
+// has seen yet and that states no profile reports WireLegacy until then.
+func (a *Account) Wire() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return accountWire(a).String()
+}
+
 // accountWire is the generation an account sends, decided from the profile
 // STATED on the account (set by the caller, or paired with its user agent by
 // ensureIdentity), never from a TLS profile the transport defaulted to: an
@@ -65,19 +94,43 @@ func accountlessWire(cfg ClientConfig) wireGen {
 	return wireLegacy
 }
 
+// wireFor is the generation a request sends. With an account it is the account's
+// stated profile (accountWire), the same input its transport was built from, so
+// an Account shared by two Clients cannot send a shape its transport does not
+// match. The per-Client registry answers only for the requests that carry no
+// account (guest paths, the shared client) and for short-lived clients.
+func (c *Client) wireFor(acc *Account, bc *stealth.BrowserClient) wireGen {
+	if acc != nil {
+		return accountWire(acc)
+	}
+	return c.owned.wireOf(bc)
+}
+
 // wireOrderFor shapes headers (in place) for a request bc will send to rawURL
 // and returns the header order to pass to the transport. Every request that
-// carries twitterHeaders, guestHeaders or loginFlowHeaders goes through it. The
-// generation is the one registered for bc when the Client built it; a client
-// built elsewhere is legacy.
-func (c *Client) wireOrderFor(bc *stealth.BrowserClient, method, rawURL string, headers map[string]string) []string {
-	return c.owned.wireOf(bc).shape(method, rawURL, headers)
+// carries twitterHeaders, guestHeaders or loginFlowHeaders goes through it. acc
+// is the account the request is for (nil when it carries none).
+func (c *Client) wireOrderFor(acc *Account, bc *stealth.BrowserClient, method, rawURL string, headers map[string]string) []string {
+	return c.wireFor(acc, bc).shape(method, rawURL, headers)
+}
+
+// pageSource is what the referer of a request can be derived from beyond its
+// URL: the request body (a GraphQL POST carries its variables there) and the
+// handles this Client has seen for user ids.
+type pageSource struct {
+	body   []byte                     // the JSON body of a POST, nil otherwise
+	handle func(userID string) string // the known handle of a user id, "" if unknown; may be nil
 }
 
 // shape prepares headers for a request of this generation and returns the order
 // they go out in. The builders (twitterHeaders, guestHeaders, loginFlowHeaders)
 // keep producing the v0.8.6 set; the legacy generation sends it untouched.
 func (g wireGen) shape(method, rawURL string, h map[string]string) []string {
+	return g.shapeFor(method, rawURL, h, pageSource{})
+}
+
+// shapeFor is shape with the extra inputs a page referer can use.
+func (g wireGen) shapeFor(method, rawURL string, h map[string]string, src pageSource) []string {
 	if g != wireChrome {
 		return twitterHeaderOrder
 	}
@@ -97,7 +150,7 @@ func (g wireGen) shape(method, rawURL string, h map[string]string) []string {
 	// referer is that page; a request to another host (api.x.com, ...) sends the
 	// site root, as the browser does.
 	if site == "same-origin" {
-		h["referer"] = pageReferer(rawURL)
+		h["referer"] = pageReferer(rawURL, src)
 	} else if h["referer"] == "" {
 		h["referer"] = "https://x.com/"
 	}
@@ -115,14 +168,18 @@ func (g wireGen) shape(method, rawURL string, h map[string]string) []string {
 	return chromeHeaderOrder
 }
 
+// maxRefererBytes is the longest referer Chrome sends in full; a longer one is
+// cut to the origin ("https://x.com/"), the policy the browser applies.
+const maxRefererBytes = 4096
+
 // pageReferer is the x.com page a user would be on when the web client makes
 // the request to rawURL: one table keyed by GraphQL operation name, with the
-// operation's variables (the URL's `variables` parameter) filling in the page.
-// Anything it cannot place (an operation not listed, a missing or malformed
-// variable, a request whose variables ride in a POST body, a REST path) falls
-// back to the home timeline. UserTweets carries only a user id, not the handle
-// the profile URL needs, so it falls back too.
-func pageReferer(rawURL string) string {
+// operation's variables (the URL's `variables` parameter, or the "variables" of
+// a POST body) filling in the page. Anything it cannot place (an operation not
+// listed, a missing or malformed variable, a REST path, a user id whose handle
+// is not known) falls back to the home timeline. A referer longer than
+// maxRefererBytes becomes the site root.
+func pageReferer(rawURL string, src pageSource) string {
 	const home = "https://x.com/home"
 	u, err := url.Parse(rawURL)
 	if err != nil {
@@ -141,11 +198,41 @@ func pageReferer(rawURL string) string {
 		if json.Unmarshal([]byte(v), &vars) != nil {
 			return home
 		}
+	} else if len(src.body) > 0 {
+		var env struct {
+			Variables map[string]any `json:"variables"`
+		}
+		if json.Unmarshal(src.body, &env) != nil {
+			return home
+		}
+		vars = env.Variables
 	}
-	if p := page(vars); p != "" {
-		return p
+	p := page(vars, src)
+	if p == "" {
+		return home
 	}
-	return home
+	if len(p) > maxRefererBytes {
+		return "https://x.com/"
+	}
+	return p
+}
+
+// encodeURIComponent is the JavaScript function of that name: every byte except
+// A-Z a-z 0-9 - _ . ! ~ * ' ( ) is percent-encoded (a space is %20, not +).
+func encodeURIComponent(s string) string {
+	const hex = "0123456789ABCDEF"
+	var b strings.Builder
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || strings.IndexByte("-_.!~*'()", c) >= 0 {
+			b.WriteByte(c)
+			continue
+		}
+		b.WriteByte('%')
+		b.WriteByte(hex[c>>4])
+		b.WriteByte(hex[c&15])
+	}
+	return b.String()
 }
 
 // varString is vars[key] when it is a non-empty string.
@@ -156,32 +243,43 @@ func varString(vars map[string]any, key string) string {
 
 // operationPages maps a GraphQL operation to the page the web client issues it
 // from. A func returns "" when the variable it needs is absent.
-var operationPages = map[string]func(vars map[string]any) string{
-	"HomeTimeline":       func(map[string]any) string { return "https://x.com/home" },
-	"HomeLatestTimeline": func(map[string]any) string { return "https://x.com/home" },
-	"UserByScreenName": func(v map[string]any) string {
+var operationPages = map[string]func(vars map[string]any, src pageSource) string{
+	"HomeTimeline":       func(map[string]any, pageSource) string { return "https://x.com/home" },
+	"HomeLatestTimeline": func(map[string]any, pageSource) string { return "https://x.com/home" },
+	"UserByScreenName": func(v map[string]any, src pageSource) string {
 		if h := varString(v, "screen_name"); h != "" {
 			return "https://x.com/" + url.PathEscape(h)
 		}
 		return ""
 	},
-	"SearchTimeline": func(v map[string]any) string {
+	"SearchTimeline": func(v map[string]any, src pageSource) string {
 		if q := varString(v, "rawQuery"); q != "" {
-			return "https://x.com/search?q=" + url.QueryEscape(q)
+			return "https://x.com/search?q=" + encodeURIComponent(q)
+		}
+		return ""
+	},
+	// The profile URL needs the handle, which the request carries only as a user
+	// id: it is known when this Client has seen the user (GetUserByScreenName).
+	"UserTweets": func(v map[string]any, src pageSource) string {
+		if src.handle == nil {
+			return ""
+		}
+		if h := src.handle(varString(v, "userId")); h != "" {
+			return "https://x.com/" + url.PathEscape(h)
 		}
 		return ""
 	},
 	// The handle is not known here; x.com/i/status/<id> is the page X itself
 	// redirects to the canonical URL from.
-	"TweetDetail": func(v map[string]any) string {
+	"TweetDetail": func(v map[string]any, src pageSource) string {
 		if id := varString(v, "focalTweetId"); id != "" {
 			return "https://x.com/i/status/" + url.PathEscape(id)
 		}
 		return ""
 	},
-	"tweetNotificationsQuery": func(map[string]any) string { return "https://x.com/notifications" },
-	"Bookmarks":               func(map[string]any) string { return "https://x.com/i/bookmarks" },
-	"ListLatestTweetsTimeline": func(v map[string]any) string {
+	"tweetNotificationsQuery": func(map[string]any, pageSource) string { return "https://x.com/notifications" },
+	"Bookmarks":               func(map[string]any, pageSource) string { return "https://x.com/i/bookmarks" },
+	"ListLatestTweetsTimeline": func(v map[string]any, src pageSource) string {
 		if id := varString(v, "listId"); id != "" {
 			return "https://x.com/i/lists/" + url.PathEscape(id)
 		}
@@ -270,4 +368,71 @@ var chromeHeaderOrder = []string{
 	"accept-language",
 	"cookie",
 	"priority",
+}
+
+// chromeNavigationOrder is the order Chrome writes the headers of a top-level
+// document navigation to x.com. Provenance: Google Chrome 156.0.8078.80 (macOS,
+// headful) loading https://x.com/NASA logged out, from the browser's network
+// log (cookies are stripped from that log, so the position of cookie is the one
+// it has in the same browser's subresource requests: after accept-language, before
+// priority). HTTP/2 HEADERS weight 256.
+var chromeNavigationOrder = []string{
+	"sec-ch-ua",
+	"sec-ch-ua-mobile",
+	"sec-ch-ua-platform",
+	"upgrade-insecure-requests",
+	"user-agent",
+	"accept",
+	"sec-fetch-site",
+	"sec-fetch-mode",
+	"sec-fetch-user",
+	"sec-fetch-dest",
+	"accept-encoding",
+	"accept-language",
+	"cookie",
+	"priority",
+}
+
+// chromeNavigationPostOrder is the order of a form-submission navigation (the
+// x.com/x/migrate hop of a warm fetch). NOT captured: it is Chrome's order for
+// a POST navigation as known from other sites (content-length, cache-control and
+// origin/content-type ahead of user-agent, referer after sec-fetch-dest).
+var chromeNavigationPostOrder = []string{
+	"content-length",
+	"sec-ch-ua",
+	"sec-ch-ua-mobile",
+	"sec-ch-ua-platform",
+	"upgrade-insecure-requests",
+	"origin",
+	"content-type",
+	"user-agent",
+	"accept",
+	"sec-fetch-site",
+	"sec-fetch-mode",
+	"sec-fetch-user",
+	"sec-fetch-dest",
+	"referer",
+	"accept-encoding",
+	"accept-language",
+	"cookie",
+	"priority",
+}
+
+// apiHostFor moves a request to the REST/login host the X web client uses. The
+// web client in Chrome talks to api.x.com; the frozen legacy generation stays on
+// api.twitter.com. Any other host (the test servers twitterAPIURL is pointed
+// at, upload.twitter.com) is left alone.
+func apiHostFor(g wireGen, rawURL string) string {
+	if g != wireChrome {
+		return rawURL
+	}
+	if rest, ok := strings.CutPrefix(rawURL, legacyAPIURL); ok {
+		return "https://api.x.com" + rest
+	}
+	return rawURL
+}
+
+// apiURL is twitterAPIURL+path for a request bc sends.
+func (c *Client) apiURL(bc *stealth.BrowserClient, path string) string {
+	return apiHostFor(c.wireFor(nil, bc), twitterAPIURL+path)
 }
