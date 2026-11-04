@@ -75,6 +75,12 @@ type Account struct {
 	lastPick time.Time
 	nextPick time.Time
 
+	// paceBusyUntil is a client-side hint, not a gate: the time before which the
+	// per-account pacer (Client.accountPacer) may still hold this account. The
+	// pool prefers accounts past it so a request does not sleep on the pacer
+	// while another account is idle; the pacer stays the guarantee. Guarded by mu.
+	paceBusyUntil time.Time
+
 	// Header-derived rate-limit state (see ratelimit_state.go), per endpoint.
 	// rlState is the last known X window; blockedUntil is every PERSISTED
 	// block (a response at or below RateLimitHeadroom, a 429, code 88) — X's
@@ -329,6 +335,25 @@ func (a *Account) intervalRemaining() time.Duration {
 		return d
 	}
 	return 0
+}
+
+// reservePace marks the account pace-busy for the next gap (see paceBusyUntil).
+// It only ever extends the window.
+func (a *Account) reservePace(gap time.Duration) {
+	until := time.Now().Add(gap)
+	a.mu.Lock()
+	if until.After(a.paceBusyUntil) {
+		a.paceBusyUntil = until
+	}
+	a.mu.Unlock()
+}
+
+// paceBusy reports whether the account is inside its reserved pace window.
+// Read-only.
+func (a *Account) paceBusy() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return time.Now().Before(a.paceBusyUntil)
 }
 
 // tryAcquireFlight takes one in-flight slot when the account is below limit.
