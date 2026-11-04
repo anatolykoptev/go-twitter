@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.12](https://github.com/anatolykoptev/go-twitter/compare/v0.8.11...v0.8.12) (2026-11-04)
+
+
+### Features
+
+* **queryid:** name the changed operations in the refresh applied log ([#198](https://github.com/anatolykoptev/go-twitter/issues/198)) ([c6d557a](https://github.com/anatolykoptev/go-twitter/commit/c6d557a3c748ef4882a70c66afbb7813921eb7db))
+
 ## [0.8.11](https://github.com/anatolykoptev/go-twitter/compare/v0.8.10...v0.8.11) (2026-11-04)
 
 
