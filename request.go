@@ -894,7 +894,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 		slog.Info("guest token acquired as fallback", slog.String("endpoint", endpoint))
 	}
 
-	body, respHdrs, status, err := c.observedRequest(ctx, nil, endpoint, c.client, "GET", url, guestHeaders(gt))
+	body, respHdrs, status, err := c.observedRequest(ctx, nil, endpoint, c.client, "GET", url, guestHeaders(gt, clientUA(c.client)))
 	if err != nil {
 		return nil, nil, err
 	}
@@ -912,7 +912,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 			return nil, nil, fmt.Errorf("guest token reacquisition failed for %s: %w", endpoint, gtErr)
 		}
 		c.setGuestToken(newGT)
-		body, respHdrs, status, err = c.observedRequest(ctx, nil, endpoint, c.client, "GET", url, guestHeaders(newGT))
+		body, respHdrs, status, err = c.observedRequest(ctx, nil, endpoint, c.client, "GET", url, guestHeaders(newGT, clientUA(c.client)))
 		if err != nil {
 			return nil, nil, err
 		}

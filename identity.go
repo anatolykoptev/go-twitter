@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	stealth "github.com/anatolykoptev/go-stealth"
+	"github.com/anatolykoptev/go-twitter/internal/bundle"
 )
 
 // An account presents one browser identity for its whole life: the TLS
@@ -103,4 +104,19 @@ func clientUA(bc *stealth.BrowserClient) string {
 		}
 	}
 	return defaultUserAgent
+}
+
+// stealthDefaultUserAgent is the UA go-stealth reports for a client built with
+// no options, i.e. the one it pairs with its default TLS profile. It falls
+// back to the bundled constant only if such a client cannot be built.
+func stealthDefaultUserAgent() string {
+	bc, err := stealth.NewClient()
+	if err != nil {
+		return bundle.DefaultUserAgent
+	}
+	defer bc.CloseIdleConnections()
+	if ua := bc.Identity().UserAgent; ua != "" {
+		return ua
+	}
+	return bundle.DefaultUserAgent
 }

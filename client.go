@@ -143,7 +143,7 @@ func NewClient(cfg ClientConfig, clientOpts ...ClientOption) (*Client, error) {
 	// alert fires once per ok->failed transition, never per request.
 	mgr := cfg.sharedXtid
 	if mgr == nil {
-		fetcher := &bundle.StealthFetcher{Client: bc, UserAgent: defaultUserAgent}
+		fetcher := &bundle.StealthFetcher{Client: bc, UserAgent: clientUA(bc)}
 		mgr = xtid.NewManager(fetcher)
 		if cfg.XtidKeySource != xtid.KeySourceAccountPage {
 			mgr.SetKeySource(cfg.XtidKeySource)
@@ -188,7 +188,7 @@ func NewClient(cfg ClientConfig, clientOpts ...ClientOption) (*Client, error) {
 	} else {
 		slog.Info("xpff: using server-set guest_id cookie")
 	}
-	xpffGen := xpff.New(xpffGuestID, defaultUserAgent)
+	xpffGen := xpff.New(xpffGuestID, clientUA(bc))
 
 	// Per-account human-pace spacing. Independent of the opt-in pre-request jitter: it
 	// spaces a single account's consecutive requests for stealth, keyed by
@@ -292,9 +292,9 @@ func buildAccountClient(cfg ClientConfig, acc *Account) (*stealth.BrowserClient,
 		id := stealth.BrowserIdentity{BrowserProfile: acc.Profile}
 		id.UserAgent = acc.UserAgent
 		opts = append(opts, stealth.WithIdentity(id))
-	} else {
-		opts = append(opts, stealth.WithProfile(acc.Profile.TLSProfile))
 	}
+	// An account whose UA no built-in profile presents keeps the client default;
+	// an empty profile is never passed to WithProfile.
 	if proxy != "" {
 		opts = append(opts, stealth.WithProxy(proxy))
 	}

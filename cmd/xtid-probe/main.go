@@ -97,8 +97,8 @@ func main() {
 		os.Exit(1)
 	}
 	cookie := "auth_token=" + authToken + "; ct0=" + ct0
-	acctFetch := &bundle.StealthFetcher{Client: bc, UserAgent: bundle.DefaultUserAgent, Cookie: cookie}
-	guestFetch := &bundle.StealthFetcher{Client: bc, UserAgent: bundle.DefaultUserAgent}
+	acctFetch := &bundle.StealthFetcher{Client: bc, UserAgent: bc.Identity().UserAgent, Cookie: cookie}
+	guestFetch := &bundle.StealthFetcher{Client: bc, UserAgent: bc.Identity().UserAgent}
 
 	if *userID == "" {
 		id, lerr := lookupUserID(ctx, authToken, ct0, *user)
@@ -113,7 +113,7 @@ func main() {
 	variants := buildVariants(ctx, acctFetch, guestFetch, *pace, redact)
 	path := "/i/api/graphql/" + *qid + "/" + operation
 	reqURL := buildURL(*qid, *userID)
-	headers := baseHeaders(authToken, ct0)
+	headers := baseHeaders(authToken, ct0, bc.Identity().UserAgent)
 
 	counts := map[string]map[int]int{}
 	for _, v := range variants {
@@ -220,8 +220,7 @@ func buildURL(qid, userID string) string {
 	return "https://x.com/i/api/graphql/" + qid + "/" + operation + "?" + q.Encode()
 }
 
-func baseHeaders(authToken, ct0 string) map[string]string {
-	ua := bundle.DefaultUserAgent
+func baseHeaders(authToken, ct0, ua string) map[string]string {
 	h := map[string]string{
 		"authorization":             "Bearer " + twitter.BearerToken,
 		"x-csrf-token":              ct0,

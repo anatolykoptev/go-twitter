@@ -308,3 +308,77 @@ func TestContentType_OnlyWhereTheWebClientSendsIt(t *testing.T) {
 	assert.Equal(t, "application/json", gqlGet.h.Get("Content-Type"), "GraphQL GET: the web client sends it")
 	assert.Equal(t, "application/json", gqlPost.h.Get("Content-Type"))
 }
+
+// A bare-default client (no account) presents the identity of the stealth
+// client it sends through: its guest-token activation and guest reads carry
+// that client's own UA and Client Hints, so they stay coherent with its
+// ClientHello under any go-stealth default, not only the one the constant was
+// written for.
+//
+// Mutation: request.go doPoolRequest guest arm — pass "" instead of
+// clientUA(c.client) to guestHeaders (and auth.go getGuestToken — use
+// defaultUserAgent instead of clientUA(client)) => RED (131 UA over a 146 TLS).
+func TestBareDefaultClient_GuestRequestsCarryTheClientsOwnIdentity(t *testing.T) {
+	type seen struct{ path, ua, hints string }
+	var (
+		mu   sync.Mutex
+		reqs []seen
+	)
+	g := newGuestFake(t)
+	g.guestReply = func(w http.ResponseWriter, _ string, _ int32) {
+		_, _ = w.Write([]byte(userTweetsBody(snowflakeAt(time.Now()))))
+	}
+	inner := g.srv.Config.Handler
+	g.srv.Config.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		reqs = append(reqs, seen{r.URL.Path, r.Header.Get("User-Agent"), r.Header.Get("Sec-Ch-Ua")})
+		mu.Unlock()
+		inner.ServeHTTP(w, r)
+	})
+
+	// A profile that is not go-stealth's default, so the constant cannot match by luck.
+	c := newLoopbackClient(t, ClientConfig{stealthOpts: []stealth.ClientOption{stealth.WithProfile(stealth.ProfileChrome146)}})
+	c.cfg.DisableGuestFallback = false
+	id := c.client.Identity()
+	require.Equal(t, stealth.ProfileChrome146, id.TLSProfile)
+	require.Contains(t, id.UserAgent, "Chrome/146.", "go-stealth must pair the 146 ClientHello with a 146 UA")
+	require.NotEqual(t, defaultUserAgent, id.UserAgent)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	_, err := c.acquireGuestToken(ctx, c.client)
+	require.NoError(t, err)
+	c.setGuestToken("cached-guest")
+	_, _, _ = c.doGET(ctx, "UserByRestId", g.srv.URL+"/i/api/graphql/x/UserByRestId")
+
+	mu.Lock()
+	defer mu.Unlock()
+	var activate, guestRead bool
+	for _, r := range reqs {
+		if strings.HasSuffix(r.path, "/guest/activate.json") {
+			activate = true
+		} else if strings.Contains(r.path, "UserByRestId") {
+			guestRead = true
+		} else {
+			continue
+		}
+		assert.Equal(t, id.UserAgent, r.ua, "%s must carry the client's own UA", r.path)
+		assert.Equal(t, id.ClientHints["sec-ch-ua"], r.hints, "%s must carry the client's own hints", r.path)
+	}
+	assert.True(t, activate, "no guest activation seen")
+	assert.True(t, guestRead, "no guest read seen")
+}
+
+// An account written as a struct literal with a proxy and no profile (what the
+// *WithSocial lease builds) gets a client: the identity is completed before the
+// client is built, so an empty profile is never handed to go-stealth.
+func TestNewClient_LiteralAccountWithProxyAndNoProfileBuildsAClient(t *testing.T) {
+	acc := &Account{Username: "leased", AuthToken: "tokX", CT0: "ct0X", Proxy: deadProxy, active: true, credsAuthoritative: true}
+	c := newLoopbackClient(t, ClientConfig{Accounts: []*Account{acc}})
+	require.NotNil(t, acc.client, "the account's client must have been built")
+	assert.False(t, acc.proxyClientFailed)
+	assert.NotEmpty(t, acc.Profile.TLSProfile)
+	assert.Equal(t, acc.UserAgent, acc.client.Identity().UserAgent)
+	assert.Equal(t, acc.Profile.TLSProfile, acc.client.Identity().TLSProfile)
+	_ = c
+}

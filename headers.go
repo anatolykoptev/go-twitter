@@ -2,14 +2,13 @@ package twitter
 
 import (
 	stealth "github.com/anatolykoptev/go-stealth"
-	"github.com/anatolykoptev/go-twitter/internal/bundle"
 )
 
-// defaultUserAgent is the fallback User-Agent when no per-account UA is set. It
-// aliases bundle.DefaultUserAgent so the header builder and the warm-page
-// fetchers share one canonical Chrome UA (kept in lockstep with the go-stealth
-// JA3); see internal/bundle/fetcher.go.
-const defaultUserAgent = bundle.DefaultUserAgent
+// defaultUserAgent is the fallback User-Agent where no client exists to ask.
+// It is the UA go-stealth pairs with its own default TLS profile, so it moves
+// with go-stealth's default instead of drifting from it; clients that exist
+// report their own (clientUA).
+var defaultUserAgent = stealthDefaultUserAgent()
 
 // twitterHeaders returns the base headers required by Twitter's GraphQL API.
 func twitterHeaders(authToken, ct0, userAgent string) map[string]string {
@@ -47,20 +46,23 @@ func withClientHints(h map[string]string, userAgent string) map[string]string {
 }
 
 // guestHeaders returns headers for unauthenticated (guest token) requests.
-func guestHeaders(guestToken string) map[string]string {
+func guestHeaders(guestToken, userAgent string) map[string]string {
+	if userAgent == "" {
+		userAgent = defaultUserAgent
+	}
 	return withClientHints(map[string]string{
 		"authorization":             "Bearer " + BearerToken,
 		"x-guest-token":             guestToken,
 		"x-twitter-active-user":     "yes",
 		"x-twitter-client-language": "en",
 		"content-type":              "application/json",
-		"user-agent":                defaultUserAgent,
+		"user-agent":                userAgent,
 		"accept":                    "*/*",
 		"accept-language":           "en-US,en;q=0.9",
 		"accept-encoding":           "gzip, deflate, br",
 		"referer":                   "https://x.com/",
 		"origin":                    "https://x.com",
-	}, defaultUserAgent)
+	}, userAgent)
 }
 
 // loginFlowHeaders returns headers required for the login flow API. userAgent
