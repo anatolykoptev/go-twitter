@@ -61,7 +61,7 @@ func newLoopbackClient(t *testing.T, cfg ClientConfig) *Client {
 	cfg.SessionDir = t.TempDir()
 	cfg.skipPoolGauge = true
 	cfg.DisableGuestFallback = true
-	cfg.stealthOpts = []stealth.ClientOption{stealth.WithoutSSRFGuard()} // test-only
+	cfg.stealthOpts = append(cfg.stealthOpts, stealth.WithoutSSRFGuard()) // test-only
 	c, err := NewClient(cfg)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = c.Close() })

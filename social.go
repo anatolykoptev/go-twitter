@@ -97,7 +97,7 @@ func sharedSocialXtid() *xtid.Manager {
 		slog.Warn("twitter: shared xtid fetch client failed, using per-client managers", slog.Any("error", err))
 		return nil
 	}
-	mgr := xtid.NewManager(&bundle.StealthFetcher{Client: bc, UserAgent: defaultUserAgent})
+	mgr := xtid.NewManager(&bundle.StealthFetcher{Client: bc, UserAgent: clientUA(bc)})
 	mgr.SetInitFailedHook(func(err error) {
 		slog.Warn("pool alert", slog.String("topic", "xtid.init_failed"), slog.Any("payload", map[string]any{"error": err.Error()}))
 	})

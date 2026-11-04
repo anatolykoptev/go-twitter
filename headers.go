@@ -2,14 +2,7 @@ package twitter
 
 import (
 	stealth "github.com/anatolykoptev/go-stealth"
-	"github.com/anatolykoptev/go-twitter/internal/bundle"
 )
-
-// defaultUserAgent is the fallback User-Agent when no per-account UA is set. It
-// aliases bundle.DefaultUserAgent so the header builder and the warm-page
-// fetchers share one canonical Chrome UA (kept in lockstep with the go-stealth
-// JA3); see internal/bundle/fetcher.go.
-const defaultUserAgent = bundle.DefaultUserAgent
 
 // twitterHeaders returns the base headers required by Twitter's GraphQL API.
 func twitterHeaders(authToken, ct0, userAgent string) map[string]string {
@@ -34,40 +27,51 @@ func twitterHeaders(authToken, ct0, userAgent string) map[string]string {
 		"sec-fetch-mode":            "cors",
 		"sec-fetch-site":            "same-origin",
 	}
-	if ch := stealth.ClientHintsHeaders(userAgent); ch != nil {
-		for k, v := range ch {
-			h[k] = v
-		}
+	return withClientHints(h, userAgent)
+}
+
+// withClientHints adds the Client Hints a Chromium browser with userAgent sends
+// beside it (none for other browsers) and returns h.
+func withClientHints(h map[string]string, userAgent string) map[string]string {
+	for k, v := range stealth.ClientHintsHeaders(userAgent) {
+		h[k] = v
 	}
 	return h
 }
 
 // guestHeaders returns headers for unauthenticated (guest token) requests.
-func guestHeaders(guestToken string) map[string]string {
-	return map[string]string{
+func guestHeaders(guestToken, userAgent string) map[string]string {
+	if userAgent == "" {
+		userAgent = defaultUserAgent
+	}
+	return withClientHints(map[string]string{
 		"authorization":             "Bearer " + BearerToken,
 		"x-guest-token":             guestToken,
 		"x-twitter-active-user":     "yes",
 		"x-twitter-client-language": "en",
 		"content-type":              "application/json",
-		"user-agent":                defaultUserAgent,
+		"user-agent":                userAgent,
 		"accept":                    "*/*",
 		"accept-language":           "en-US,en;q=0.9",
 		"accept-encoding":           "gzip, deflate, br",
 		"referer":                   "https://x.com/",
 		"origin":                    "https://x.com",
-	}
+	}, userAgent)
 }
 
-// loginFlowHeaders returns headers required for the login flow API.
-func loginFlowHeaders(guestToken, ct0 string) map[string]string {
+// loginFlowHeaders returns headers required for the login flow API. userAgent
+// is the one the sending client presents (see clientUA); empty means the default.
+func loginFlowHeaders(guestToken, ct0, userAgent string) map[string]string {
+	if userAgent == "" {
+		userAgent = defaultUserAgent
+	}
 	h := map[string]string{
 		"authorization":             "Bearer " + BearerToken,
 		"content-type":              "application/json",
 		"x-guest-token":             guestToken,
 		"x-twitter-active-user":     "yes",
 		"x-twitter-client-language": "en",
-		"user-agent":                defaultUserAgent,
+		"user-agent":                userAgent,
 		"accept":                    "*/*",
 		"accept-language":           "en-US,en;q=0.9",
 		"referer":                   "https://x.com/",
@@ -76,7 +80,7 @@ func loginFlowHeaders(guestToken, ct0 string) map[string]string {
 	if ct0 != "" {
 		h["x-csrf-token"] = ct0
 	}
-	return h
+	return withClientHints(h, userAgent)
 }
 
 // twitterHeaderOrder is the Twitter-specific header order for TLS fingerprint consistency.

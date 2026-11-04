@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"regexp"
 	"strings"
@@ -119,6 +120,7 @@ func NewClient(cfg ClientConfig, clientOpts ...ClientOption) (*Client, error) {
 	var buildErrs []error
 	usable := 0
 	for _, acc := range cfg.Accounts {
+		acc.ensureIdentity()
 		accClient, accProxy, err := buildAccountClient(cfg, acc)
 		if err != nil {
 			acc.markProxyClientFailed()
@@ -141,7 +143,7 @@ func NewClient(cfg ClientConfig, clientOpts ...ClientOption) (*Client, error) {
 	// alert fires once per ok->failed transition, never per request.
 	mgr := cfg.sharedXtid
 	if mgr == nil {
-		fetcher := &bundle.StealthFetcher{Client: bc, UserAgent: defaultUserAgent}
+		fetcher := &bundle.StealthFetcher{Client: bc, UserAgent: clientUA(bc)}
 		mgr = xtid.NewManager(fetcher)
 		if cfg.XtidKeySource != xtid.KeySourceAccountPage {
 			mgr.SetKeySource(cfg.XtidKeySource)
@@ -186,7 +188,7 @@ func NewClient(cfg ClientConfig, clientOpts ...ClientOption) (*Client, error) {
 	} else {
 		slog.Info("xpff: using server-set guest_id cookie")
 	}
-	xpffGen := xpff.New(xpffGuestID, defaultUserAgent)
+	xpffGen := xpff.New(xpffGuestID, clientUA(bc))
 
 	// Per-account human-pace spacing. Independent of the opt-in pre-request jitter: it
 	// spaces a single account's consecutive requests for stealth, keyed by
@@ -281,10 +283,26 @@ func buildAccountClient(cfg ClientConfig, acc *Account) (*stealth.BrowserClient,
 	if proxy == "" {
 		proxy = cfg.DefaultProxy
 	}
-	opts := []stealth.ClientOption{
-		stealth.WithProfile(acc.Profile.TLSProfile),
-		stealth.WithHeaderOrder(twitterHeaderOrder),
+	// The caller has completed the identity (ensureIdentity); the account's
+	// mutex may be held, so it is read directly.
+	opts := []stealth.ClientOption{stealth.WithHeaderOrder(twitterHeaderOrder)}
+	if acc.Profile.TLSProfile != "" {
+		// Profile and UA go in together, so the client's reported identity (used
+		// by the login flow) is exactly what every later request sends.
+		id := stealth.BrowserIdentity{BrowserProfile: acc.Profile}
+		id.UserAgent = acc.UserAgent
+		opts = append(opts, stealth.WithIdentity(id))
+	} else {
+		// A caller-set UA that no built-in profile presents: keep it as the
+		// client's identity over go-stealth's default TLS profile, so the login
+		// flow sends the same UA as every later request. An empty profile is
+		// never passed to go-stealth.
+		opts = append(opts, stealth.WithIdentity(stealth.BrowserIdentity{
+			BrowserProfile: stealth.BrowserProfile{UserAgent: acc.UserAgent, TLSProfile: defaultTLSProfile},
+		}))
 	}
+	// An account whose UA no built-in profile presents keeps the client default;
+	// an empty profile is never passed to WithProfile.
 	if proxy != "" {
 		opts = append(opts, stealth.WithProxy(proxy))
 	}
@@ -331,6 +349,7 @@ func (c *Client) clientForAccount(acc *Account) (*stealth.BrowserClient, error) 
 	if acc.proxyClientFailed {
 		return nil, fmt.Errorf("%w: %s", ErrProxyClientUnavailable, acc.Username)
 	}
+	acc.ensureIdentityLocked()
 	bc, proxy, err := buildAccountClient(c.cfg, acc)
 	if err != nil {
 		acc.proxyClientFailed = true
@@ -448,12 +467,12 @@ func (c *Client) acquireFlight(ctx context.Context, acc *Account) error {
 }
 
 // doPoolReq is a helper for doPoolRequest: executes method+payload via doRequestWithBody.
-func (c *Client) doPoolReq(ctx context.Context, bc *stealth.BrowserClient, method, urlStr string, payload []byte, headers map[string]string) ([]byte, map[string]string, int, error) {
+func (c *Client) doPoolReq(ctx context.Context, acc *Account, bc *stealth.BrowserClient, method, urlStr string, payload []byte, headers map[string]string) ([]byte, map[string]string, int, error) {
 	var body io.Reader
 	if len(payload) > 0 {
 		body = bytes.NewReader(payload)
 	}
-	return c.doRequestWithBody(ctx, bc, method, urlStr, headers, body)
+	return c.doRequestWithBody(ctx, acc, bc, method, urlStr, headers, body)
 }
 
 // observedPoolReq is doPoolReq plus one twitter.client.request.duration record
@@ -463,7 +482,7 @@ func (c *Client) doPoolReq(ctx context.Context, bc *stealth.BrowserClient, metho
 // hook (nil = the request carried no account).
 func (c *Client) observedPoolReq(ctx context.Context, acc *Account, endpoint string, bc *stealth.BrowserClient, method, urlStr string, payload []byte, headers map[string]string) ([]byte, map[string]string, int, error) {
 	start := time.Now()
-	body, hdrs, status, err := c.doPoolReq(ctx, bc, method, urlStr, payload, headers)
+	body, hdrs, status, err := c.doPoolReq(ctx, acc, bc, method, urlStr, payload, headers)
 	currentCall(ctx).done(status, len(body))
 	outcome := attemptOutcome(status, body, hdrs, err, usesOwnProxy(acc))
 	c.metrics.recordRequest(endpoint, time.Since(start), outcome)
@@ -475,7 +494,7 @@ func (c *Client) observedPoolReq(ctx context.Context, acc *Account, endpoint str
 // acc semantics match observedPoolReq.
 func (c *Client) observedRequestWithBody(ctx context.Context, acc *Account, endpoint string, bc *stealth.BrowserClient, method, urlStr string, headers map[string]string, body io.Reader) ([]byte, map[string]string, int, error) {
 	start := time.Now()
-	respBody, hdrs, status, err := c.doRequestWithBody(ctx, bc, method, urlStr, headers, body)
+	respBody, hdrs, status, err := c.doRequestWithBody(ctx, acc, bc, method, urlStr, headers, body)
 	outcome := attemptOutcome(status, respBody, hdrs, err, usesOwnProxy(acc))
 	c.metrics.recordRequest(endpoint, time.Since(start), outcome)
 	c.emitRequestEvent(acc, endpoint, status, outcome, hdrs)
@@ -494,7 +513,7 @@ func (c *Client) observedRequest(ctx context.Context, acc *Account, endpoint str
 // payload handling is byte-for-byte what it was unobserved.
 func (c *Client) observedMediaReq(ctx context.Context, acc *Account, bc *stealth.BrowserClient, method, urlStr string, payload []byte, headers map[string]string) ([]byte, map[string]string, int, error) {
 	start := time.Now()
-	body, hdrs, status, err := c.doPoolReq(ctx, bc, method, urlStr, payload, headers)
+	body, hdrs, status, err := c.doPoolReq(ctx, acc, bc, method, urlStr, payload, headers)
 	outcome := attemptOutcome(status, body, hdrs, err, usesOwnProxy(acc))
 	c.metrics.recordRequest(epUploadMedia, time.Since(start), outcome)
 	c.emitRequestEvent(acc, epUploadMedia, status, outcome, hdrs)
@@ -558,19 +577,24 @@ func (c *Client) warmClient(bc *stealth.BrowserClient) warmDoer {
 }
 
 // doRequest executes a request with xtid header injection (no body).
-func (c *Client) doRequest(ctx context.Context, bc *stealth.BrowserClient, method, urlStr string, headers map[string]string) ([]byte, map[string]string, int, error) {
-	return c.doRequestWithBody(ctx, bc, method, urlStr, headers, nil)
+func (c *Client) doRequest(ctx context.Context, acc *Account, bc *stealth.BrowserClient, method, urlStr string, headers map[string]string) ([]byte, map[string]string, int, error) {
+	return c.doRequestWithBody(ctx, acc, bc, method, urlStr, headers, nil)
 }
 
 // doRequestWithBody executes a request with xtid header injection and an optional body.
 // The caller's ctx reaches the transport (DoWithHeaderOrderCtx): a cancel or
 // deadline aborts the in-flight request instead of parking it until
 // go-stealth's internal request timeout fires.
-func (c *Client) doRequestWithBody(ctx context.Context, bc *stealth.BrowserClient, method, urlStr string, headers map[string]string, body io.Reader) ([]byte, map[string]string, int, error) {
+func (c *Client) doRequestWithBody(ctx context.Context, acc *Account, bc *stealth.BrowserClient, method, urlStr string, headers map[string]string, body io.Reader) ([]byte, map[string]string, int, error) {
 	currentCall(ctx).headersStart()
 	urlPath := urlStr
 	if u, parseErr := url.Parse(urlStr); parseErr == nil {
 		urlPath = u.Path
+	}
+	// Content-type describes a body. X's web client sends it on every GraphQL
+	// operation (GET included) and on bodies, and on no other bodyless GET.
+	if body == nil && method == http.MethodGet && !strings.Contains(urlPath, "/graphql/") {
+		delete(headers, "content-type")
 	}
 	qid := c.qidRefresh()
 	wf := qid.Shared(warmFetcher(c.warmClient(bc), headers))
@@ -592,7 +616,7 @@ func (c *Client) doRequestWithBody(ctx context.Context, bc *stealth.BrowserClien
 	// an xtid init, the page it just fetched); it runs in the background.
 	qid.OnAuthedRequest(wf, c.metrics.instruments())
 
-	if xpffVal, xpffErr := c.xpffGen.Generate(); xpffErr == nil {
+	if xpffVal, xpffErr := c.xpffFor(acc, bc, headers["user-agent"]).Generate(); xpffErr == nil {
 		headers["x-xp-forwarded-for"] = xpffVal
 	} else {
 		slog.Debug("xpff: failed to generate header", slog.Any("error", xpffErr))
@@ -600,6 +624,29 @@ func (c *Client) doRequestWithBody(ctx context.Context, bc *stealth.BrowserClien
 
 	currentCall(ctx).ready()
 	return bc.DoWithHeaderOrderCtx(ctx, method, urlStr, headers, body, twitterHeaderOrder)
+}
+
+// xpffFor returns the generator for a request: the account's own when the
+// request carries one, else the client-wide one (guest paths). The guest id is
+// the one in the account's cookie jar once the server has set it, so the value
+// agrees with the cookie X sees; before that it derives from the account key,
+// stable across restarts and Client instances. ua is the User-Agent the
+// request sends, so the value embeds the same identity.
+func (c *Client) xpffFor(acc *Account, bc *stealth.BrowserClient, ua string) *xpff.Generator {
+	if acc == nil {
+		return c.xpffGen
+	}
+	if ua == "" {
+		ua = defaultUserAgent
+	}
+	guestID := ""
+	if bc != nil {
+		guestID = bc.GetCookieValue("https://x.com", "guest_id")
+	}
+	if guestID == "" {
+		guestID = xpff.GuestIDFor(accountKey(acc.Username))
+	}
+	return acc.xpffGenerator(guestID, ua)
 }
 
 // Pool returns the underlying account pool.

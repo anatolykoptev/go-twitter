@@ -5,6 +5,7 @@ import (
 	"crypto/cipher"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"sync"
@@ -78,4 +79,21 @@ func (g *Generator) Generate() (string, error) {
 func GenerateGuestID() string {
 	ts := time.Now().UnixMilli()
 	return fmt.Sprintf("v1%%3A%d", ts)
+}
+
+// guestIDEpoch and guestIDSpan bound the creation time a derived guest id
+// claims: a 2-year window starting 2023-01-01.
+const (
+	guestIDEpochMs = int64(1672531200000)
+	guestIDSpanMs  = int64(2 * 365 * 24 * 3600 * 1000)
+)
+
+// GuestIDFor derives a guest id in Twitter's format from a stable key, so the
+// same key yields the same id on every run and on every Client instance, the
+// way a real browser keeps its guest_id cookie. Different keys give different
+// ids.
+func GuestIDFor(key string) string {
+	sum := sha256.Sum256([]byte("xpff-guest-id\x00" + key))
+	ms := guestIDEpochMs + int64(binary.BigEndian.Uint64(sum[:8])%uint64(guestIDSpanMs))
+	return fmt.Sprintf("v1%%3A%d", ms)
 }

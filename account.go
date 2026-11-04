@@ -10,6 +10,7 @@ import (
 	stealth "github.com/anatolykoptev/go-stealth"
 	"github.com/anatolykoptev/go-stealth/pool"
 	"github.com/anatolykoptev/go-stealth/ratelimit"
+	"github.com/anatolykoptev/go-twitter/xpff"
 )
 
 // Account represents a Twitter account with credentials for the pool.
@@ -46,6 +47,10 @@ type Account struct {
 	consecHeaderless88 int // consecutive code-88s with no parseable x-rate-limit-remaining
 	inFlight           int // requests currently holding this account's slot (ClientConfig.MaxInFlightPerAccount)
 	rateLimiter        *ratelimit.Limiter
+	xpffGen            *xpff.Generator // this account's x-xp-forwarded-for generator (see xpffGenerator)
+	xpffGuestID        string          // guest id xpffGen was built for
+	xpffUA             string          // User-Agent xpffGen embeds
+	identityWarned     bool            // the unmatched-UA warning was logged
 
 	// Budget share (see SetBudgetPct): the fraction of each endpoint window
 	// this account may spend. budgetPct is the raw setter value (0 = never
@@ -179,6 +184,19 @@ func (a *Account) Credentials() (authToken, ct0, userAgent string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return a.AuthToken, a.CT0, a.UserAgent
+}
+
+// xpffGenerator returns the account's own x-xp-forwarded-for generator for the
+// given guest id and User-Agent, rebuilding it only when either changes (the
+// guest_id cookie arrives from the server after the first page fetch). Two
+// accounts never share a generator, so they never share a value.
+func (a *Account) xpffGenerator(guestID, userAgent string) *xpff.Generator {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.xpffGen == nil || a.xpffGuestID != guestID || a.xpffUA != userAgent {
+		a.xpffGen, a.xpffGuestID, a.xpffUA = xpff.New(guestID, userAgent), guestID, userAgent
+	}
+	return a.xpffGen
 }
 
 // SetCredentials atomically updates auth_token and ct0.
@@ -694,9 +712,15 @@ func (a *Account) EndpointAvailableAt(endpoint string) time.Time {
 	return at
 }
 
-// AssignBrowserProfile sets a browser profile based on index.
-func AssignBrowserProfile(acc *Account, idx int) {
-	p := stealth.BuiltinProfiles[idx%len(stealth.BuiltinProfiles)]
+// AssignBrowserProfile gives acc the browser profile derived from its username,
+// and the profile's User-Agent. The profile is a function of the account, so it
+// is the same on every run and whatever the account's position in a list.
+//
+// The index parameter is ignored and kept only for source compatibility: an
+// index-based pick changed an account's fingerprint whenever the pool was
+// reordered or resized.
+func AssignBrowserProfile(acc *Account, _ int) {
+	p := profileForAccountKey(accountKey(acc.Username))
 	acc.Profile = p
 	acc.UserAgent = p.UserAgent
 }

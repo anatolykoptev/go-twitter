@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -75,4 +76,16 @@ func TestGenerateGuestID(t *testing.T) {
 	id := GenerateGuestID()
 	assert.Contains(t, id, "v1%3A")
 	assert.Greater(t, len(id), 15)
+}
+
+func TestGuestIDFor_StablePerKeyDistinctAcrossKeys(t *testing.T) {
+	if a, b := GuestIDFor("alice"), GuestIDFor("alice"); a != b {
+		t.Fatalf("same key gave %q then %q", a, b)
+	}
+	if GuestIDFor("alice") == GuestIDFor("bob") {
+		t.Fatal("different keys gave one guest id")
+	}
+	if id := GuestIDFor("alice"); !strings.HasPrefix(id, "v1%3A") {
+		t.Fatalf("guest id %q is not in Twitter's v1%%3A<ms> format", id)
+	}
 }
