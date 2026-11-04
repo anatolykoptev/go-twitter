@@ -1135,3 +1135,19 @@ func TestUserListPage_EntriesCount(t *testing.T) {
 	assert.Equal(t, 1, one.Entries)
 	assert.Len(t, one.Users, 1)
 }
+
+// Users inside a TimelineTimelineModule are parsed and counted like plain
+// entries.
+func TestUserListPage_ModuleItems(t *testing.T) {
+	body := []byte(`{"data":{"user":{"result":{"timeline":{"timeline":{"instructions":[{"type":"TimelineAddEntries","entries":[` +
+		`{"entryId":"module-1","content":{"entryType":"TimelineTimelineModule","items":[` +
+		`{"entryId":"m-1","item":{"itemContent":{"__typename":"TimelineUser","user_results":{"result":{"__typename":"User","rest_id":"7","core":{"screen_name":"a"}}}}}},` +
+		`{"entryId":"m-2","item":{"itemContent":{"__typename":"TimelineUser","user_results":{"result":{"__typename":"UserUnavailable"}}}}}]}},` +
+		`{"entryId":"cursor-bottom-1","content":{"entryType":"TimelineTimelineCursor","cursorType":"Bottom","value":"cur"}}]}]}}}}}}`)
+	pg, err := UserListPage(body)
+	require.NoError(t, err)
+	assert.Equal(t, 2, pg.Entries)
+	require.Len(t, pg.Users, 1)
+	assert.Equal(t, "7", pg.Users[0].ID)
+	assert.Equal(t, "cur", pg.Cursor)
+}

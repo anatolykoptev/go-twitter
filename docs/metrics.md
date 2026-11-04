@@ -227,14 +227,14 @@ One record per finished call of a cursor-paginated read: `GetFollowers`, `GetFol
   - `no_cursor`: the page carried no Bottom cursor, the natural end.
   - `empty_page`: the page held no items although a cursor came with it.
   - `repeated_cursor`: the cursor was one already followed in this call.
-  - `terminal_cursor`: the cursor is X's end-of-timeline marker (`0|...`).
-  - `page_cap`: the page budget `ceil(max / largest page seen) + 2` ran out.
+  - `terminal_cursor`: the cursor is X's end-of-timeline marker (`0|...` or a bare `0`).
+  - `page_cap`: 5 pages added no new item (items are deduplicated by id within the call), or the absolute page backstop `4*ceil(max/page size)+10` was hit.
   - `ctx`: the caller's context ended.
   - `error`: a request or parse failed.
 
 `empty_page`, `repeated_cursor`, `terminal_cursor` and `no_cursor` are normal ends; a
-sustained `page_cap` rate means pages arrive short of the target with fresh cursors,
-which is worth a look at the raw response. A `ctx` share that dominates means callers'
+sustained `page_cap` rate means pages keep arriving with nothing new, which is worth a look at
+the raw response. `page_cap` and `terminal_cursor` calls that end short of `max` also log a warning. A `ctx` share that dominates means callers'
 deadlines are shorter than the reads they ask for.
 
 ### `twitter.client.queryid.refreshes` / `.changed` / `.age`

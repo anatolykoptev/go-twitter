@@ -257,23 +257,53 @@ func TestPagination_TerminalCursor_Stops(t *testing.T) {
 	}
 }
 
-// Pages that keep arriving short of the target with fresh cursors run out of
-// page budget: ceil(maxCount/largestPage)+2.
-func TestPagination_PageCap_Stops(t *testing.T) {
+// Progress, not page size, bounds the walk: pages that shrink after a large
+// first page still reach maxCount.
+func TestPagination_ShrinkingPages_ReachMaxCount(t *testing.T) {
 	for _, r := range readers {
 		t.Run(r.name, func(t *testing.T) {
 			p := newPagedFake(t, func(n int, _ *http.Request) string {
 				if n == 0 {
-					return r.page("cur-0", ids(1, 2)...) // largest page: 2
+					return r.page("cur-0", ids(1, 6)...)
 				}
-				return r.page(fmt.Sprintf("cur-%d", n), ids(100+n, 100+n)...) // then 1 per page
+				return r.page(fmt.Sprintf("cur-%d", n), ids(100+n, 100+n)...) // then 1 new item per page
 			})
-			// maxCount 10, largest page 2 -> budget ceil(10/2)+2 = 7 pages.
-			got, err := r.fetch(pagCtx(t), p.f.c, 10)
+			got, err := r.fetch(pagCtx(t), p.f.c, 40)
 			require.NoError(t, err)
-			assert.Equal(t, 8, got)
-			assert.Equal(t, int32(7), p.hits.Load())
+			assert.Equal(t, 40, got)
+			assert.Equal(t, int32(35), p.hits.Load())
+			assert.Equal(t, int64(1), stopCount(t, p.f, r.op, telemetry.StopMaxCount))
+		})
+	}
+}
+
+// A server repeating the same items under fresh cursors adds nothing new: the
+// items are deduplicated and the call gives up after noProgressLimit such pages.
+func TestPagination_RepeatedItemsFreshCursors_StopsOnNoProgress(t *testing.T) {
+	for _, r := range readers {
+		t.Run(r.name, func(t *testing.T) {
+			p := newPagedFake(t, func(n int, _ *http.Request) string {
+				return r.page(fmt.Sprintf("cur-%d", n), ids(1, 2)...)
+			})
+			got, err := r.fetch(pagCtx(t), p.f.c, 500)
+			require.NoError(t, err)
+			assert.Equal(t, 2, got, "repeats are collected once")
+			assert.Equal(t, int32(1+noProgressLimit), p.hits.Load())
 			assert.Equal(t, int64(1), stopCount(t, p.f, r.op, telemetry.StopPageCap))
+		})
+	}
+}
+
+// A bare "0" cursor is terminal too.
+func TestPagination_BareZeroCursor_Terminal(t *testing.T) {
+	for _, r := range readers {
+		t.Run(r.name, func(t *testing.T) {
+			p := newPagedFake(t, func(n int, _ *http.Request) string { return r.page("0", ids(1, 2)...) })
+			got, err := r.fetch(pagCtx(t), p.f.c, 500)
+			require.NoError(t, err)
+			assert.Equal(t, 2, got)
+			assert.Equal(t, int32(1), p.hits.Load())
+			assert.Equal(t, int64(1), stopCount(t, p.f, r.op, telemetry.StopTerminalCursor))
 		})
 	}
 }
@@ -370,4 +400,47 @@ func TestPagination_CtxCancelled_RecordsCtx(t *testing.T) {
 	assert.Empty(t, users)
 	assert.Equal(t, int32(0), p.hits.Load())
 	assert.Equal(t, int64(1), stopCount(t, p.f, "Following", telemetry.StopCtx))
+}
+
+const unavailableUserEntry = `{"entryId":"user-x","content":{"entryType":"TimelineTimelineItem","__typename":"TimelineTimelineItem","itemContent":{"__typename":"TimelineUser","user_results":{"result":{"__typename":"UserUnavailable"}}}}}`
+
+// Retweeters: a page of only unavailable accounts is not the end of the list.
+func TestPagination_Retweeters_AllUnavailablePage_Continues(t *testing.T) {
+	page1 := `{"data":{"retweeters_timeline":{"timeline":{"instructions":[{"type":"TimelineAddEntries","entries":[` +
+		unavailableUserEntry + `,` + cursorEntry("cur-1") + `]}]}}}}`
+	p := newPagedFake(t, func(n int, _ *http.Request) string {
+		if n == 0 {
+			return page1
+		}
+		return retweeterPage("", ids(1, 2)...)
+	})
+	users, err := p.f.c.GetRetweeters(pagCtx(t), "555", 500)
+	require.NoError(t, err)
+	assert.Len(t, users, 2)
+	assert.Equal(t, int32(2), p.hits.Load())
+}
+
+// moduleUserPage wraps the users in a TimelineTimelineModule, as X does for
+// grouped user lists.
+func moduleUserPage(cursor string, ids ...string) string {
+	var items []string
+	for _, id := range ids {
+		items = append(items, fmt.Sprintf(`{"entryId":"user-%[1]s-item","item":{"itemContent":{"__typename":"TimelineUser","user_results":{"result":{"__typename":"User","rest_id":%[1]q,"core":{"name":"n","screen_name":"h%[1]s"}}}}}}`, id))
+	}
+	mod := `{"entryId":"module-1","content":{"entryType":"TimelineTimelineModule","__typename":"TimelineTimelineModule","items":[` + strings.Join(items, ",") + `]}}`
+	return `{"data":{"user":{"result":{"timeline":{"timeline":{"instructions":[{"type":"TimelineAddEntries","entries":[` + mod + `,` + cursorEntry(cursor) + `]}]}}}}}}`
+}
+
+// Module-wrapped users are neither dropped nor read as an empty page.
+func TestPagination_ModuleWrappedUsers_Collected(t *testing.T) {
+	p := newPagedFake(t, func(n int, _ *http.Request) string {
+		if n == 0 {
+			return moduleUserPage("cur-1", ids(1, 3)...)
+		}
+		return moduleUserPage("", ids(4, 5)...)
+	})
+	users, err := p.f.c.GetFollowing(pagCtx(t), "42", 500)
+	require.NoError(t, err)
+	assert.Len(t, users, 5)
+	assert.Equal(t, int32(2), p.hits.Load())
 }

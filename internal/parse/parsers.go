@@ -805,16 +805,19 @@ func extractUserPage(tl timelineObj) UserPage {
 	for _, instruction := range tl.Instructions {
 		entries := instruction.Entries
 		if instruction.Entry != nil {
-			entries = append(entries, *instruction.Entry)
+			entries = append(entries[:len(entries):len(entries)], *instruction.Entry)
 		}
 		for _, entry := range entries {
 			if entry.Content.EntryType == "TimelineTimelineCursor" || entry.Content.TypeName == "TimelineTimelineCursor" {
 				if entry.Content.CursorType == "Bottom" || strings.Contains(entry.EntryID, "cursor-bottom") {
 					nextCursor = entry.Content.Value
 				}
-				continue
 			}
-			if entry.Content.ItemContent == nil {
+		}
+		// items() also yields the members of TimelineTimelineModule entries and
+		// TimelineAddToModule items, so module-wrapped users are not lost.
+		for _, it := range instruction.items() {
+			if it.itemContent == nil {
 				continue
 			}
 			var item struct {
@@ -823,7 +826,7 @@ func extractUserPage(tl timelineObj) UserPage {
 					Result userResult `json:"result"`
 				} `json:"user_results"`
 			}
-			if err := json.Unmarshal(entry.Content.ItemContent, &item); err != nil {
+			if err := json.Unmarshal(it.itemContent, &item); err != nil {
 				continue
 			}
 			if item.TypeName != "TimelineUser" {
