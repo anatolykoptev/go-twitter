@@ -1108,3 +1108,30 @@ func TestParseUserResult_RelationshipCountsPreferred(t *testing.T) {
 		t.Fatalf("ListedCount: want 5 from legacy (only location), got %d", user.ListedCount)
 	}
 }
+
+// UserListPage reports the user entries a page carried, so a paginating caller
+// can tell an empty page from one whose users were all unavailable.
+func TestUserListPage_EntriesCount(t *testing.T) {
+	wrap := func(entries string) []byte {
+		return []byte(`{"data":{"user":{"result":{"timeline":{"timeline":{"instructions":[{"type":"TimelineAddEntries","entries":[` + entries + `]}]}}}}}}`)
+	}
+	cursor := `{"entryId":"cursor-bottom-1","content":{"entryType":"TimelineTimelineCursor","cursorType":"Bottom","value":"cur"}}`
+	user := func(typ string) string {
+		return `{"entryId":"user-1","content":{"entryType":"TimelineTimelineItem","itemContent":{"__typename":"TimelineUser","user_results":{"result":{"__typename":"` + typ + `","rest_id":"7","core":{"screen_name":"a"}}}}}}`
+	}
+
+	empty, err := UserListPage(wrap(cursor))
+	require.NoError(t, err)
+	assert.Equal(t, 0, empty.Entries)
+	assert.Equal(t, "cur", empty.Cursor, "the cursor of an empty page is still reported")
+
+	unavailable, err := UserListPage(wrap(`{"entryId":"user-2","content":{"entryType":"TimelineTimelineItem","itemContent":{"__typename":"TimelineUser","user_results":{"result":{"__typename":"UserUnavailable"}}}}},` + cursor))
+	require.NoError(t, err)
+	assert.Equal(t, 1, unavailable.Entries, "an unavailable account is still an entry")
+	assert.Empty(t, unavailable.Users)
+
+	one, err := UserListPage(wrap(user("User") + "," + cursor))
+	require.NoError(t, err)
+	assert.Equal(t, 1, one.Entries)
+	assert.Len(t, one.Users, 1)
+}

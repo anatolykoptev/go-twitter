@@ -37,6 +37,8 @@ metrics.
 | `twitter.client.usage_report.dropped` | counter | `{report}` | none |
 | `twitter.client.parse.dropped` | counter | `{entry}` | `twitter.operation`, `twitter.reason` |
 | `twitter.client.parse.created_at_fallbacks` | counter | `{tweet}` | `twitter.operation` |
+| `twitter.client.pagination.pages` | histogram | `{page}` | `twitter.operation` |
+| `twitter.client.pagination.stops` | counter | `{call}` | `twitter.operation`, `twitter.reason` |
 
 No instrument ever carries an account handle, user ID, list ID, search query or
 URL as an attribute.
@@ -208,6 +210,32 @@ One count per tweet whose creation time came from its snowflake id because no
 The tweet is kept and is not a drop; the time is exact (the id encodes it). A
 sustained rate means X moved the timestamp field. Attribute: `twitter.operation`,
 reported by the timeline reads, `tweetNotificationsQuery` and `DeviceFollow`.
+
+### `twitter.client.pagination.pages` / `.stops`
+
+One record per finished call of a cursor-paginated read: `GetFollowers`, `GetFollowing`,
+`GetVerifiedFollowers`, `GetRetweeters`, `GetListTweets`, `GetCommunityTweets`,
+`GetBookmarks`. `twitter.operation` is the GraphQL operation (`Followers`, `Following`,
+`BlueVerifiedFollowers`, `Retweeters`, `ListLatestTweetsTimeline`,
+`CommunityTweetsTimeline`, `Bookmarks`).
+
+- `pages`: requests the call made, counting one that failed. A healthy read takes
+  `ceil(max / page size)` pages or fewer; a distribution far above that means lists
+  are being paged to their end instead of stopping.
+- `stops`: why the call stopped paging, `twitter.reason`:
+  - `max_count`: the requested number of items was collected.
+  - `no_cursor`: the page carried no Bottom cursor, the natural end.
+  - `empty_page`: the page held no items although a cursor came with it.
+  - `repeated_cursor`: the cursor was one already followed in this call.
+  - `terminal_cursor`: the cursor is X's end-of-timeline marker (`0|...`).
+  - `page_cap`: the page budget `ceil(max / largest page seen) + 2` ran out.
+  - `ctx`: the caller's context ended.
+  - `error`: a request or parse failed.
+
+`empty_page`, `repeated_cursor`, `terminal_cursor` and `no_cursor` are normal ends; a
+sustained `page_cap` rate means pages arrive short of the target with fresh cursors,
+which is worth a look at the raw response. A `ctx` share that dominates means callers'
+deadlines are shorter than the reads they ask for.
 
 ### `twitter.client.queryid.refreshes` / `.changed` / `.age`
 

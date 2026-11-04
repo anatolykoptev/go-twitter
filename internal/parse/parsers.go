@@ -64,6 +64,24 @@ func UserByScreenName(body []byte) (*model.TwitterUser, error) {
 
 // UserList parses Followers/Following response.
 func UserList(body []byte) ([]*model.TwitterUser, string, error) {
+	pg, err := UserListPage(body)
+	return pg.Users, pg.Cursor, err
+}
+
+// UserPage is one parsed page of a user list. Entries counts the TimelineUser
+// entries the page carried, including ones whose profile could not be parsed
+// (suspended or unavailable accounts); Users holds only the parsed ones. A page
+// with Entries == 0 is empty: X has nothing more to return, whatever Cursor says.
+type UserPage struct {
+	Users   []*model.TwitterUser
+	Cursor  string
+	Entries int
+}
+
+// UserListPage parses a Followers/Following response like UserList and also
+// reports how many user entries the page carried, so a paginating caller can
+// tell an empty page from one whose users were all unavailable.
+func UserListPage(body []byte) (UserPage, error) {
 	var raw struct {
 		Data struct {
 			User struct {
@@ -76,13 +94,20 @@ func UserList(body []byte) ([]*model.TwitterUser, string, error) {
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
-		return nil, "", fmt.Errorf("unmarshal user list: %w", err)
+		return UserPage{}, fmt.Errorf("unmarshal user list: %w", err)
 	}
-	return extractUsersFromTimeline(raw.Data.User.Result.Timeline.Timeline)
+	return extractUserPage(raw.Data.User.Result.Timeline.Timeline), nil
 }
 
 // RetweeterList parses Retweeters response.
 func RetweeterList(body []byte) ([]*model.TwitterUser, string, error) {
+	pg, err := RetweeterListPage(body)
+	return pg.Users, pg.Cursor, err
+}
+
+// RetweeterListPage parses a Retweeters response like RetweeterList and also
+// reports the page's user-entry count; see UserPage.
+func RetweeterListPage(body []byte) (UserPage, error) {
 	var raw struct {
 		Data struct {
 			RetweetersTimeline struct {
@@ -91,13 +116,13 @@ func RetweeterList(body []byte) ([]*model.TwitterUser, string, error) {
 		} `json:"data"`
 	}
 	if err := json.Unmarshal(body, &raw); err != nil {
-		return nil, "", fmt.Errorf("unmarshal retweeter list: %w", err)
+		return UserPage{}, fmt.Errorf("unmarshal retweeter list: %w", err)
 	}
 	tl := raw.Data.RetweetersTimeline.Timeline
 	if len(tl.Instructions) == 0 {
-		return UserList(body)
+		return UserListPage(body)
 	}
-	return extractUsersFromTimeline(tl)
+	return extractUserPage(tl), nil
 }
 
 // TweetDetail parses a TweetDetail GraphQL response. focalID is the
@@ -768,8 +793,14 @@ type tweetResult struct {
 // --- Extraction helpers ---
 
 func extractUsersFromTimeline(tl timelineObj) ([]*model.TwitterUser, string, error) {
+	pg := extractUserPage(tl)
+	return pg.Users, pg.Cursor, nil
+}
+
+func extractUserPage(tl timelineObj) UserPage {
 	var users []*model.TwitterUser
 	var nextCursor string
+	var entriesSeen int
 
 	for _, instruction := range tl.Instructions {
 		entries := instruction.Entries
@@ -798,6 +829,7 @@ func extractUsersFromTimeline(tl timelineObj) ([]*model.TwitterUser, string, err
 			if item.TypeName != "TimelineUser" {
 				continue
 			}
+			entriesSeen++
 			u, err := parseUserResult(item.UserResults.Result)
 			if err != nil {
 				slog.Debug("skip user parse error", slog.Any("error", err))
@@ -806,7 +838,7 @@ func extractUsersFromTimeline(tl timelineObj) ([]*model.TwitterUser, string, err
 			users = append(users, u)
 		}
 	}
-	return users, nextCursor, nil
+	return UserPage{Users: users, Cursor: nextCursor, Entries: entriesSeen}
 }
 
 // timelineItem is one tweet-bearing item located inside a timeline: a plain
