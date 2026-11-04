@@ -27,6 +27,9 @@ const (
 // proxy hop as plain HTTP, the login flow host (which hands out reloginNewTok).
 type reloginJourney struct {
 	logins atomic.Int32
+	// guestTok, when set, is the guest token the activate endpoint hands out
+	// (default "g1"); open accounts take their username from it.
+	guestTok string
 	// gqlHits, when non-nil, counts each request the GraphQL branch answers.
 	// Requests arrive at handler directly AND tunnelled inside a CONNECT (the
 	// client tunnels plain HTTP too), so only handler sees them all.
@@ -85,7 +88,11 @@ func (j *reloginJourney) handler(w http.ResponseWriter, r *http.Request) {
 	if strings.HasPrefix(r.Host, "api.twitter.com") {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/guest/activate.json"):
-			_, _ = w.Write([]byte(`{"guest_token":"g1"}`))
+			tok := j.guestTok
+			if tok == "" {
+				tok = "g1"
+			}
+			_, _ = w.Write([]byte(`{"guest_token":"` + tok + `"}`))
 		case strings.HasSuffix(r.URL.Path, "/onboarding/task.json"):
 			j.logins.Add(1)
 			w.Header().Add("Set-Cookie", "auth_token="+reloginNewTok+"; Path=/")

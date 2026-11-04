@@ -58,6 +58,9 @@ type Client struct {
 
 	reloginMu      sync.Mutex
 	reloginFlights map[*Account]*reloginFlight
+	// reloginWindowHook, when set (tests only), runs between a flight leaving
+	// the map and its done channel closing.
+	reloginWindowHook func()
 }
 
 // NewClient creates a fully-wired Twitter client.

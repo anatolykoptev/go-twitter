@@ -278,7 +278,7 @@ func (c *Client) saveSession(acc *Account, authToken, ct0 string) error {
 //
 // A save that timed out or was cancelled is ambiguous: the write may have
 // landed. The store is read back first, and an entry already holding the new
-// token is kept — deleting it would throw away the live session and cost a
+// token and ct0 is kept — deleting it would throw away the live session and cost a
 // login at the next restart. Only a definite failure, or an ambiguous one whose
 // read-back shows a different (or unreadable) entry, proceeds to the delete.
 //
@@ -290,8 +290,8 @@ func (c *Client) saveSession(acc *Account, authToken, ct0 string) error {
 // meets code 32 and relogins once, which the per-account breaker bounds.
 func (c *Client) dropStaleSession(acc *Account, saveErr error) {
 	if isAmbiguousStoreErr(saveErr) {
-		if tok, _, err := c.loadSession(acc); err == nil && (tok == acc.AuthToken || tok == "") {
-			return // the write landed, or there is no stored entry to be stale
+		if tok, ct0, err := c.loadSession(acc); err == nil && ((tok == acc.AuthToken && ct0 == acc.CT0) || tok == "") {
+			return // the write landed (token and ct0), or there is no stored entry to be stale
 		}
 	}
 	if err := c.deleteSession(acc); err != nil {

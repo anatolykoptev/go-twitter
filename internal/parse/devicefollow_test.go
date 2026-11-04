@@ -222,3 +222,35 @@ func TestPromotedMetadataSkipped(t *testing.T) {
 	require.Len(t, xt, 1)
 	assert.Equal(t, "1985000000000000002", xt[0].ID)
 }
+
+// With a timeline present, a tweet the feed merely references (the original
+// behind a retweet) is not a feed entry: when it lacks id_str nothing was lost,
+// so no drop is counted. A LISTED entry without id_str is a real drop, and
+// without any timeline every invalid object counts.
+//
+// Mutation: devicefollow.go DeviceFollow — move the `if hasTimeline { ... }`
+// listed-filter block back below the `lt.IDStr == ""` check => RED: the
+// unlisted referenced object is counted as no_id.
+func TestParseDeviceFollow_ReferencedTweetWithoutIDIsNotADrop(t *testing.T) {
+	count := func(body string) map[string]int {
+		drops := map[string]int{}
+		_, err := DeviceFollow([]byte(body), WithObserver(Observer{Drop: func(r string) { drops[r]++ }}))
+		require.NoError(t, err)
+		return drops
+	}
+	const tl = `"timeline":{"instructions":[{"addEntries":{"entries":[{"entryId":"tweet-1985000000000000001","content":{"item":{"content":{"tweet":{"id":"1985000000000000001"}}}}}]}}]}`
+	const listed = `"1985000000000000001":{"id_str":"1985000000000000001","user_id_str":"11"}`
+
+	// The retweet original sits under its own key with an empty id_str.
+	assert.Empty(t, count(`{"globalObjects":{"tweets":{`+listed+`,"1985000000000000009":{"id_str":""}}},`+tl+`}`),
+		"an unlisted referenced object is not a feed entry")
+
+	// A listed entry that lost its id_str is a real drop.
+	const tlKey = `"timeline":{"instructions":[{"addEntries":{"entries":[{"entryId":"tweet-1","content":{"item":{"content":{"tweet":{"id":"1985000000000000009"}}}}}]}}]}`
+	assert.Equal(t, map[string]int{DropNoID: 1},
+		count(`{"globalObjects":{"tweets":{"1985000000000000009":{"id_str":""}}},`+tlKey+`}`))
+
+	// No timeline: nothing to filter by, every invalid object counts.
+	assert.Equal(t, map[string]int{DropNoID: 1},
+		count(`{"globalObjects":{"tweets":{`+listed+`,"1985000000000000009":{"id_str":""}}}}`))
+}

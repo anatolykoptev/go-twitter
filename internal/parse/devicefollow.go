@@ -69,16 +69,19 @@ func DeviceFollow(body []byte, opts ...Option) ([]*model.Tweet, error) {
 	}
 	tweets := make([]*model.Tweet, 0, len(raw.GlobalObjects.Tweets))
 	for key, lt := range raw.GlobalObjects.Tweets {
-		if lt.IDStr == "" {
-			o.drop(DropNoID)
-			continue
-		}
+		// With a timeline, an object it does not list is a reference (a
+		// retweet original), not a feed entry: skip it before judging its id,
+		// so a blank id_str there is not counted as a lost entry.
 		if hasTimeline {
-			if _, ok := listed[lt.IDStr]; !ok {
+			if _, ok := listed[lt.IDStr]; lt.IDStr == "" || !ok {
 				if _, ok := listed[key]; !ok {
 					continue
 				}
 			}
+		}
+		if lt.IDStr == "" {
+			o.drop(DropNoID)
+			continue
 		}
 		text := lt.FullText
 		if text == "" {

@@ -10,7 +10,7 @@ By default the keys come from a page fetched with the account's cookies (`https:
 
 ## x-xp-forwarded-for
 
-Generated from a `guest_id` and the user agent. One generator serves the whole client, so accounts share this identity.
+Generated from a `guest_id` and the user agent of the request. Each account has its own generator, so two accounts send different values. The `guest_id` is the one in the account's cookie jar once the server has set it, so the header agrees with the cookie; until then it is derived from the account's username, which keeps it stable across restarts. The user agent is the account's own (see below), so the value embeds the same browser identity as the rest of the request. Requests that carry no account, such as the guest-token fallback, use one client-wide generator.
 
 ## CSRF token
 
@@ -20,7 +20,7 @@ Generated from a `guest_id` and the user agent. One generator serves the whole c
 
 Requests go through an HTTP client with a Chrome profile. Every account gets its own HTTP client, built in `NewClient` or, for an account added later through `Pool().Add`, on its first request, and with it its own cookie jar, so a `set-cookie` on a response to one account is never sent on another account's request. An account with its own `Proxy` connects through it; the others connect through `DefaultProxy`, or directly when it is empty. The shared default client serves only requests that carry no account, such as the guest-token fallback. `*WithSocial` helpers build a new `Client` per call, so each call builds one more HTTP client.
 
-Headers are sent in a fixed order, and client hints are derived from the account's user agent. `ParseAccounts` assigns each account a user agent through `AssignBrowserProfile`.
+Headers are sent in a fixed order, and client hints are derived from the account's user agent. `ParseAccounts` assigns each account a browser profile and user agent through `AssignBrowserProfile`, derived from its username; an account added later gets the same on its first request, and an account created by the open-account flow keeps the identity of the client that created its session. A profile or user agent set on the `Account` is never replaced.
 
 ## Request spacing
 
