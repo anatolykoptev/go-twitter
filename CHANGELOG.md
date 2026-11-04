@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.10](https://github.com/anatolykoptev/go-twitter/compare/v0.8.9...v0.8.10) (2026-11-04)
+
+
+### Bug Fixes
+
+* current identities share one cookie jar per account and send each cookie once ([#188](https://github.com/anatolykoptev/go-twitter/issues/188)) ([f6afbf7](https://github.com/anatolykoptev/go-twitter/commit/f6afbf74bce2d01443b15db9426a3ae28aeac01d))
+
 ## [0.8.9](https://github.com/anatolykoptev/go-twitter/compare/v0.8.8...v0.8.9) (2026-11-04)
 
 
