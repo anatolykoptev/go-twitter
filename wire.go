@@ -359,3 +359,22 @@ var chromeNavigationPostOrder = []string{
 	"cookie",
 	"priority",
 }
+
+// apiHostFor moves a request to the REST/login host the X web client uses. The
+// web client in Chrome talks to api.x.com; the frozen legacy generation stays on
+// api.twitter.com. Any other host (the test servers twitterAPIURL is pointed
+// at, upload.twitter.com) is left alone.
+func apiHostFor(g wireGen, rawURL string) string {
+	if g != wireChrome {
+		return rawURL
+	}
+	if rest, ok := strings.CutPrefix(rawURL, legacyAPIURL); ok {
+		return "https://api.x.com" + rest
+	}
+	return rawURL
+}
+
+// apiURL is twitterAPIURL+path for a request bc sends.
+func (c *Client) apiURL(bc *stealth.BrowserClient, path string) string {
+	return apiHostFor(c.wireFor(nil, bc), twitterAPIURL+path)
+}

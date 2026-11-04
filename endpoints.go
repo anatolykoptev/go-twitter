@@ -16,7 +16,11 @@ var twitterBase = "https://x.com/i/api/graphql"
 
 // twitterAPIURL is the REST/login root. A var (not const) only so tests can
 // point the login flow at an httptest server; production code never assigns it.
-var twitterAPIURL = "https://api.twitter.com"
+var twitterAPIURL = legacyAPIURL
+
+// legacyAPIURL is the REST/login host of the frozen wire generation. The web
+// client of a current identity uses api.x.com (see apiHostFor).
+const legacyAPIURL = "https://api.twitter.com"
 
 const (
 

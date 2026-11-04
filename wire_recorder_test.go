@@ -22,6 +22,7 @@ type wireRecorder struct {
 	reqs []recordedReq
 	cfg  stealth.BackendConfig   // the configuration of the last client built on this recorder (FetchMode = HTTP/2 weight 220)
 	cfgs []stealth.BackendConfig // every client built on it, in order
+	jar  map[string]string       // cookies GetCookieValue serves, keyed "<origin> <name>"
 }
 
 // factory is the backend factory that hands the client this recorder and keeps
@@ -52,8 +53,8 @@ func (r *wireRecorder) Do(req *stealth.Request) (*stealth.Response, error) {
 	}, nil
 }
 
-func (r *wireRecorder) SetProxy(string) error             { return nil }
-func (r *wireRecorder) GetCookieValue(_, _ string) string { return "" }
+func (r *wireRecorder) SetProxy(string) error                { return nil }
+func (r *wireRecorder) GetCookieValue(u, name string) string { return r.jar[u+" "+name] }
 func (r *wireRecorder) last() recordedReq {
 	r.mu.Lock()
 	defer r.mu.Unlock()

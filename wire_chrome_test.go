@@ -398,6 +398,6 @@ func TestAccountlessClient_LegacyUnlessOptedIn(t *testing.T) {
 	assert.NotEqual(t, legacyOrder, get.Order, "opted in: the Chrome order")
 	assert.Equal(t, "u=1, i", get.Headers["priority"], "opted in: fetch mode")
 	assert.True(t, recCfg.FetchMode)
-	assert.Equal(t, "cross-site", act.Headers["sec-fetch-site"])
+	assert.Equal(t, "same-site", act.Headers["sec-fetch-site"], "opted in: guest/activate goes to api.x.com, a host of x.com's site")
 	assert.Contains(t, get.Headers, "sec-fetch-site")
 }

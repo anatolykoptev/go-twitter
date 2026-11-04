@@ -700,6 +700,7 @@ func (c *Client) doRequest(ctx context.Context, acc *Account, bc *stealth.Browse
 // go-stealth's internal request timeout fires.
 func (c *Client) doRequestWithBody(ctx context.Context, acc *Account, bc *stealth.BrowserClient, method, urlStr string, headers map[string]string, body io.Reader) ([]byte, map[string]string, int, error) {
 	currentCall(ctx).headersStart()
+	urlStr = apiHostFor(c.wireFor(acc, bc), urlStr)
 	urlPath := urlStr
 	if u, parseErr := url.Parse(urlStr); parseErr == nil {
 		urlPath = u.Path
