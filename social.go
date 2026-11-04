@@ -13,6 +13,7 @@ import (
 
 	"github.com/anatolykoptev/go-stealth/ratelimit"
 	"github.com/anatolykoptev/go-twitter/internal/bundle"
+	"github.com/anatolykoptev/go-twitter/internal/telemetry"
 	"github.com/anatolykoptev/go-twitter/social"
 	"github.com/anatolykoptev/go-twitter/xtid"
 	"go.opentelemetry.io/otel/metric"
@@ -317,7 +318,12 @@ func tryWithAccount[T any](ctx context.Context, sc *social.Client, op string, fn
 		}
 	}
 	report := func(status string) { prepare(status)() }
-	reportBG := func(status string) { socialReports.submit(prepare(status)) }
+	var tele *telemetry.Metrics // set once the per-call client exists; reportBG runs after
+	reportBG := func(status string) {
+		if !socialReports.submit(prepare(status)) {
+			tele.RecordUsageReportDropped()
+		}
+	}
 
 	cfg := ClientConfig{
 		Accounts:  []*Account{acc},
@@ -344,6 +350,7 @@ func tryWithAccount[T any](ctx context.Context, sc *social.Client, op string, fn
 	}
 
 	defer func() { _ = tw.Close() }()
+	tele = tw.metrics.instruments()
 	if testHookSocialClient != nil {
 		testHookSocialClient(tw)
 	}

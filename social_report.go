@@ -14,11 +14,16 @@ import (
 const socialReportMaxInflight = 16
 
 // reportSink runs usage reports in the background under a fixed concurrency
-// cap.
+// cap. In-flight accounting is a mutex-guarded counter, not a sync.WaitGroup:
+// a WaitGroup forbids Add from a zero counter while a Wait is running, which is
+// exactly what a flush at shutdown does against submitters that are still live.
 type reportSink struct {
 	sem     chan struct{}
-	wg      sync.WaitGroup
 	dropped atomic.Int64
+
+	mu      sync.Mutex
+	n       int             // reports submitted and not yet finished
+	waiters []chan struct{} // closed when n reaches zero
 }
 
 func newReportSink(limit int) *reportSink {
@@ -37,23 +42,44 @@ func (s *reportSink) submit(fn func()) bool {
 		}
 		return false
 	}
-	s.wg.Add(1)
+	s.mu.Lock()
+	s.n++
+	s.mu.Unlock()
 	go func() {
-		defer func() {
-			<-s.sem
-			s.wg.Done()
-		}()
+		defer s.done()
 		fn()
 	}()
 	return true
 }
 
-// wait blocks until every submitted report has finished or ctx is done.
+func (s *reportSink) done() {
+	<-s.sem
+	s.mu.Lock()
+	s.n--
+	if s.n == 0 {
+		for _, w := range s.waiters {
+			close(w)
+		}
+		s.waiters = nil
+	}
+	s.mu.Unlock()
+}
+
+// wait blocks until the in-flight count reaches zero or ctx is done. Reports
+// submitted while it waits may or may not be waited for: it returns at the first
+// instant nothing is in flight, so under a continuous stream of submitters it
+// can run until ctx expires.
 func (s *reportSink) wait(ctx context.Context) error {
-	done := make(chan struct{})
-	go func() { s.wg.Wait(); close(done) }()
+	s.mu.Lock()
+	if s.n == 0 {
+		s.mu.Unlock()
+		return nil
+	}
+	ch := make(chan struct{})
+	s.waiters = append(s.waiters, ch)
+	s.mu.Unlock()
 	select {
-	case <-done:
+	case <-ch:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -67,7 +93,8 @@ var socialReports = newReportSink(socialReportMaxInflight)
 // queued in the background are delivered, or ctx is done. The helpers return as
 // soon as their result is ready and send the report afterwards; call this at
 // shutdown (with a short deadline) so a final report is not lost with the
-// process. It returns ctx.Err() when reports are still in flight at the deadline.
+// process. Reports submitted while it waits may or may not be waited for; it
+// returns once nothing is in flight. It returns ctx.Err() when reports are still in flight at the deadline.
 func FlushSocialReports(ctx context.Context) error {
 	return socialReports.wait(ctx)
 }

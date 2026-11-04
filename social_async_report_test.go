@@ -8,8 +8,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/anatolykoptev/go-twitter/internal/telemetry"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
 // flushReports waits for the background usage reports queued so far; rig
@@ -101,4 +103,62 @@ func TestWithSocial_StuckUsageEndpoint_InflightReportsAreCapped(t *testing.T) {
 
 	assert.LessOrEqual(t, peak.Load(), int32(16), "usage reports in flight exceeded the cap")
 	assert.Positive(t, socialReports.dropped.Load()-droppedBefore, "overflow reports must be counted as dropped")
+}
+
+// F1 — Flush must be safe while submit keeps running (shutdown with calls still
+// in flight). A sync.WaitGroup Add racing a Wait from a zero counter panics
+// ("WaitGroup is reused before previous Wait has returned").
+func TestReportSink_ConcurrentSubmitAndFlush(t *testing.T) {
+	s := newReportSink(4)
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+					s.submit(func() { time.Sleep(time.Microsecond) })
+				}
+			}
+		}()
+	}
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		_ = s.wait(ctx) // either outcome is fine; it must not panic or hang
+		cancel()
+	}
+	close(stop)
+	wg.Wait()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	require.NoError(t, s.wait(ctx), "sink must drain once submitters stop")
+}
+
+// Overflow drops are exported as twitter.client.usage_report.dropped.
+func TestWithSocial_ReportOverflow_IncrementsDroppedCounter(t *testing.T) {
+	r := newSocialRig(t)
+	SetSocialMeterProvider(r.mp)
+	release := make(chan struct{})
+	var once sync.Once
+	r.reportHook = func(*http.Request) { <-release }
+	t.Cleanup(func() { once.Do(func() { close(release) }); flushReports(t) })
+
+	for i := 0; i < 40; i++ {
+		_, err := GetUserTweetsWithSocial(context.Background(), r.sc, "tesla", 5)
+		require.NoError(t, err, "call %d", i)
+	}
+	m, ok := r.collect(t)[telemetry.MetricUsageReportsDropped]
+	require.True(t, ok, "usage_report.dropped must be reported after an overflow")
+	sum, ok := m.Data.(metricdata.Sum[int64])
+	require.True(t, ok)
+	var total int64
+	for _, dp := range sum.DataPoints {
+		total += dp.Value
+	}
+	assert.Positive(t, total, "overflowed reports must increment the counter")
 }
