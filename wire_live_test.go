@@ -104,7 +104,6 @@ func TestLive_CurrentIdentityMatchesChrome(t *testing.T) {
 	h["x-client-transaction-id"] = "dummy"
 	got := send(t, bc, wireChrome, "GET", "https://x.com/i/api/graphql/q/Op", h, "")
 	t.Logf("authenticated same-origin GET: weight=%d %v", got.weight, got.names)
-	// x-xp-forwarded-for has no captured position and is not sent here.
 	assert.Equal(t, oracleSameOriginAuthedGet, got.names)
 	assert.Equal(t, 220, got.weight, "XHR HEADERS weight")
 	assert.Equal(t, "u=1, i", got.values["priority"])

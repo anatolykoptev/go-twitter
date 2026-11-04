@@ -122,9 +122,9 @@ func TestChromeWire_LoggedOutXHR(t *testing.T) {
 }
 
 // An authenticated same-origin GET goes out as a same-origin fetch: no origin,
-// same-origin fetch metadata, and the header positions of the fetch capture.
-// x-xp-forwarded-for has no captured position (the capture sent none), so it is
-// left out of the comparison.
+// same-origin fetch metadata, and the header positions of the fetch capture. The
+// signed-in browser sends no x-xp-forwarded-for, so neither does a current
+// identity.
 //
 // Mutation: wire.go shape — leave origin in place for same-origin GETs => RED.
 func TestChromeWire_AuthenticatedSameOriginGet(t *testing.T) {
@@ -132,10 +132,10 @@ func TestChromeWire_AuthenticatedSameOriginGet(t *testing.T) {
 	_, _, _, _ = c.doRequestWithBody(context.Background(), nil, bc, "GET",
 		"https://x.com/i/api/graphql/q/Op", twitterHeaders("AUTH", "CT0", ua), nil)
 	got := rec.last()
-	assert.Equal(t, oracleSameOriginAuthedGet, without(wireNames(got), "x-xp-forwarded-for"))
+	assert.Equal(t, oracleSameOriginAuthedGet, wireNames(got))
 	assert.Equal(t, "same-origin", got.Headers["sec-fetch-site"])
 	assert.NotContains(t, got.Headers, "origin")
-	assert.Contains(t, got.Headers, "x-xp-forwarded-for", "logged in: still sent")
+	assert.NotContains(t, got.Headers, "x-xp-forwarded-for", "the signed-in browser sends none")
 }
 
 // sec-fetch-site and origin follow the request: Fetch's rules, per target host

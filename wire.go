@@ -1,6 +1,7 @@
 package twitter
 
 import (
+	"encoding/json"
 	"net/url"
 	"strings"
 
@@ -92,7 +93,12 @@ func (g wireGen) shape(method, rawURL string, h map[string]string) []string {
 	} else {
 		delete(h, "origin")
 	}
-	if h["referer"] == "" {
+	// A same-origin request is made by the x.com page the user is on, so its
+	// referer is that page; a request to another host (api.x.com, ...) sends the
+	// site root, as the browser does.
+	if site == "same-origin" {
+		h["referer"] = pageReferer(rawURL)
+	} else if h["referer"] == "" {
 		h["referer"] = "https://x.com/"
 	}
 	if h["accept"] == "" {
@@ -106,12 +112,81 @@ func (g wireGen) shape(method, rawURL string, h map[string]string) []string {
 	// adds `priority: u=1, i` together with the HTTP/2 HEADERS weight 220, and
 	// the pair must arrive together (Chrome never sends the priority header with
 	// weight 256). Its place is in chromeHeaderOrder.
-
-	// A logged-out page sends no x-xp-forwarded-for.
-	if h["x-guest-token"] != "" {
-		delete(h, "x-xp-forwarded-for")
-	}
 	return chromeHeaderOrder
+}
+
+// pageReferer is the x.com page a user would be on when the web client makes
+// the request to rawURL: one table keyed by GraphQL operation name, with the
+// operation's variables (the URL's `variables` parameter) filling in the page.
+// Anything it cannot place (an operation not listed, a missing or malformed
+// variable, a request whose variables ride in a POST body, a REST path) falls
+// back to the home timeline. UserTweets carries only a user id, not the handle
+// the profile URL needs, so it falls back too.
+func pageReferer(rawURL string) string {
+	const home = "https://x.com/home"
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return home
+	}
+	if !strings.HasPrefix(u.Path, "/i/api/graphql/") {
+		return home
+	}
+	op := u.Path[strings.LastIndex(u.Path, "/")+1:]
+	page, ok := operationPages[op]
+	if !ok {
+		return home
+	}
+	var vars map[string]any
+	if v := u.Query().Get("variables"); v != "" {
+		if json.Unmarshal([]byte(v), &vars) != nil {
+			return home
+		}
+	}
+	if p := page(vars); p != "" {
+		return p
+	}
+	return home
+}
+
+// varString is vars[key] when it is a non-empty string.
+func varString(vars map[string]any, key string) string {
+	s, _ := vars[key].(string)
+	return s
+}
+
+// operationPages maps a GraphQL operation to the page the web client issues it
+// from. A func returns "" when the variable it needs is absent.
+var operationPages = map[string]func(vars map[string]any) string{
+	"HomeTimeline":       func(map[string]any) string { return "https://x.com/home" },
+	"HomeLatestTimeline": func(map[string]any) string { return "https://x.com/home" },
+	"UserByScreenName": func(v map[string]any) string {
+		if h := varString(v, "screen_name"); h != "" {
+			return "https://x.com/" + url.PathEscape(h)
+		}
+		return ""
+	},
+	"SearchTimeline": func(v map[string]any) string {
+		if q := varString(v, "rawQuery"); q != "" {
+			return "https://x.com/search?q=" + url.QueryEscape(q)
+		}
+		return ""
+	},
+	// The handle is not known here; x.com/i/status/<id> is the page X itself
+	// redirects to the canonical URL from.
+	"TweetDetail": func(v map[string]any) string {
+		if id := varString(v, "focalTweetId"); id != "" {
+			return "https://x.com/i/status/" + url.PathEscape(id)
+		}
+		return ""
+	},
+	"tweetNotificationsQuery": func(map[string]any) string { return "https://x.com/notifications" },
+	"Bookmarks":               func(map[string]any) string { return "https://x.com/i/bookmarks" },
+	"ListLatestTweetsTimeline": func(v map[string]any) string {
+		if id := varString(v, "listId"); id != "" {
+			return "https://x.com/i/lists/" + url.PathEscape(id)
+		}
+		return ""
+	},
 }
 
 // fetchSite is the Sec-Fetch-Site value of a request from the x.com page to
@@ -159,14 +234,15 @@ func wireClientOptions(g wireGen) []stealth.ClientOption {
 // Chrome 156; oracleSameOriginAuthedGet: same-origin fetch carrying x.com's
 // script headers, same browser).
 //
-// Measured positions: everything below except x-xp-forwarded-for. Chrome's
-// order of script-set headers is NOT their insertion order (the fetch capture
+// Chrome's order of script-set headers is NOT their insertion order (the fetch capture
 // inserted content-type and x-csrf-token earlier than they appear), so it
 // cannot be derived from x.com's script; it looks fixed per header name.
 //
-// PROVISIONAL: x-xp-forwarded-for. No capture sent it (logged out sends none;
-// the fetch capture was not given one). It is placed right after
-// x-client-transaction-id; replace once a logged-in capture exists.
+// Signed in: testdata/wire_loggedin_oracle.json (Chromium 156, GraphQL GET and
+// POST, x.com and api.x.com REST). That browser sent no x-xp-forwarded-for in
+// any request, so a current identity sends none and the name has no place here.
+// x-twitter-polling (not set by go-twitter) sits after user-agent in the
+// capture.
 //
 // content-length is written by the transport for a body; listing it first
 // matches the POST capture and costs nothing on a GET.
@@ -180,7 +256,6 @@ var chromeHeaderOrder = []string{
 	"sec-ch-ua-mobile",
 	"x-twitter-active-user",
 	"x-client-transaction-id",
-	"x-xp-forwarded-for", // PROVISIONAL position, see above
 	"x-guest-token",
 	"x-twitter-auth-type",
 	"user-agent",

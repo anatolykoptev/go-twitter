@@ -223,9 +223,10 @@ func distinctWireTokens(reqs []wireReq) map[string]bool {
 	return out
 }
 
-// I3 — each account sends its own x-xp-forwarded-for: encrypted for its own
-// guest id and embedding its own User-Agent; the same account yields the same
-// guest id on a second Client instance.
+// I3 — each account on the legacy shape sends its own x-xp-forwarded-for:
+// encrypted for its own guest id and embedding its own User-Agent; the same
+// account yields the same guest id on a second Client instance. (Current
+// identities send none: TestLoggedInOracle_OrderAndValuesPerFamily.)
 //
 // Mutation: client.go doRequestWithBody — use c.xpffGen (the shared generator)
 // for every request again => RED (both accounts send one value, embedding the
@@ -237,7 +238,11 @@ func TestXpff_PerAccountIdentity(t *testing.T) {
 
 	type seenXpff struct{ value, ua string }
 	run := func() map[string]seenXpff {
-		c := newLoopbackClient(t, ClientConfig{Accounts: ParseAccounts("alice:p:tokA:ct0A,bob:p:tokB:ct0B")})
+		accs := ParseAccounts("alice:p:tokA:ct0A,bob:p:tokB:ct0B")
+		for _, a := range accs {
+			a.Profile, a.UserAgent = legacyProfile, legacyProfile.UserAgent // the shape that sends xpff
+		}
+		c := newLoopbackClient(t, ClientConfig{Accounts: accs})
 		for _, n := range []string{"alice", "bob"} {
 			_ = c.LikeTweet(ctx, c.AccountByUsername(n), "1")
 		}
