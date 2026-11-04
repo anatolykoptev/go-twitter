@@ -8,13 +8,15 @@ import (
 )
 
 // xtidFailureValue is the x-client-transaction-id the web client sends when
-// its generator throws: its request filter wraps id generation in
-// try/catch and answers btoa(`e:${error}`), so a GraphQL XHR always carries the
-// header. The text after "e:" is the thrown error's string form and varies; this
-// is a representative TypeError (the generator reads its key material from the
-// page, so a missing node is the typical throw).
+// its generator throws: its request filter wraps id generation in try/catch and
+// answers btoa(`e:${error}`), so with the feature switch on a GraphQL XHR
+// carries the header even then. The text after "e:" is the thrown error's string
+// form. The one used here is derived statically, not observed: the generator
+// null-guards its meta read, and its first unguarded dereference is
+// `p(qsa(sel))[t[5]%4].childNodes[0].childNodes[1]`, which V8 reports as below
+// when the meta or the SVG nodes are missing.
 var xtidFailureValue = base64.StdEncoding.EncodeToString(
-	[]byte("e:TypeError: Cannot read properties of null (reading 'content')"))
+	[]byte("e:TypeError: Cannot read properties of undefined (reading 'childNodes')"))
 
 // xtidFailureLogInterval rate-limits the warning while a failure streak lasts.
 const xtidFailureLogInterval = 5 * time.Minute

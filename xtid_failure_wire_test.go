@@ -19,10 +19,12 @@ func (refuseWarmDoer) DoCtx(context.Context, string, string, map[string]string, 
 	return nil, nil, 403, nil
 }
 
-// webClientFailureValue is what x.com's own request filter sends when its
-// generator throws: btoa(`e:${error}`) (main bundle module 265390, function a).
-// Spelled out here, not derived from the package under test.
-const webClientFailureValue = "ZTpUeXBlRXJyb3I6IENhbm5vdCByZWFkIHByb3BlcnRpZXMgb2YgbnVsbCAocmVhZGluZyAnY29udGVudCcp"
+// webClientFailureValue is the web client's btoa(`e:${error}`) (main bundle
+// module 265390, function a) for the TypeError its generator throws when the
+// page's meta/SVG nodes are missing. The text is derived statically from the
+// generator's first unguarded dereference (childNodes of an undefined node), not
+// observed at runtime. Spelled out here, not derived from the package under test.
+const webClientFailureValue = "ZTpUeXBlRXJyb3I6IENhbm5vdCByZWFkIHByb3BlcnRpZXMgb2YgdW5kZWZpbmVkIChyZWFkaW5nICdjaGlsZE5vZGVzJyk="
 
 // A current-wire request whose generator fails still carries the header, with
 // the value the web client sends in that situation.
