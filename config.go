@@ -141,8 +141,15 @@ type ClientConfig struct {
 	// order, fetch metadata, origin and priority as the X web client in Chrome
 	// sends them). By default they send the request shape of v0.8.6 unchanged, so
 	// a deployment that hosts only older accounts presents one consistent shape.
-	// Accounts choose their shape by their own profile (chrome_146/150/152 get the
-	// current one) and are not affected by this field. Default: false.
+	// Accounts choose their shape by their own profile (chrome_146/150/152/156 get
+	// the current one) and are not affected by this field. Default: false.
+	//
+	// The header shape is not the whole identity: these clients, and an account
+	// whose caller-set user agent no built-in profile presents, take their TLS
+	// profile and user agent from go-stealth's default, which is chrome_156 since
+	// go-stealth v1.27.0 (chrome_152 before); only the header shape stays legacy.
+	// An open-account login runs on the shape chosen here (legacy by default); the
+	// account it mints then sends the shape of its own profile.
 	ChromeWireForAccountlessClients bool
 
 	// AccountPaceMin is the minimum human-pace delay between consecutive requests
