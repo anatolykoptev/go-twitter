@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.6](https://github.com/anatolykoptev/go-twitter/compare/v0.8.5...v0.8.6) (2026-11-04)
+
+
+### Features
+
+* **social:** apply the browser identity a lease states ([#173](https://github.com/anatolykoptev/go-twitter/issues/173)) ([a02f558](https://github.com/anatolykoptev/go-twitter/commit/a02f558b34518bc14ff91af83beb1d9c4a80a60d))
+
 ## [0.8.5](https://github.com/anatolykoptev/go-twitter/compare/v0.8.4...v0.8.5) (2026-11-04)
 
 
