@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.7](https://github.com/anatolykoptev/go-twitter/compare/v0.8.6...v0.8.7) (2026-11-04)
+
+
+### Features
+
+* send requests the way the X web client in Chrome does, per wire generation ([#177](https://github.com/anatolykoptev/go-twitter/issues/177)) ([04ee347](https://github.com/anatolykoptev/go-twitter/commit/04ee347a15e089ba46efcc8d959668d98f66d174))
+
 ## [0.8.6](https://github.com/anatolykoptev/go-twitter/compare/v0.8.5...v0.8.6) (2026-11-04)
 
 
