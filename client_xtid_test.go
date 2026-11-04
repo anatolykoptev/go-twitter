@@ -3,11 +3,13 @@ package twitter
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // deadProxy refuses connections immediately, so any request that reaches the
@@ -105,5 +107,58 @@ func TestNewClient_InitFailedAlertReachesPoolHookOnce(t *testing.T) {
 	}
 	if got := alerts.Load(); got != 1 {
 		t.Fatalf("xtid.init_failed reached PoolAlertHook %d times, want exactly 1", got)
+	}
+}
+
+// stallDoer never answers a warm-page fetch until released: a cold xtid key
+// source that hangs.
+type stallDoer struct{ release chan struct{} }
+
+func (s stallDoer) DoCtx(ctx context.Context, _, _ string, _ map[string]string, _ io.Reader) ([]byte, map[string]string, int, error) {
+	select {
+	case <-s.release:
+		return nil, nil, 503, nil
+	case <-ctx.Done():
+		return nil, nil, 0, ctx.Err()
+	}
+}
+
+// X1 — a cold xtid manager whose key source never answers must not hold a
+// request past its own ctx deadline (issue #151).
+func TestDoRequestWithBody_ColdXtidHonoursRequestDeadline(t *testing.T) {
+	c, err := NewClient(ClientConfig{DefaultProxy: deadProxy})
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
+	stall := stallDoer{release: make(chan struct{})}
+	t.Cleanup(func() { close(stall.release) })
+	c.warmDoerOverride = stall
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	headers := twitterHeaders("tok-abc", "csrf-xyz", "")
+	type result struct{ err error }
+	done := make(chan result, 1)
+	start := time.Now()
+	go func() {
+		_, _, _, err := c.doRequestWithBody(ctx, c.client, "GET", "https://x.com/i/api/graphql/x/Op", headers, nil)
+		done <- result{err}
+	}()
+	select {
+	case r := <-done:
+		if !errors.Is(r.err, context.DeadlineExceeded) {
+			t.Fatalf("err = %v, want context.DeadlineExceeded", r.err)
+		}
+		if el := time.Since(start); el > time.Second {
+			t.Fatalf("returned after %v, want ~200ms", el)
+		}
+		c.xtidFail.mu.Lock()
+		failing := c.xtidFail.failing
+		c.xtidFail.mu.Unlock()
+		if failing {
+			t.Fatal("caller's own deadline was counted as an xtid failure")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("request not bounded by its ctx: still blocked in the cold xtid wait after 5s")
 	}
 }

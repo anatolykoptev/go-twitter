@@ -571,9 +571,15 @@ func (c *Client) doRequestWithBody(ctx context.Context, bc *stealth.BrowserClien
 	}
 	qid := c.qidRefresh()
 	wf := qid.Shared(warmFetcher(c.warmClient(bc), headers))
-	if txID, txErr := c.xtidMgr.GenerateIDWith(context.Background(), method, urlPath, wf); txErr == nil {
+	if txID, txErr := c.xtidMgr.GenerateIDWith(ctx, method, urlPath, wf); txErr == nil {
 		headers["x-client-transaction-id"] = txID
 		c.xtidFail.onSuccess()
+	} else if ctxErr := ctx.Err(); ctxErr != nil {
+		// The caller's deadline/cancel ended the cold-start wait (the shared key
+		// fetch itself keeps running for later callers). That is the caller's
+		// verdict, not a generator failure: do not count it, and do not send a
+		// request on a dead ctx.
+		return nil, nil, 0, ctxErr
 	} else {
 		// The request still goes out, without the header. The failure is counted
 		// and logged once per streak so a broken generator is visible.

@@ -297,15 +297,27 @@ func tryWithAccount[T any](ctx context.Context, sc *social.Client, op string, fn
 	// the legacy body. The report runs on a detached, bounded ctx: the caller's
 	// ctx may already be done when a slow call returns, and dropping the
 	// verdict would silently mis-bill a healthy lease.
-	report := func(status string) {
+	//
+	// report is synchronous: the retry loop leases the next account right after
+	// a failure, and the credential service must have the verdict (auth_error,
+	// rate_limited, or "success" on an endpoint fault) before it picks one.
+	// reportBG is for the verdicts that END the call (final success, or a
+	// deterministic outcome withSocialAccount never retries): nothing waits on
+	// them, so the caller gets its result without the credential-service round
+	// trip. The rate-limit window is captured now, the POST happens later.
+	prepare := func(status string) func() {
 		var rl *social.RateLimit
 		if ep, st, ok := acc.latestRateLimit(op); ok {
 			rl = &social.RateLimit{Endpoint: ep, Limit: st.limit, Remaining: st.remaining, Reset: st.resetAt.Unix()}
 		}
-		rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), socialReportTimeout)
-		defer cancel()
-		_ = sc.ReportUsageWithRateLimit(rctx, "twitter", creds.ID, status, rl)
+		return func() {
+			rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), socialReportTimeout)
+			defer cancel()
+			_ = sc.ReportUsageWithRateLimit(rctx, "twitter", creds.ID, status, rl)
+		}
 	}
+	report := func(status string) { prepare(status)() }
+	reportBG := func(status string) { socialReports.submit(prepare(status)) }
 
 	cfg := ClientConfig{
 		Accounts:  []*Account{acc},
@@ -366,7 +378,7 @@ func tryWithAccount[T any](ctx context.Context, sc *social.Client, op string, fn
 			// The account completed the request fine — the resource is just
 			// absent. Healthy account, deterministic miss: report success and
 			// propagate untouched so withSocialAccount doesn't retry.
-			report("success")
+			reportBG("success")
 			return zero, err
 		}
 		if errors.Is(err, ErrEndpoint) {
@@ -384,7 +396,7 @@ func tryWithAccount[T any](ctx context.Context, sc *social.Client, op string, fn
 			// request completed correctly) and propagate untouched so
 			// withSocialAccount does not burn another lease on an identical
 			// answer.
-			report("success")
+			reportBG("success")
 			return zero, fmt.Errorf("%s: %w", acc.Username, err)
 		}
 		if errors.Is(err, ErrUnexpectedResponse) {
@@ -394,7 +406,7 @@ func tryWithAccount[T any](ctx context.Context, sc *social.Client, op string, fn
 			// the account's. Report success (the request completed) and
 			// propagate untouched so withSocialAccount does not burn another
 			// lease on an identical answer.
-			report("success")
+			reportBG("success")
 			return zero, fmt.Errorf("%s: %w", acc.Username, err)
 		}
 		if errors.Is(err, ErrOverloaded) {
@@ -411,7 +423,7 @@ func tryWithAccount[T any](ctx context.Context, sc *social.Client, op string, fn
 		return zero, fmt.Errorf("%s: %w", acc.Username, err)
 	}
 
-	report("success")
+	reportBG("success")
 	return res, nil
 }
 
