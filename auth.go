@@ -377,7 +377,7 @@ func (c *Client) openAccountOn(bc *stealth.BrowserClient) (*Account, error) {
 	headers := loginFlowHeaders(guestToken, "", clientUA(bc))
 	welcomeURL := twitterAPIURL + "/1.1/onboarding/task.json?flow_name=welcome"
 	body, _, status, err := bc.DoWithHeaderOrder("POST", welcomeURL,
-		headers, strings.NewReader(openAccountPayload), c.wireOrderFor(bc, "POST", welcomeURL, headers),
+		headers, strings.NewReader(openAccountPayload), c.wireOrderFor(nil, bc, "POST", welcomeURL, headers),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("welcome init: %w", err)
@@ -402,7 +402,7 @@ func (c *Client) openAccountOn(bc *stealth.BrowserClient) (*Account, error) {
 			payload := fmt.Sprintf(`{"flow_token":%q,"subtask_inputs":[{"subtask_id":"LoginJsInstrumentationSubtask","js_instrumentation":{"response":"{\"rf\":{\"a\":\"b\"},\"s\":\"s\"}","link":"next_link"}}]}`, flowToken)
 			stepURL := twitterAPIURL + "/1.1/onboarding/task.json"
 			body2, _, status2, err := bc.DoWithHeaderOrder("POST", stepURL,
-				headers, strings.NewReader(payload), c.wireOrderFor(bc, "POST", stepURL, headers),
+				headers, strings.NewReader(payload), c.wireOrderFor(nil, bc, "POST", stepURL, headers),
 			)
 			if err != nil {
 				return nil, fmt.Errorf("js instrumentation: %w", err)
@@ -459,7 +459,7 @@ func (c *Client) getGuestToken(client *stealth.BrowserClient) (string, error) {
 		"user-agent":    ua,
 	}, ua)
 	activateURL := twitterAPIURL + "/1.1/guest/activate.json"
-	body, _, status, err := client.DoWithHeaderOrder("POST", activateURL, headers, nil, c.wireOrderFor(client, "POST", activateURL, headers))
+	body, _, status, err := client.DoWithHeaderOrder("POST", activateURL, headers, nil, c.wireOrderFor(nil, client, "POST", activateURL, headers))
 	if err != nil {
 		return "", err
 	}
@@ -561,7 +561,7 @@ func (c *Client) initLoginFlowFull(client *stealth.BrowserClient, guestToken str
 	body, _, status, err := client.DoWithHeaderOrder("POST", initURL,
 		headers,
 		strings.NewReader(payload),
-		c.wireOrderFor(client, "POST", initURL, headers),
+		c.wireOrderFor(nil, client, "POST", initURL, headers),
 	)
 	if err != nil {
 		return nil, err
@@ -578,7 +578,7 @@ func (c *Client) submitFlowStep(client *stealth.BrowserClient, guestToken, paylo
 	body, _, status, err := client.DoWithHeaderOrder("POST", stepURL,
 		headers,
 		strings.NewReader(payload),
-		c.wireOrderFor(client, "POST", stepURL, headers),
+		c.wireOrderFor(nil, client, "POST", stepURL, headers),
 	)
 	if err != nil {
 		return nil, err

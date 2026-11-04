@@ -65,13 +65,24 @@ func accountlessWire(cfg ClientConfig) wireGen {
 	return wireLegacy
 }
 
+// wireFor is the generation a request sends. With an account it is the account's
+// stated profile (accountWire), the same input its transport was built from, so
+// an Account shared by two Clients cannot send a shape its transport does not
+// match. The per-Client registry answers only for the requests that carry no
+// account (guest paths, the shared client) and for short-lived clients.
+func (c *Client) wireFor(acc *Account, bc *stealth.BrowserClient) wireGen {
+	if acc != nil {
+		return accountWire(acc)
+	}
+	return c.owned.wireOf(bc)
+}
+
 // wireOrderFor shapes headers (in place) for a request bc will send to rawURL
 // and returns the header order to pass to the transport. Every request that
-// carries twitterHeaders, guestHeaders or loginFlowHeaders goes through it. The
-// generation is the one registered for bc when the Client built it; a client
-// built elsewhere is legacy.
-func (c *Client) wireOrderFor(bc *stealth.BrowserClient, method, rawURL string, headers map[string]string) []string {
-	return c.owned.wireOf(bc).shape(method, rawURL, headers)
+// carries twitterHeaders, guestHeaders or loginFlowHeaders goes through it. acc
+// is the account the request is for (nil when it carries none).
+func (c *Client) wireOrderFor(acc *Account, bc *stealth.BrowserClient, method, rawURL string, headers map[string]string) []string {
+	return c.wireFor(acc, bc).shape(method, rawURL, headers)
 }
 
 // shape prepares headers for a request of this generation and returns the order

@@ -353,6 +353,10 @@ func (c *Client) clientForAccount(acc *Account) (*stealth.BrowserClient, error) 
 	acc.mu.Lock()
 	defer acc.mu.Unlock()
 	if acc.client != nil {
+		// Possibly built by another Client the account was handed to: register it
+		// here too, so the login paths (which hold only the transport) look up
+		// the account's generation instead of defaulting to legacy.
+		c.owned.setWire(acc.client, accountWire(acc))
 		return acc.client, nil
 	}
 	if acc.proxyClientFailed {
@@ -663,7 +667,7 @@ func (c *Client) doRequestWithBody(ctx context.Context, acc *Account, bc *stealt
 
 	// The signed-in web client sends no x-xp-forwarded-for; only the frozen
 	// legacy shape does.
-	if c.owned.wireOf(bc) != wireChrome {
+	if c.wireFor(acc, bc) != wireChrome {
 		if xpffVal, xpffErr := c.xpffFor(acc, bc, headers["user-agent"]).Generate(); xpffErr == nil {
 			headers["x-xp-forwarded-for"] = xpffVal
 		} else {
@@ -672,7 +676,7 @@ func (c *Client) doRequestWithBody(ctx context.Context, acc *Account, bc *stealt
 	}
 
 	currentCall(ctx).ready()
-	return bc.DoWithHeaderOrderCtx(ctx, method, urlStr, headers, body, c.wireOrderFor(bc, method, urlStr, headers))
+	return bc.DoWithHeaderOrderCtx(ctx, method, urlStr, headers, body, c.wireOrderFor(acc, bc, method, urlStr, headers))
 }
 
 // xpffFor returns the generator for a request: the account's own when the
