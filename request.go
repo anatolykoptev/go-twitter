@@ -443,6 +443,11 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 		if attempt > 0 && prevAcc != nil && (prevProxyFault || accountScopedFailure(lastErr)) {
 			skipBackoff = c.pool.Healthy(func(a *Account) bool { return a != prevAcc && canServe(a) }) > 0
 		}
+		if skipBackoff {
+			slog.Debug("retry backoff skipped: previous failure was account-scoped and another account can serve",
+				slog.String("endpoint", endpoint), slog.Int("attempt", attempt),
+				slog.Int("class", int(failureClass(lastErr))), slog.Bool("proxy_fault", prevProxyFault))
+		}
 		if attempt > 0 && !skipBackoff && prevEndpointFault != errEndpoint && c.pool.Healthy(canServe) > 0 {
 			delay := stealth.DefaultBackoff.Duration(attempt)
 			select {
@@ -1466,15 +1471,21 @@ func (c *Client) attributeTransportError(acc *Account, err error) {
 // or the shared request, not about the account. A per-account proxy failure is
 // account-scoped too, but it is a transport error and tracked by the caller.
 func accountScopedFailure(err error) bool {
-	var ae *APIError
-	if !errors.As(err, &ae) {
-		return false
-	}
-	switch ae.Class {
+	switch failureClass(err) {
 	case errBanned, errRateLimited, errSuspended, errLocked, errCSRF, errAuthExpired, errBlocked, errNotAuthorized:
 		return true
 	}
 	return false
+}
+
+// failureClass returns the error class of an *APIError in err's chain, errNone
+// for anything else.
+func failureClass(err error) errorClass {
+	var ae *APIError
+	if errors.As(err, &ae) {
+		return ae.Class
+	}
+	return errNone
 }
 
 // markProxyDown applies exponential backoff for proxy failures and emits a
