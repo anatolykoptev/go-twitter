@@ -68,6 +68,7 @@ const (
 	OutcomeEndpoint    = "endpoint"
 	OutcomeOverloaded  = "overloaded"
 	OutcomeBadRequest  = "bad_request"
+	OutcomeUnexpected  = "unexpected"
 	OutcomeTransport   = "transport"
 	OutcomeProxy       = "proxy"
 	OutcomeOther       = "other"

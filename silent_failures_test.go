@@ -44,14 +44,15 @@ func TestErrorsOnly200_UserTweets_ReturnsTypedError(t *testing.T) {
 	var ae *APIError
 	require.True(t, errors.As(err, &ae), "want typed *APIError, got %T: %v", err, err)
 	assert.Contains(t, ae.Codes, 999, "the body's error codes must reach the caller")
-	assert.True(t, errors.Is(err, ErrEndpoint), "errors-only 200 is endpoint-side, got %v", err)
+	assert.True(t, errors.Is(err, ErrUnexpectedResponse), "unrecognised errors-only 200 is its own terminal class, got %v", err)
+	assert.False(t, errors.Is(err, ErrEndpoint), "an executed query is not a stale request shape")
 	assert.False(t, IsAuthExpired(err), "an errors-only 200 must not trigger the auth-expired path")
 
 	total, failed, _ := accs[0].Stats()
 	assert.Zero(t, failed, "the cause is unknown: the account must not be charged")
 	assert.Zero(t, total)
 	assert.True(t, accs[0].IsActive(), "the account must not be benched")
-	assert.EqualValues(t, 1, fake.hits.Load(), "one serving account, one attempt; rotation found nobody else")
+	assert.EqualValues(t, 1, fake.hits.Load(), "one serving account, one attempt")
 }
 
 // S2 — same journey, but the 200 carries usable data AND a routine partial

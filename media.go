@@ -352,6 +352,9 @@ func (c *Client) doMediaRequest(ctx context.Context, acc *Account, method, urlSt
 
 	var lastErr error
 	for attempt := range maxRetries {
+		if ae := terminalVerdict(lastErr); ae != nil {
+			return nil, ae // a recovery retry answered terminally: do not retry
+		}
 		if attempt > 0 {
 			delay := stealth.DefaultBackoff.Duration(attempt)
 			select {
@@ -422,6 +425,12 @@ func (c *Client) doMediaRequest(ctx context.Context, acc *Account, method, urlSt
 					return nil, ctxErr // post-relogin abort by caller cancel: no charge
 				}
 				apiErr := newAPIError(status2, body2, respHdrs2)
+				if apiErr.Class == errNone && errorsOnly(body2) {
+					// Same terminal classification as the other post-relogin
+					// paths: an errors-only retry body is a deterministic
+					// miss or an unrecognised answer, never an auth verdict.
+					apiErr.Class = errorsOnlyClass(body2)
+				}
 				apiErr.Message = "post-relogin upload failed"
 				lastErr = apiErr
 				continue
@@ -467,10 +476,11 @@ func (c *Client) doMediaRequest(ctx context.Context, acc *Account, method, urlSt
 		}
 		// Same errors-only guard as the request paths: an errors[] envelope
 		// with no usable data is a failed call, not a success — and must not
-		// feed RecordSuccess below.
+		// feed RecordSuccess below. Terminal: a deterministic miss returns
+		// ErrNotFound, an unrecognised answer ErrUnexpectedResponse.
 		if cls == errNone && errorsOnly(body) {
 			c.recordAPICall(epUploadMedia, false, false)
-			return nil, &APIError{Status: status, Codes: extractErrorCodes(body), Class: errEndpoint,
+			return nil, &APIError{Status: status, Codes: extractErrorCodes(body), Class: errorsOnlyClass(body),
 				Message: fmt.Sprintf("%s errors-only %d: %s", epUploadMedia, status, truncateBytes(body, 200))}
 		}
 		if cls != errNone {
@@ -558,6 +568,12 @@ func (c *Client) recoverCSRFMedia(ctx context.Context, acc *Account, bc *stealth
 		return nil, false // post-relogin abort by caller cancel: no charge
 	}
 	apiErr := newAPIError(status3, body3, respHdrs3)
+	if apiErr.Class == errNone && errorsOnly(body3) {
+		// Same terminal classification as the other post-relogin paths: an
+		// errors-only retry body is a deterministic miss or an unrecognised
+		// answer, never an auth verdict.
+		apiErr.Class = errorsOnlyClass(body3)
+	}
 	apiErr.Message = "post-relogin upload failed"
 	*lastErr = apiErr
 	return nil, false

@@ -44,6 +44,15 @@ var ErrOverloaded = errors.New("twitter: x overloaded")
 // errors.Is.
 var ErrBadRequest = errors.New("twitter: bad request (input rejected)")
 
+// ErrUnexpectedResponse marks a 2xx response X answered with only errors the
+// library does not recognise: the query ran — the errors[] envelope proves
+// the committed request shape executed — but no error entry matches a known
+// class or a deterministic-miss marker. The class is terminal and
+// account/endpoint-neutral: no retry, no rotation, no guest fallback, no
+// relogin, no account charge, and NOT an endpoint fault. Match with
+// errors.Is.
+var ErrUnexpectedResponse = errors.New("twitter: unexpected response (unrecognized errors-only body)")
+
 // errorClass categorizes Twitter API error responses for targeted handling.
 type errorClass int
 
@@ -62,6 +71,8 @@ const (
 	errEndpoint                 // HTTP 404/410 or GraphQL-shaped 400 — endpoint-wide fault, not the account's
 	errOverloaded               // HTTP 5xx or a LoadShed error entry — X shedding load
 	errBadRequest               // HTTP 400 with an input-validation marker — the caller's own error, deterministic
+	errNotFound                 // errors-only 2xx with a deterministic-miss marker — the resource is absent (terminal)
+	errUnexpected               // errors-only 2xx with no recognized class — X answered, the library does not recognise it (terminal)
 
 	// errClassCount is one past the last class; metrics_test iterates [0, errClassCount)
 	// to prove every class has a twitter.outcome mapping. Keep it LAST.
@@ -172,9 +183,10 @@ func (e *APIError) Error() string {
 func (e *APIError) Unwrap() error { return e.Err }
 
 // Is reports sentinel membership: ErrEndpoint matches class errEndpoint,
-// ErrOverloaded matches errOverloaded and ErrBadRequest matches errBadRequest,
-// so errors.Is(err, ErrEndpoint) reaches through fmt.Errorf("...: %w")
-// wrappers.
+// ErrOverloaded matches errOverloaded, ErrBadRequest matches errBadRequest,
+// ErrNotFound matches errNotFound and ErrUnexpectedResponse matches
+// errUnexpected, so errors.Is(err, ErrEndpoint) reaches through
+// fmt.Errorf("...: %w") wrappers.
 func (e *APIError) Is(target error) bool {
 	switch target {
 	case ErrEndpoint:
@@ -183,6 +195,10 @@ func (e *APIError) Is(target error) bool {
 		return e.Class == errOverloaded
 	case ErrBadRequest:
 		return e.Class == errBadRequest
+	case ErrNotFound:
+		return e.Class == errNotFound
+	case ErrUnexpectedResponse:
+		return e.Class == errUnexpected
 	}
 	return false
 }
@@ -244,6 +260,62 @@ func hasCallerValidationError(body []byte) bool {
 		}
 	}
 	return false
+}
+
+// errorsOnlyClass classifies a body errorsOnly() already accepted — a
+// non-empty errors[] with no usable data — into its terminal class. Every
+// errors-only arm returns this class at once: the errors[] envelope proves
+// the committed request shape EXECUTED, so the answer is deterministic —
+// another account, a guest token or a relogin can only reproduce it.
+//
+//   - errNotFound, a deterministic miss: an error entry carrying a numeric
+//     not-found code (34 "page does not exist", 50 user not found, 63 user
+//     suspended, 144 "no status found with that ID" — the public REST code
+//     table, also observed on GraphQL error entries), an entry whose
+//     name/kind is "NotFoundError" at the top level or inside extensions,
+//     or a message starting with "_Missing:" (the missing-object wording on
+//     public GraphQL captures, e.g. the code-144 entry
+//     "_Missing: No status found with that ID.").
+//   - errUnexpected, anything else: the query ran but the answer matches no
+//     class the library knows.
+//
+// Codes 421/422 are deliberately absent: they could not be confirmed as
+// unavailable-object codes (HTTP 422 is a validation status), and a real
+// "_Missing:" miss is still caught by the message marker whatever code it
+// carries.
+func errorsOnlyClass(body []byte) errorClass {
+	var errResp struct {
+		Errors []struct {
+			Code       int    `json:"code"`
+			Message    string `json:"message"`
+			Name       string `json:"name"`
+			Kind       string `json:"kind"`
+			Extensions *struct {
+				Code int    `json:"code"`
+				Name string `json:"name"`
+				Kind string `json:"kind"`
+			} `json:"extensions"`
+		} `json:"errors"`
+	}
+	if json.Unmarshal(body, &errResp) != nil {
+		return errUnexpected
+	}
+	miss := func(code int, name, kind, msg string) bool {
+		switch code {
+		case 34, 50, 63, 144:
+			return true
+		}
+		return name == "NotFoundError" || kind == "NotFoundError" || strings.HasPrefix(msg, "_Missing:")
+	}
+	for _, e := range errResp.Errors {
+		if miss(e.Code, e.Name, e.Kind, e.Message) {
+			return errNotFound
+		}
+		if ex := e.Extensions; ex != nil && miss(ex.Code, ex.Name, ex.Kind, "") {
+			return errNotFound
+		}
+	}
+	return errUnexpected
 }
 
 // newAPIError builds an APIError from a response. It preserves the existing

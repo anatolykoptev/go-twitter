@@ -67,9 +67,10 @@ instrumented.
 | `blocked` | code 161 |
 | `forbidden` | HTTP 403 without a recognized code |
 | `internal` | code 131 (recorded as `internal` even when the client then accepts usable data) |
-| `not_found` | HTTP 404 — the historical dead-route label (an endpoint fault under the hood: never charged to the account) |
+| `not_found` | HTTP 404 — the historical dead-route label (an endpoint fault under the hood: never charged to the account); also an errors-only 2xx carrying a deterministic-miss marker (`ErrNotFound`) |
 | `endpoint` | HTTP 400 with a GraphQL-shaped `errors` body — an endpoint-wide fault (stale features / request shape); never charged to the account |
 | `bad_request` | HTTP 400 with a GraphQL error entry carrying code `214` (top-level or inside `extensions`) — a deterministic caller-input rejection (`ErrBadRequest`): never retried, rotated or charged to the account, and not an endpoint fault |
+| `unexpected` | an errors-only 2xx whose entries match no known class and no miss marker (`ErrUnexpectedResponse`): X answered with errors the library does not recognise — terminal, never charged to the account, and not an endpoint fault |
 | `overloaded` | HTTP 5xx, or a `LoadShed` error entry (code -1 / message containing "LoadShed"); retried on another account, never charged to the serving one |
 | `transport` | the request failed before an HTTP response (timeout, reset, DNS on a direct account, ...) |
 | `proxy` | transport failure that looks like a proxy failure (`isProxyError`) on an attempt made through a per-account proxy; the same gate as `proxy.failures` |

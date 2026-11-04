@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
@@ -379,6 +380,9 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 		// The previous attempt ended before this iteration — return its slot
 		// before the pick, so a capped pool sees the freed capacity.
 		release()
+		if ae := terminalVerdict(lastErr); ae != nil {
+			return nil, nil, ae // a recovery retry answered terminally: do not rotate
+		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return nil, nil, ctxErr
 		}
@@ -630,26 +634,26 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 		// wearing a success status: classifyError leaves codes outside its
 		// known list at errNone, so without this probe the body reached the
 		// caller as an empty success and nobody ever learned the request
-		// failed. The cause is unknown and not attributable to the serving
-		// account: classify it errEndpoint — the read rotates to a different
-		// account inside the attempt budget, the account is neither charged
-		// nor benched, and no relogin is triggered. Not fed to
-		// noteEndpointFault: an errors[] envelope proves the query executed,
-		// so the committed queryId is not stale.
+		// failed. The answer is terminal, NOT an endpoint fault: the errors[]
+		// envelope proves the committed request shape EXECUTED, so it is not
+		// stale and rotating another account can only reproduce the identical
+		// body. A deterministic miss (deleted/unknown resource — see
+		// errorsOnlyClass) returns ErrNotFound; any unrecognised answer
+		// returns ErrUnexpectedResponse. Neither retries, rotates, falls back
+		// to guest, relogs in, nor charges the account — and neither is fed
+		// to endpointFaulted or noteEndpointFault.
 		if errClass == errNone && errorsOnly(body) {
 			c.recordAPICall(endpoint, false, false)
-			slog.Warn("errors-only 200, rotating account",
-				slog.String("endpoint", endpoint), slog.String("user", acc.Username))
-			apiErr := &APIError{
+			cls := errorsOnlyClass(body)
+			slog.Warn("errors-only 200, terminal answer",
+				slog.String("endpoint", endpoint), slog.String("user", acc.Username),
+				slog.Int("class", int(cls)))
+			return nil, nil, &APIError{
 				Status:  200,
 				Codes:   extractErrorCodes(body),
-				Class:   errEndpoint,
+				Class:   cls,
 				Message: fmt.Sprintf("%s errors-only 200: %s", endpoint, truncateBytes(body, 200)),
 			}
-			endpointFaulted[acc.ID()] = true
-			prevEndpointFault = errEndpoint
-			lastErr = apiErr
-			continue
 		}
 
 		switch errClass {
@@ -791,6 +795,9 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 	// The last attempt is over: return its slot before the guest fallback, which
 	// uses no account.
 	release()
+	if ae := terminalVerdict(lastErr); ae != nil {
+		return nil, nil, ae // terminal answer from the last attempt: no guest fallback
+	}
 	// --- Guest token fallback ---
 	if requiresAuth(endpoint) {
 		if lastErr != nil {
@@ -853,7 +860,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 		}
 		if errorsOnly(body) {
 			c.recordAPICall(endpoint, false, false)
-			return nil, nil, &APIError{Status: 200, Codes: extractErrorCodes(body), Class: errEndpoint,
+			return nil, nil, &APIError{Status: 200, Codes: extractErrorCodes(body), Class: errorsOnlyClass(body),
 				Message: withAuthFailure(lastErr, fmt.Sprintf("%s (guest retry) errors-only 200: %s", endpoint, truncateBytes(body, 200)))}
 		}
 		c.recordAPICall(endpoint, true, false)
@@ -867,7 +874,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 	}
 	if errorsOnly(body) {
 		c.recordAPICall(endpoint, false, false)
-		return nil, nil, &APIError{Status: 200, Codes: extractErrorCodes(body), Class: errEndpoint,
+		return nil, nil, &APIError{Status: 200, Codes: extractErrorCodes(body), Class: errorsOnlyClass(body),
 			Message: withAuthFailure(lastErr, fmt.Sprintf("%s (guest) errors-only 200: %s", endpoint, truncateBytes(body, 200)))}
 	}
 	c.recordAPICall(endpoint, true, false)
@@ -1022,6 +1029,9 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 
 	var lastErr error
 	for attempt := range maxRetries {
+		if ae := terminalVerdict(lastErr); ae != nil {
+			return nil, ae // a recovery retry answered terminally: do not retry
+		}
 		if attempt > 0 {
 			delay := stealth.DefaultBackoff.Duration(attempt)
 			select {
@@ -1146,10 +1156,11 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 
 		// Same errors-only-200 guard as doPoolRequest: an errors[] envelope
 		// with no usable data is a failed call, not a success — and must not
-		// feed RecordSuccess below.
+		// feed RecordSuccess below. Terminal: a deterministic miss returns
+		// ErrNotFound, an unrecognised answer ErrUnexpectedResponse.
 		if errClass == errNone && errorsOnly(body) {
 			c.recordAPICall(endpoint, false, false)
-			return nil, &APIError{Status: 200, Codes: extractErrorCodes(body), Class: errEndpoint,
+			return nil, &APIError{Status: 200, Codes: extractErrorCodes(body), Class: errorsOnlyClass(body),
 				Message: fmt.Sprintf("%s errors-only 200: %s", endpoint, truncateBytes(body, 200))}
 		}
 
@@ -1260,13 +1271,29 @@ func (c *Client) escalateHeaderless88(acc *Account, endpoint string, body []byte
 	return &APIError{Status: 200, Class: errBanned, Codes: extractErrorCodes(body), Message: "account banned (repeated header-less code 88)"}
 }
 
+// terminalVerdict returns the *APIError a recovery path left in lastErr when
+// it is a terminal answer (a deterministic miss or an unrecognised errors-only
+// body). The recovery paths (relogin / ct0 retries) record their verdict in
+// lastErr and `continue`; without this check the loop would rotate to another
+// account, or fall back to a guest token, to reproduce the identical answer.
+func terminalVerdict(err error) *APIError {
+	var ae *APIError
+	if errors.As(err, &ae) && (ae.Class == errNotFound || ae.Class == errUnexpected) {
+		return ae
+	}
+	return nil
+}
+
 // postReloginFailure classifies a failed post-recovery retry — a relogin or
 // ct0-adoption retry that still did not produce a usable response — by the
 // retry's own error codes, not by the failure that triggered the recovery
 // (#26 / issue #34). The fallback class applies only when the body carries
-// no recognized class: an errors-only or unrecognized-code retry keeps the
-// verdict the sites already reported, but a retry that answered suspended
-// (64) or locked (326) must not masquerade as auth-expired and take a soft
+// no recognized class: an errors-only retry body is its own terminal verdict
+// (a deterministic miss or an unrecognised answer via errorsOnlyClass —
+// never an auth verdict, and never benched: the account just logged in and
+// was answered for real), an unrecognized-code retry keeps the verdict the
+// sites already reported, but a retry that answered suspended (64) or
+// locked (326) must not masquerade as auth-expired and take a soft
 // cooldown. The bench follows the classified verdict: suspended is benched
 // for good, locked/banned get BanCooldown, a rate-limited retry only marks
 // the endpoint window (the account is healthy — the same call the primary
@@ -1276,7 +1303,16 @@ func (c *Client) escalateHeaderless88(acc *Account, endpoint string, body []byte
 func (c *Client) postReloginFailure(acc *Account, endpoint string, status int, body []byte, hdrs map[string]string, err error, fallback errorClass, fallbackCooldown time.Duration, msg string) *APIError {
 	cls := classifyError(body, hdrs)
 	if cls == errNone {
-		cls = fallback
+		if errorsOnly(body) {
+			// An errors-only retry body is its own terminal verdict — a
+			// deterministic miss or an answer the library does not recognise
+			// — never the auth verdict that triggered the recovery. Neither
+			// class benches: the freshly logged-in account proved healthy by
+			// being answered for real.
+			cls = errorsOnlyClass(body)
+		} else {
+			cls = fallback
+		}
 	}
 	switch {
 	case cls == errSuspended:
@@ -1285,6 +1321,8 @@ func (c *Client) postReloginFailure(acc *Account, endpoint string, status int, b
 		c.pool.SoftDeactivate(acc, c.cfg.BanCooldown)
 	case cls == errRateLimited:
 		acc.MarkEndpointRateLimited(endpoint, parseRateLimitReset(hdrs[xRateLimitReset]))
+	case cls == errNotFound || cls == errUnexpected:
+		// Terminal healthy-account verdicts: no bench, no charge.
 	case fallbackCooldown > 0:
 		c.pool.SoftDeactivate(acc, fallbackCooldown)
 	}
