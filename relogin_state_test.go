@@ -27,6 +27,14 @@ const (
 // proxy hop as plain HTTP, the login flow host (which hands out reloginNewTok).
 type reloginJourney struct {
 	logins atomic.Int32
+	// gqlHits, when non-nil, counts each request the GraphQL branch answers.
+	// Requests arrive at handler directly AND tunnelled inside a CONNECT (the
+	// client tunnels plain HTTP too), so only handler sees them all.
+	gqlHits *atomic.Int32
+	// answerAuthed, when set, replaces the timeline answer for a GraphQL
+	// request carrying reloginNewTok — the verdict a post-relogin retry meets
+	// (S3 in silent_failures_test.go answers suspended).
+	answerAuthed func(w http.ResponseWriter, r *http.Request)
 }
 
 // oneConnListener hands a single, already-accepted connection to http.Serve.
@@ -84,9 +92,16 @@ func (j *reloginJourney) handler(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	if j.gqlHits != nil {
+		j.gqlHits.Add(1)
+	}
 	if !strings.Contains(r.Header.Get("Cookie"), "auth_token="+reloginNewTok) {
 		w.WriteHeader(http.StatusUnauthorized)
 		_, _ = w.Write([]byte(`{"errors":[{"code":32,"message":"Could not authenticate you"}]}`))
+		return
+	}
+	if j.answerAuthed != nil {
+		j.answerAuthed(w, r)
 		return
 	}
 	if r.URL.Path != "" && containsFold(r.URL.Path, "UserByScreenName") {
@@ -96,6 +111,22 @@ func (j *reloginJourney) handler(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte(userTweetsBody(snowflakeAt(time.Now()))))
 }
 
+// proxyHopFakeX stands serve up as fake X (twitterBase points at it) and aims
+// the login host at the same server: twitterAPIURL becomes api.twitter.com
+// over plain HTTP, which the returned BrowserClient reaches through the fake
+// as a proxy hop — serve sees both branches.
+func proxyHopFakeX(t *testing.T, serve http.HandlerFunc) *stealth.BrowserClient {
+	t.Helper()
+	_ = startFakeX(t, serve) // serves, points twitterBase at it, shortens jitter/backoff
+	srvURL := strings.TrimSuffix(twitterBase, "/i/api/graphql")
+	origAPI := twitterAPIURL
+	twitterAPIURL = "http://api.twitter.com"
+	t.Cleanup(func() { twitterAPIURL = origAPI })
+	bc, err := stealth.NewClient(stealth.WithProxy(srvURL), stealth.WithoutSSRFGuard())
+	require.NoError(t, err)
+	return bc
+}
+
 // newReloginJourneyClient builds a Client whose single account holds the OLD
 // token (loaded from the seeded store) and whose transport reaches the fake
 // service, with the login host redirected through a proxy hop to the same
@@ -103,13 +134,7 @@ func (j *reloginJourney) handler(w http.ResponseWriter, r *http.Request) {
 func newReloginJourneyClient(t *testing.T, store SessionStore, pw string) (*Client, *Account, *reloginJourney) {
 	t.Helper()
 	j := &reloginJourney{}
-	_ = startFakeX(t, j.serve) // serves, points twitterBase at it, shortens jitter/backoff
-	srvURL := strings.TrimSuffix(twitterBase, "/i/api/graphql")
-	origAPI := twitterAPIURL
-	twitterAPIURL = "http://api.twitter.com"
-	t.Cleanup(func() { twitterAPIURL = origAPI })
-	bc, err := stealth.NewClient(stealth.WithProxy(srvURL), stealth.WithoutSSRFGuard())
-	require.NoError(t, err)
+	bc := proxyHopFakeX(t, j.serve)
 
 	c, err := NewClient(ClientConfig{
 		Accounts:      ParseAccounts("u1:" + pw + ":" + reloginOldTok + ":" + reloginOldCT0),

@@ -522,7 +522,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 				}
 				authTok2, ct02, ua2 := acc.Credentials()
 				body2, respHdrs2, status2, err2 := c.observedPoolReq(ctx, acc, endpoint, bc, method, url, payload, twitterHeaders(authTok2, ct02, ua2))
-				if err2 == nil && status2 == 200 {
+				if err2 == nil && status2 == 200 && usableResponse(body2, respHdrs2) {
 					c.recordAPICall(endpoint, true, false)
 					acc.RecordSuccess()
 					return body2, respHdrs2, nil
@@ -530,8 +530,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 				if ctxErr := ctx.Err(); ctxErr != nil && err2 != nil {
 					return nil, nil, ctxErr // post-relogin transport abort by caller cancel: no charge
 				}
-				c.pool.SoftDeactivate(acc, c.cfg.AuthCooldown)
-				lastErr = &APIError{Status: status2, Codes: extractErrorCodes(body2), Class: errAuthExpired, Err: err2, Message: "post-relogin request failed"}
+				lastErr = c.postReloginFailure(acc, endpoint, status2, body2, respHdrs2, err2, errAuthExpired, c.cfg.AuthCooldown, "post-relogin request failed")
 				continue
 			case errOverloaded:
 				// LoadShed riding a 401/403 body is still X-side overload:
@@ -627,6 +626,32 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 			return body, respHdrs, nil
 		}
 
+		// An errors-only 200 — errors[] and no usable data — is a failed call
+		// wearing a success status: classifyError leaves codes outside its
+		// known list at errNone, so without this probe the body reached the
+		// caller as an empty success and nobody ever learned the request
+		// failed. The cause is unknown and not attributable to the serving
+		// account: classify it errEndpoint — the read rotates to a different
+		// account inside the attempt budget, the account is neither charged
+		// nor benched, and no relogin is triggered. Not fed to
+		// noteEndpointFault: an errors[] envelope proves the query executed,
+		// so the committed queryId is not stale.
+		if errClass == errNone && errorsOnly(body) {
+			c.recordAPICall(endpoint, false, false)
+			slog.Warn("errors-only 200, rotating account",
+				slog.String("endpoint", endpoint), slog.String("user", acc.Username))
+			apiErr := &APIError{
+				Status:  200,
+				Codes:   extractErrorCodes(body),
+				Class:   errEndpoint,
+				Message: fmt.Sprintf("%s errors-only 200: %s", endpoint, truncateBytes(body, 200)),
+			}
+			endpointFaulted[acc.ID()] = true
+			prevEndpointFault = errEndpoint
+			lastErr = apiErr
+			continue
+		}
+
 		switch errClass {
 		case errNone:
 			if newCT0 := extractCT0FromHeaders(respHdrs); newCT0 != "" && newCT0 != ct0 {
@@ -658,7 +683,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 			}
 			authTok2, ct02, ua2 := acc.Credentials()
 			body2, respHdrs2, status2, err2 := c.observedPoolReq(ctx, acc, endpoint, bc, method, url, payload, twitterHeaders(authTok2, ct02, ua2))
-			if err2 == nil && status2 == 200 {
+			if err2 == nil && status2 == 200 && usableResponse(body2, respHdrs2) {
 				c.recordAPICall(endpoint, true, false)
 				acc.RecordSuccess()
 				return body2, respHdrs2, nil
@@ -666,8 +691,7 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 			if ctxErr := ctx.Err(); ctxErr != nil && err2 != nil {
 				return nil, nil, ctxErr // post-relogin transport abort by caller cancel: no charge
 			}
-			c.pool.SoftDeactivate(acc, c.cfg.AuthCooldown)
-			lastErr = &APIError{Status: status2, Codes: extractErrorCodes(body2), Class: errAuthExpired, Err: err2, Message: "post-relogin request failed"}
+			lastErr = c.postReloginFailure(acc, endpoint, status2, body2, respHdrs2, err2, errAuthExpired, c.cfg.AuthCooldown, "post-relogin request failed")
 			continue
 
 		case errInternal:
@@ -724,10 +748,15 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 			slog.Warn("account locked (code 326, captcha needed)", slog.String("user", acc.Username))
 			if c.cfg.CaptchaSolver != nil {
 				slog.Info("attempting CAPTCHA unlock via relogin", slog.String("user", acc.Username))
-				if reErr := c.relogin(acc); reErr == nil {
+				if reErr := c.relogin(acc); reErr != nil {
+					if ctxErr := ctx.Err(); ctxErr != nil {
+						return nil, nil, ctxErr // caller gone: the relogin verdict is not an account charge
+					}
+					slog.Warn("CAPTCHA unlock failed", slog.String("user", acc.Username), slog.Any("error", reErr))
+				} else {
 					authTok2, ct02, ua2 := acc.Credentials()
 					body2, respHdrs2, status2, err2 := c.observedPoolReq(ctx, acc, endpoint, bc, method, url, payload, twitterHeaders(authTok2, ct02, ua2))
-					if err2 == nil && status2 == 200 {
+					if err2 == nil && status2 == 200 && usableResponse(body2, respHdrs2) {
 						c.recordAPICall(endpoint, true, false)
 						acc.RecordSuccess()
 						slog.Info("CAPTCHA unlock succeeded", slog.String("user", acc.Username))
@@ -737,11 +766,11 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 						return nil, nil, ctxErr // caller cancel aborted the retry: no charge
 					}
 					slog.Warn("post-CAPTCHA request failed", slog.String("user", acc.Username))
-				} else {
-					if ctxErr := ctx.Err(); ctxErr != nil {
-						return nil, nil, ctxErr // caller gone: the relogin verdict is not an account charge
-					}
-					slog.Warn("CAPTCHA unlock failed", slog.String("user", acc.Username), slog.Any("error", reErr))
+					// The retry's own verdict decides the bench: a
+					// still-locked account keeps errLocked/BanCooldown, a
+					// suspended one is benched for good.
+					lastErr = c.postReloginFailure(acc, endpoint, status2, body2, respHdrs2, err2, errLocked, c.cfg.BanCooldown, "post-CAPTCHA request failed")
+					continue
 				}
 			}
 			c.pool.SoftDeactivate(acc, c.cfg.BanCooldown)
@@ -822,6 +851,11 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 			apiErr.Message = withAuthFailure(lastErr, fmt.Sprintf("%s (guest retry) HTTP %d: %s", endpoint, status, truncateBytes(body, 200)))
 			return nil, nil, apiErr
 		}
+		if errorsOnly(body) {
+			c.recordAPICall(endpoint, false, false)
+			return nil, nil, &APIError{Status: 200, Codes: extractErrorCodes(body), Class: errEndpoint,
+				Message: withAuthFailure(lastErr, fmt.Sprintf("%s (guest retry) errors-only 200: %s", endpoint, truncateBytes(body, 200)))}
+		}
 		c.recordAPICall(endpoint, true, false)
 		return body, respHdrs, nil
 	}
@@ -830,6 +864,11 @@ func (c *Client) doPoolRequest(ctx context.Context, method, endpoint, url string
 		apiErr := newAPIError(status, body, respHdrs)
 		apiErr.Message = withAuthFailure(lastErr, fmt.Sprintf("%s (guest) HTTP %d: %s", endpoint, status, truncateBytes(body, 200)))
 		return nil, nil, apiErr
+	}
+	if errorsOnly(body) {
+		c.recordAPICall(endpoint, false, false)
+		return nil, nil, &APIError{Status: 200, Codes: extractErrorCodes(body), Class: errEndpoint,
+			Message: withAuthFailure(lastErr, fmt.Sprintf("%s (guest) errors-only 200: %s", endpoint, truncateBytes(body, 200)))}
 	}
 	c.recordAPICall(endpoint, true, false)
 	return body, respHdrs, nil
@@ -863,7 +902,7 @@ func (c *Client) recoverCSRF(ctx context.Context, acc *Account, bc *stealth.Brow
 		authTok2, ct02, ua2 := acc.Credentials()
 		c.saveSession(acc, authTok2, ct02)
 		body2, respHdrs2, status2, err2 := c.observedPoolReq(ctx, acc, endpoint, bc, method, url, payload, twitterHeaders(authTok2, ct02, ua2))
-		if err2 == nil && status2 == 200 && classifyError(body2, respHdrs2) == errNone {
+		if err2 == nil && status2 == 200 && usableResponse(body2, respHdrs2) {
 			if newCT0 := extractCT0FromHeaders(respHdrs2); newCT0 != "" {
 				acc.SetCT0(newCT0)
 				authTok3, ct03, _ := acc.Credentials()
@@ -898,7 +937,7 @@ func (c *Client) recoverCSRF(ctx context.Context, acc *Account, bc *stealth.Brow
 	}
 	authTok3, ct03, ua3 := acc.Credentials()
 	body3, respHdrs3, status3, err3 := c.observedPoolReq(ctx, acc, endpoint, bc, method, url, payload, twitterHeaders(authTok3, ct03, ua3))
-	if err3 == nil && status3 == 200 {
+	if err3 == nil && status3 == 200 && usableResponse(body3, respHdrs3) {
 		c.recordAPICall(endpoint, true, false)
 		acc.RecordSuccess()
 		return body3, respHdrs3, true
@@ -906,8 +945,7 @@ func (c *Client) recoverCSRF(ctx context.Context, acc *Account, bc *stealth.Brow
 	if ctx.Err() != nil && err3 != nil {
 		return nil, nil, false // post-relogin abort by caller cancel: no charge
 	}
-	c.pool.SoftDeactivate(acc, c.cfg.AuthCooldown)
-	*lastErr = &APIError{Status: status3, Codes: extractErrorCodes(body3), Class: errAuthExpired, Err: err3, Message: "post-relogin CSRF request failed"}
+	*lastErr = c.postReloginFailure(acc, endpoint, status3, body3, respHdrs3, err3, errAuthExpired, c.cfg.AuthCooldown, "post-relogin CSRF request failed")
 	return nil, nil, false
 }
 
@@ -923,7 +961,7 @@ func (c *Client) recoverCSRFPost(ctx context.Context, acc *Account, bc *stealth.
 		authTok2, ct02, ua2 := acc.Credentials()
 		c.saveSession(acc, authTok2, ct02)
 		body2, respHdrs2, status2, err2 := c.observedRequestWithBody(ctx, acc, endpoint, bc, "POST", url, twitterHeaders(authTok2, ct02, ua2), bytes.NewReader(payload))
-		if err2 == nil && (status2 == 200 || status2 == 201) && classifyError(body2, respHdrs2) == errNone {
+		if err2 == nil && (status2 == 200 || status2 == 201) && usableResponse(body2, respHdrs2) {
 			if newCT0 := extractCT0FromHeaders(respHdrs2); newCT0 != "" {
 				acc.SetCT0(newCT0)
 				authTok3, ct03, _ := acc.Credentials()
@@ -955,7 +993,7 @@ func (c *Client) recoverCSRFPost(ctx context.Context, acc *Account, bc *stealth.
 	}
 	authTok3, ct03, ua3 := acc.Credentials()
 	body3, respHdrs3, status3, err3 := c.observedRequestWithBody(ctx, acc, endpoint, bc, "POST", url, twitterHeaders(authTok3, ct03, ua3), bytes.NewReader(payload))
-	if err3 == nil && (status3 == 200 || status3 == 201) && classifyError(body3, respHdrs3) == errNone {
+	if err3 == nil && (status3 == 200 || status3 == 201) && usableResponse(body3, respHdrs3) {
 		c.recordAPICall(endpoint, true, false)
 		acc.RecordSuccess()
 		return body3, true
@@ -963,7 +1001,7 @@ func (c *Client) recoverCSRFPost(ctx context.Context, acc *Account, bc *stealth.
 	if ctx.Err() != nil && err3 != nil {
 		return nil, false // post-relogin abort by caller cancel: no charge
 	}
-	*lastErr = &APIError{Status: status3, Codes: extractErrorCodes(body3), Class: errAuthExpired, Err: err3, Message: "post-relogin CSRF request failed"}
+	*lastErr = c.postReloginFailure(acc, endpoint, status3, body3, respHdrs3, err3, errAuthExpired, 0, "post-relogin CSRF request failed")
 	return nil, false
 }
 
@@ -1047,8 +1085,8 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 					continue
 				}
 				authTok2, ct02, ua2 := acc.Credentials()
-				body2, _, status2, err2 := c.observedRequestWithBody(ctx, acc, endpoint, bc, "POST", url, twitterHeaders(authTok2, ct02, ua2), bytes.NewReader(payload))
-				if err2 == nil && (status2 == 200 || status2 == 201) {
+				body2, respHdrs2, status2, err2 := c.observedRequestWithBody(ctx, acc, endpoint, bc, "POST", url, twitterHeaders(authTok2, ct02, ua2), bytes.NewReader(payload))
+				if err2 == nil && (status2 == 200 || status2 == 201) && usableResponse(body2, respHdrs2) {
 					c.recordAPICall(endpoint, true, false)
 					acc.RecordSuccess()
 					return body2, nil
@@ -1056,7 +1094,7 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 				if ctxErr := ctx.Err(); ctxErr != nil && err2 != nil {
 					return nil, ctxErr // post-relogin abort by caller cancel: no charge
 				}
-				lastErr = &APIError{Status: status2, Codes: extractErrorCodes(body2), Class: errAuthExpired, Err: err2, Message: "post-relogin request failed"}
+				lastErr = c.postReloginFailure(acc, endpoint, status2, body2, respHdrs2, err2, errAuthExpired, 0, "post-relogin request failed")
 				continue
 			case errOverloaded:
 				// LoadShed inside a 401/403 body: X-side, not the account's.
@@ -1104,6 +1142,15 @@ func (c *Client) doPOST(ctx context.Context, acc *Account, endpoint, url string,
 			slog.Debug("doPOST: errors with usable data, treating as success",
 				slog.String("endpoint", endpoint), slog.Int("class", int(errClass)))
 			return body, nil
+		}
+
+		// Same errors-only-200 guard as doPoolRequest: an errors[] envelope
+		// with no usable data is a failed call, not a success — and must not
+		// feed RecordSuccess below.
+		if errClass == errNone && errorsOnly(body) {
+			c.recordAPICall(endpoint, false, false)
+			return nil, &APIError{Status: 200, Codes: extractErrorCodes(body), Class: errEndpoint,
+				Message: fmt.Sprintf("%s errors-only 200: %s", endpoint, truncateBytes(body, 200))}
 		}
 
 		switch errClass {
@@ -1211,6 +1258,37 @@ func (c *Client) escalateHeaderless88(acc *Account, endpoint string, body []byte
 	acc.consecHeaderless88 = 0
 	acc.mu.Unlock()
 	return &APIError{Status: 200, Class: errBanned, Codes: extractErrorCodes(body), Message: "account banned (repeated header-less code 88)"}
+}
+
+// postReloginFailure classifies a failed post-recovery retry — a relogin or
+// ct0-adoption retry that still did not produce a usable response — by the
+// retry's own error codes, not by the failure that triggered the recovery
+// (#26 / issue #34). The fallback class applies only when the body carries
+// no recognized class: an errors-only or unrecognized-code retry keeps the
+// verdict the sites already reported, but a retry that answered suspended
+// (64) or locked (326) must not masquerade as auth-expired and take a soft
+// cooldown. The bench follows the classified verdict: suspended is benched
+// for good, locked/banned get BanCooldown, a rate-limited retry only marks
+// the endpoint window (the account is healthy — the same call the primary
+// arm makes), and anything else gets fallbackCooldown — which the
+// doPOST/recoverCSRFPost sites pass as 0 because they never charged a
+// post-relogin failure at all.
+func (c *Client) postReloginFailure(acc *Account, endpoint string, status int, body []byte, hdrs map[string]string, err error, fallback errorClass, fallbackCooldown time.Duration, msg string) *APIError {
+	cls := classifyError(body, hdrs)
+	if cls == errNone {
+		cls = fallback
+	}
+	switch {
+	case cls == errSuspended:
+		c.pool.DeactivateItem(acc)
+	case cls == errLocked || cls == errBanned:
+		c.pool.SoftDeactivate(acc, c.cfg.BanCooldown)
+	case cls == errRateLimited:
+		acc.MarkEndpointRateLimited(endpoint, parseRateLimitReset(hdrs[xRateLimitReset]))
+	case fallbackCooldown > 0:
+		c.pool.SoftDeactivate(acc, fallbackCooldown)
+	}
+	return &APIError{Status: status, Codes: extractErrorCodes(body), Class: cls, Err: err, Message: msg}
 }
 
 // quotedURLRe matches quoted HTTP(S) URLs embedded in error messages. Go's
@@ -1367,6 +1445,32 @@ func jsonHasContent(v any) bool {
 	}
 }
 
+// errorsOnly reports whether a body is an error envelope with no usable
+// payload: a non-empty errors[] array and no data the caller could act on
+// (hasResponseData semantics — absent, null, or all-empty leaves). It is the
+// "failed call wearing a 200" shape: classifyError leaves codes outside its
+// known list at errNone, so without this probe an errors-only body reaches
+// the caller as an empty success.
+func errorsOnly(body []byte) bool {
+	return hasGraphQLErrors(body) && !hasResponseData(body)
+}
+
+// usableResponse reports whether a response body counts as a success at the
+// request layer: a clean body (no error codes), or the partial-success shape
+// — errors[] under an X-side-only class (partialSuccessClass) that still
+// carries usable data. Every post-recovery retry gate uses it instead of a
+// bare status check: a 200 whose errors[] carry an account verdict
+// (suspended / locked / banned) or no usable data must not be returned as a
+// success — the former marks a dead account healthy, the latter is the
+// errors-only silent failure.
+func usableResponse(body []byte, hdrs map[string]string) bool {
+	cls := classifyError(body, hdrs)
+	if cls == errNone {
+		return !errorsOnly(body)
+	}
+	return partialSuccessClass(cls) && hasResponseData(body)
+}
+
 // addGraphQLParams builds the full URL with variables, features, and optional fieldToggles.
 func addGraphQLParams(url string, variables, features map[string]any, fieldToggles ...map[string]any) string {
 	v, _ := json.Marshal(variables)
@@ -1383,34 +1487,29 @@ func addGraphQLParams(url string, variables, features map[string]any, fieldToggl
 	return result
 }
 
+// jsonEscape percent-encodes a JSON blob for use as a URL query value: every
+// byte outside the RFC 3986 unreserved set [A-Za-z0-9-._~] is emitted as %XX.
+// Encoding per byte (not per rune) encodes UTF-8 correctly, and covering the
+// full unreserved set — not a hand-picked list — keeps reserved characters
+// from corrupting the query string: a raw '#' would truncate the URL into a
+// fragment, '+' would decode as a space, '%' would start a bogus escape, and
+// a raw '"' would early-terminate the quoted-URL strip isProxyError relies
+// on (#47). Space stays %20 (never '+'), and the hot-path inputs callers
+// send today (numeric ids, feature-flag names) produce output byte-identical
+// to the previous hand-rolled version.
 func jsonEscape(b []byte) string {
-	s := string(b)
+	const hex = "0123456789ABCDEF"
 	var result strings.Builder
-	for _, ch := range s {
-		switch {
-		case ch == ' ':
-			result.WriteString("%20")
-		case ch == '"':
-			result.WriteString("%22")
-		case ch == '{':
-			result.WriteString("%7B")
-		case ch == '}':
-			result.WriteString("%7D")
-		case ch == '[':
-			result.WriteString("%5B")
-		case ch == ']':
-			result.WriteString("%5D")
-		case ch == ':':
-			result.WriteString("%3A")
-		case ch == ',':
-			result.WriteString("%2C")
-		case ch == '\'':
-			result.WriteString("%27")
-		case ch == '|':
-			result.WriteString("%7C")
-		default:
-			result.WriteRune(ch)
+	result.Grow(len(b) + len(b)/4)
+	for _, c := range b {
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' ||
+			c == '-' || c == '.' || c == '_' || c == '~' {
+			result.WriteByte(c)
+			continue
 		}
+		result.WriteByte('%')
+		result.WriteByte(hex[c>>4])
+		result.WriteByte(hex[c&0x0F])
 	}
 	return result.String()
 }

@@ -455,6 +455,8 @@ func TestAttemptOutcome(t *testing.T) {
 		{"code 326", 200, `{"errors":[{"code":326}]}`, nil, false, telemetry.OutcomeLocked},
 		{"code 161", 200, `{"errors":[{"code":161}]}`, nil, false, telemetry.OutcomeBlocked},
 		{"code 131", 200, `{"errors":[{"code":131}]}`, nil, false, telemetry.OutcomeInternal},
+		{"errors-only 200 unlisted code", 200, `{"errors":[{"code":999}]}`, nil, false, telemetry.OutcomeEndpoint},
+		{"partial errors 200 unlisted code", 200, `{"data":{"x":1},"errors":[{"code":999}]}`, nil, false, telemetry.OutcomeOK},
 		{"transport", 0, ``, errors.New("EOF"), false, telemetry.OutcomeTransport},
 		{"proxy", 0, ``, errors.New("Proxy responded with non 200 code: 407"), false, telemetry.OutcomeProxy},
 		// A direct account's DNS / connection-refused is not a proxy failure.

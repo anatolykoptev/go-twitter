@@ -413,7 +413,7 @@ func (c *Client) doMediaRequest(ctx context.Context, acc *Account, method, urlSt
 				}
 				authTok2, ct02, ua2 := acc.Credentials()
 				body2, respHdrs2, status2, err2 := c.observedMediaReq(ctx, acc, bc, method, urlStr, payload, mediaHeaders(authTok2, ct02, ua2, contentType))
-				if err2 == nil && isUploadOK(status2) {
+				if err2 == nil && isUploadOK(status2) && usableResponse(body2, respHdrs2) {
 					c.recordAPICall(epUploadMedia, true, false)
 					acc.RecordSuccess()
 					return body2, nil
@@ -465,6 +465,14 @@ func (c *Client) doMediaRequest(ctx context.Context, acc *Account, method, urlSt
 			apiErr.Message = fmt.Sprintf("%s rate limited (code 88)", epUploadMedia)
 			return nil, apiErr
 		}
+		// Same errors-only guard as the request paths: an errors[] envelope
+		// with no usable data is a failed call, not a success — and must not
+		// feed RecordSuccess below.
+		if cls == errNone && errorsOnly(body) {
+			c.recordAPICall(epUploadMedia, false, false)
+			return nil, &APIError{Status: status, Codes: extractErrorCodes(body), Class: errEndpoint,
+				Message: fmt.Sprintf("%s errors-only %d: %s", epUploadMedia, status, truncateBytes(body, 200))}
+		}
 		if cls != errNone {
 			c.recordAPICall(epUploadMedia, false, false)
 			// X-side classes (131 internal, LoadShed) never charge the account.
@@ -509,7 +517,7 @@ func (c *Client) recoverCSRFMedia(ctx context.Context, acc *Account, bc *stealth
 		authTok2, ct02, ua2 := acc.Credentials()
 		c.saveSession(acc, authTok2, ct02)
 		body2, respHdrs2, status2, err2 := c.observedMediaReq(ctx, acc, bc, method, urlStr, payload, mediaHeaders(authTok2, ct02, ua2, contentType))
-		if err2 == nil && isUploadOK(status2) && classifyError(body2, respHdrs2) == errNone {
+		if err2 == nil && isUploadOK(status2) && usableResponse(body2, respHdrs2) {
 			if newCT0 := extractCT0FromHeaders(respHdrs2); newCT0 != "" {
 				acc.SetCT0(newCT0)
 				authTok3, ct03, _ := acc.Credentials()
@@ -541,7 +549,7 @@ func (c *Client) recoverCSRFMedia(ctx context.Context, acc *Account, bc *stealth
 	}
 	authTok3, ct03, ua3 := acc.Credentials()
 	body3, respHdrs3, status3, err3 := c.observedMediaReq(ctx, acc, bc, method, urlStr, payload, mediaHeaders(authTok3, ct03, ua3, contentType))
-	if err3 == nil && isUploadOK(status3) && classifyError(body3, respHdrs3) == errNone {
+	if err3 == nil && isUploadOK(status3) && usableResponse(body3, respHdrs3) {
 		c.recordAPICall(epUploadMedia, true, false)
 		acc.RecordSuccess()
 		return body3, true

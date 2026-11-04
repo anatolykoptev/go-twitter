@@ -239,6 +239,13 @@ func attemptOutcome(status int, body []byte, hdrs map[string]string, err error, 
 	if ae.Class != errNone {
 		return outcomeForClass(ae.Class)
 	}
+	// An errors-only 2xx is a failed call wearing "ok": classifyError leaves
+	// codes outside its known list at errNone, so without this probe the
+	// metric records the silent failure as a healthy request. Report the
+	// same endpoint class the retry loop returns for this shape.
+	if status >= 200 && status < 300 && errorsOnly(body) {
+		return telemetry.OutcomeEndpoint
+	}
 	switch {
 	case status >= 200 && status < 300:
 		return telemetry.OutcomeOK

@@ -292,13 +292,19 @@ func timelineTweetParse(body []byte, op string, rootFn func(json.RawMessage) tim
 	if err := json.Unmarshal(body, &env); err != nil {
 		return nil, "", fmt.Errorf("unmarshal timeline: %w", err)
 	}
-	if len(env.Errors) > 0 {
-		return nil, "", fmt.Errorf("twitter API error: %s", env.Errors[0].Message)
-	}
 	tl := rootFn(env.Data)
 	if len(tl.Instructions) == 0 {
 		slog.Warn("timeline typed root missed; used recursive fallback", slog.String("op", op))
 		tl = findTimelineInstructions(env.Data)
+	}
+	// errors[] is fatal only when no usable timeline arrived — the same
+	// data-wins rule SearchTimeline/UserByScreenName/TweetDetail already
+	// follow: X routinely ships partial pages alongside non-fatal errors.
+	if len(tl.Instructions) == 0 && len(env.Errors) > 0 {
+		return nil, "", fmt.Errorf("twitter API error: %s", env.Errors[0].Message)
+	}
+	if len(env.Errors) > 0 {
+		slog.Debug("timeline errors[] alongside data", slog.String("op", op), slog.String("first", env.Errors[0].Message))
 	}
 	tweets, err := extractTweetsFromTimeline(tl, "")
 	if err != nil {
