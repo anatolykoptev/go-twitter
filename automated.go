@@ -48,24 +48,41 @@ func automatedCooldown(base time.Duration) time.Duration {
 	return base + time.Duration(rand.Float64()*automatedJitterFrac*float64(base))
 }
 
+// automatedRepeatBase is the base cooldown of a repeat 226. It is the larger of
+// BanCooldown (the same base as a lock, 326) and twice AuthCooldown, so a repeat
+// always benches longer than the first 226 whatever the config: a deployment may
+// set BanCooldown short on purpose for other paths (an AuthCooldown of 30m with
+// a BanCooldown of 1m), and 2x clears the first bench's maximum of 1.25x
+// AuthCooldown including jitter.
+func (c *Client) automatedRepeatBase() time.Duration {
+	return max(c.cfg.BanCooldown, 2*c.cfg.AuthCooldown)
+}
+
 // automatedBenchFor picks and records the bench for a 226 on acc. The graduated
 // policy: the FIRST 226 on an account benches it for AuthCooldown (plus
 // jitter) — X has judged one burst of traffic, which a pause usually settles,
 // and a wrong first call costs an hour, not a shift. A SECOND 226 within
-// automatedRepeatWindow of the previous bench ending means the pause did not
-// change the verdict, so it escalates to BanCooldown (plus jitter), the same
-// base as a lock (326). Both reads and writes feed one per-account state.
+// automatedRepeatWindow of the previous bench ENDING means the pause did not
+// change the verdict, so it escalates to automatedRepeatBase (plus jitter),
+// never shorter than the first bench. A 226 that lands while the account is
+// still inside its own bench is not a second offence — it is another in-flight
+// request answered before the bench took hold — so it keeps the current bench
+// (the returned duration is what remains of it). Both reads and writes feed one
+// per-account state.
 func (c *Client) automatedBenchFor(acc *Account) time.Duration {
 	now := time.Now()
 	acc.mu.Lock()
+	defer acc.mu.Unlock()
+	if now.Before(acc.automatedUntil) {
+		return acc.automatedUntil.Sub(now)
+	}
 	repeat := !acc.automatedUntil.IsZero() && now.Before(acc.automatedUntil.Add(automatedRepeatWindow))
 	base := c.cfg.AuthCooldown
 	if repeat {
-		base = c.cfg.BanCooldown
+		base = c.automatedRepeatBase()
 	}
 	d := automatedCooldown(base)
 	acc.automatedUntil = now.Add(d)
-	acc.mu.Unlock()
 	return d
 }
 

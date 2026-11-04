@@ -63,10 +63,13 @@ type ClientConfig struct {
 	// own expiry policy.
 	SessionTTL time.Duration
 
-	// AuthCooldown is the soft-deactivation duration for auth errors.
+	// AuthCooldown is the soft-deactivation duration for auth errors. It is also
+	// the bench for a first "looks automated" (226) verdict.
 	AuthCooldown time.Duration
 
 	// BanCooldown is the soft-deactivation duration for banned/locked accounts.
+	// A repeat 226 uses max(BanCooldown, 2*AuthCooldown), so a repeat is never
+	// shorter than the first.
 	BanCooldown time.Duration
 
 	// NonResponsiveCooldown is the BASE backoff for accounts that trip the
