@@ -162,3 +162,62 @@ func TestWithSocial_ReportOverflow_IncrementsDroppedCounter(t *testing.T) {
 	}
 	assert.Positive(t, total, "overflowed reports must increment the counter")
 }
+
+// A flush that runs while a submit is between its two steps must wait for that
+// report: it is already committed to run, and the process would exit before it
+// starts if the flush returned.
+//
+// Mutation: social_report.go submit — move the `s.n++` registration (and the
+// afterFirstStep call) below the `select { case s.sem <- ... }` slot reservation
+// (the old order) => RED: flush returns nil while the report is still pending.
+func TestReportSink_FlushDuringSubmit_WaitsForReport(t *testing.T) {
+	s := newReportSink(4)
+	reached := make(chan struct{})
+	resume := make(chan struct{})
+	s.afterFirstStep = func() {
+		close(reached)
+		<-resume
+	}
+	finish := make(chan struct{})
+	var finished atomic.Bool
+	submitted := make(chan struct{})
+	go func() {
+		defer close(submitted)
+		s.submit(func() {
+			<-finish
+			finished.Store(true)
+		})
+	}()
+	<-reached // submit is mid-way: one step done, the other not
+
+	flushed := make(chan error, 1)
+	go func() { flushed <- s.wait(context.Background()) }()
+	select {
+	case err := <-flushed:
+		t.Fatalf("flush returned %v while a report was being submitted", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+
+	close(resume)
+	<-submitted
+	select {
+	case err := <-flushed:
+		t.Fatalf("flush returned %v before the report finished", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(finish)
+	require.NoError(t, <-flushed)
+	assert.True(t, finished.Load(), "flush returned before the report finished")
+}
+
+// A report dropped at the cap leaves nothing in flight: a flush must not hang.
+func TestReportSink_DroppedAtCap_DoesNotHoldFlush(t *testing.T) {
+	s := newReportSink(1)
+	block := make(chan struct{})
+	require.True(t, s.submit(func() { <-block }))
+	require.False(t, s.submit(func() {}))
+	close(block)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	require.NoError(t, s.wait(ctx))
+}
