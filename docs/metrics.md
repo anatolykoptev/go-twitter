@@ -30,7 +30,7 @@ metrics.
 | `twitter.client.ratelimit.remaining` | histogram | `{request}` | `twitter.operation` |
 | `twitter.client.ratelimit.limit` | histogram | `{request}` | `twitter.operation` |
 | `twitter.client.ratelimit.holds` | counter | `{hold}` | `twitter.operation` |
-| `twitter.client.queryid.refreshes` | counter | `{refresh}` | `twitter.trigger`, `twitter.result` |
+| `twitter.client.queryid.refreshes` | counter | `{refresh}` | `twitter.trigger`, `twitter.result`, `twitter.layout` |
 | `twitter.client.queryid.changed` | gauge | `{id}` | none |
 | `twitter.client.queryid.age` | gauge | `s` | none |
 | `twitter.client.queryid.refresh.duration` | histogram | `s` | `twitter.trigger`, `twitter.result` |
@@ -276,10 +276,29 @@ recorded through whichever client triggered or observed the refresh, so the
     validation, so nothing was applied); `panic` (the walk panicked on a bundle body and was
     recovered); `suppressed` (an attempt was due but the 15 min / failure-backoff spacing refused it;
     not a refresh, counted so a stuck backoff is visible).
+  - `twitter.layout`: the layout of the authenticated warm page the attempt read:
+    `webpack` (the legacy responsive-web build), `vite` (the x-web build),
+    `vite+webpack` (a page showing both), or `unknown` (no page could be read, or it
+    carried no recognisable script). A `suppressed` attempt reads no page, so it
+    carries the last recognised layout. A sustained `layout!="webpack"` means the
+    signed-in page is no longer the legacy build.
   - A `fetch_failed` or `rejected` result keeps the last good map. The first
     failure after a success (or after process start) also fires one
     `queryid.refresh_failed` pool alert; further failures do not until a success
     in between. Alert on `rate(refreshes{result!~"ok|ok_xweb_only"})` for a persistent break.
+  - `ok_xweb_only` means the authenticated page is already the x-web build: only the
+    x-web native operations were refreshed, every other id keeps its last value (it
+    is not healed). Treat it as the signal that the build changed, not as a plain
+    success.
+  - Layout alert: the first time a process sees the page move from `webpack` to `vite`
+    or `vite+webpack`, one `queryid.layout_changed` pool alert fires (payload `from`,
+    `to`), through the same hook as `queryid.refresh_failed`. It fires once per such
+    transition, never for the first page a process sees, and is fed by both the xtid
+    warm-page hook and the refresher's own page fetch (the only source when xtid does
+    not fetch the authenticated page). An unrecognised page, and the logged-out shell (served when an account's cookies are
+    refused), change nothing: no alert, and the stored layout and the `twitter.layout` label
+    keep the last known value. The alert needs a previous layout, so a flip that happens while
+    the process is down raises no alert; the `twitter.layout` label still shows it.
 - `changed`: how many operation IDs differed from the compiled set on the last
   successful refresh (operations pinned by a `TWITTER_QID_*` override are not
   counted: the refreshed id is not applied to them). A non-zero value means the binary is behind X: rebuild with

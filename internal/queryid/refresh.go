@@ -232,6 +232,7 @@ type Refresher struct {
 	Streak    int // consecutive failed attempts; drives the backoff
 	alertHook func(topic string, payload any)
 	page      *WarmPage
+	layout    string // last recognised warm-page layout; "" until the first observation
 }
 
 // New returns a refresher with cfg. It panics when cfg.Catalog is incomplete:
@@ -275,6 +276,54 @@ func (r *Refresher) ObservePage(page []byte) {
 	r.Mu.Lock()
 	r.page = wp
 	r.Mu.Unlock()
+	r.noteLayout(wp)
+}
+
+// noteLayout records the layout of a warm page parsed from either source (the
+// xtid hook via ObservePage, or the refresher's own fetch in pageFor) and fires
+// the queryid.layout_changed pool alert once per webpack -> vite transition.
+// The first observation after process start never fires: there is nothing to
+// have changed from. An unrecognised page (LayoutUnknown) and the logged-out
+// shell (served when an account's cookies are refused, so it is a dead session,
+// not the signed-in build) say nothing about the build: they neither fire nor
+// overwrite the last known layout.
+func (r *Refresher) noteLayout(wp *WarmPage) {
+	layout := wp.Layout
+	if layout == LayoutUnknown || layout == "" || bundle.IsLoggedOutShell(wp.Scripts) {
+		return // says nothing about the signed-in build
+	}
+	r.Mu.Lock()
+	from := r.layout
+	r.layout = layout
+	hook := r.alertHook
+	r.Mu.Unlock()
+	if from != LayoutWebpack || (layout != LayoutVite && layout != LayoutBoth) {
+		return
+	}
+	slog.Warn("queryid refresh: warm page layout changed",
+		slog.String("from", from), slog.String("to", layout))
+	poolAlert(hook, "queryid.layout_changed", map[string]any{"from": from, "to": layout})
+}
+
+// lastLayout is the layout the metrics report for an attempt that never parsed
+// a page (a suppressed one): the last recognised layout, else LayoutUnknown.
+func (r *Refresher) lastLayout() string {
+	r.Mu.Lock()
+	defer r.Mu.Unlock()
+	if r.layout == "" {
+		return LayoutUnknown
+	}
+	return r.layout
+}
+
+// poolAlert delivers topic to hook, or to a warn log line when none is wired.
+func poolAlert(hook func(topic string, payload any), topic string, payload any) {
+	if hook == nil {
+		hook = func(topic string, payload any) {
+			slog.Warn("pool alert", slog.String("topic", topic), slog.Any("payload", payload))
+		}
+	}
+	hook(topic, payload)
 }
 
 // ParseWarmPage detects the page layout and collects the start bundles. When a
@@ -319,7 +368,7 @@ func (r *Refresher) OnAuthedRequest(f bundle.Fetcher, m *telemetry.Metrics) {
 		return
 	}
 	if !r.IntervalOK(now) {
-		m.RecordQIDRefresh(trig, ResultSuppressed)
+		m.RecordQIDRefresh(trig, ResultSuppressed, r.lastLayout())
 		return
 	}
 	r.fire(trig, f, m)
@@ -341,7 +390,7 @@ func (r *Refresher) OnEndpointFault(op string, mk func() bundle.Fetcher, m *tele
 		return
 	}
 	if !r.IntervalOK(r.Now()) {
-		m.RecordQIDRefresh(triggerFault, ResultSuppressed)
+		m.RecordQIDRefresh(triggerFault, ResultSuppressed, r.lastLayout())
 		return
 	}
 	f := mk()
@@ -438,7 +487,7 @@ func (r *Refresher) fire(trig string, f bundle.Fetcher, m *telemetry.Metrics) {
 func (r *Refresher) Run(trig string, f bundle.Fetcher, m *telemetry.Metrics) {
 	now := r.Now()
 	if !r.IntervalOK(now) {
-		m.RecordQIDRefresh(trig, ResultSuppressed)
+		m.RecordQIDRefresh(trig, ResultSuppressed, r.lastLayout())
 		return
 	}
 	r.NextAllowedNS.Store(now.Add(r.Cfg.MinInterval).UnixNano())
@@ -460,7 +509,7 @@ func (r *Refresher) Run(trig string, f bundle.Fetcher, m *telemetry.Metrics) {
 		wait := r.Backoff(r.Streak)
 		r.Mu.Unlock()
 		r.NextAllowedNS.Store(now.Add(wait).UnixNano())
-		m.RecordQIDRefresh(trig, result)
+		m.RecordQIDRefresh(trig, result, seen.Layout)
 		r.noteFailure(trig, result, err)
 		return
 	}
@@ -471,7 +520,7 @@ func (r *Refresher) Run(trig string, f bundle.Fetcher, m *telemetry.Metrics) {
 	r.Mu.Lock()
 	r.Streak = 0
 	r.Mu.Unlock()
-	m.RecordQIDRefresh(trig, result)
+	m.RecordQIDRefresh(trig, result, seen.Layout)
 	m.RecordQIDChanged(snap.Changed)
 	r.noteSuccess(trig, snap, carried)
 }
@@ -586,12 +635,7 @@ func (r *Refresher) noteFailure(trig, result string, err error) {
 	}
 	slog.Warn("queryid refresh failed; keeping the last good ids",
 		slog.String("trigger", trig), slog.String("result", result), slog.Any("error", err))
-	if hook == nil {
-		hook = func(topic string, payload any) {
-			slog.Warn("pool alert", slog.String("topic", topic), slog.Any("payload", payload))
-		}
-	}
-	hook("queryid.refresh_failed", map[string]any{"error": err.Error(), "trigger": trig, "result": result})
+	poolAlert(hook, "queryid.refresh_failed", map[string]any{"error": err.Error(), "trigger": trig, "result": result})
 }
 
 // Consume feeds one fetched body to the extractor. A var only so a test can
@@ -637,6 +681,9 @@ func (r *Refresher) Build(ctx context.Context, f bundle.Fetcher, seen *PageSeen)
 		return nil, err
 	}
 	seen.Layout, seen.Scripts = page.Layout, len(page.Scripts)
+	if bundle.IsLoggedOutShell(page.Scripts) {
+		seen.Layout = r.lastLayout() // a refused session, not the signed-in build
+	}
 	if len(page.Scripts) == 0 {
 		return nil, fmt.Errorf("queryid refresh: no x-web or responsive-web scripts on the warm page (layout=%s, page_bytes=%d)",
 			page.Layout, page.pageBytes)
@@ -762,7 +809,9 @@ func (r *Refresher) pageFor(ctx context.Context, f bundle.Fetcher) (*WarmPage, e
 	if err != nil {
 		return nil, fmt.Errorf("queryid refresh: fetch warm page: %w", err)
 	}
-	return ParseWarmPage(body, r.Now()), nil
+	wp := ParseWarmPage(body, r.Now())
+	r.noteLayout(wp)
+	return wp, nil
 }
 
 // ValidateIDs checks a bundle extraction as a whole and returns the ids to
