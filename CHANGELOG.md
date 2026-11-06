@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.14](https://github.com/anatolykoptev/go-twitter/compare/v0.8.13...v0.8.14) (2026-11-06)
+
+
+### Features
+
+* **queryid:** report the warm-page layout and alert on webpack -&gt; vite ([#203](https://github.com/anatolykoptev/go-twitter/issues/203)) ([2df0b09](https://github.com/anatolykoptev/go-twitter/commit/2df0b0988b385204d7e7e49474c3ed97ba354f84))
+
 ## [0.8.13](https://github.com/anatolykoptev/go-twitter/compare/v0.8.12...v0.8.13) (2026-11-04)
 
 
