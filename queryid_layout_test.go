@@ -69,26 +69,28 @@ func (noNetFetcher) Fetch(context.Context, string) ([]byte, error) {
 	return nil, errors.New("no network in this test")
 }
 
-// A refresh that fails after the page was parsed still reports the layout: the
-// real inline entry script of the x-web shell (the logged-out shell, so the
-// attempt ends fetch_failed), then a second attempt inside the spacing window
-// is counted suppressed under the last known layout.
+// A refresh that reads the logged-out shell (a refused session) fails
+// fetch_failed under the LAST KNOWN layout, not "vite": the shell says nothing
+// about the signed-in build. A second attempt inside the spacing window is
+// counted suppressed under the same layout.
 //
 // Mutation (failure path): refresh.go Run, pass "" at the err-path
 // RecordQIDRefresh call => RED. Mutation (suppressed path): lastLayout returns
-// LayoutUnknown unconditionally => RED.
+// LayoutUnknown unconditionally => RED. Mutation (shell): Build, drop the
+// IsLoggedOutShell override of seen.Layout => RED (label reads "vite").
 func TestQIDRefresh_LayoutAttribute_OnFailureAndSuppressed(t *testing.T) {
 	r, _ := useQIDRefresher(t)
 	reader, cm := newLayoutReader(t)
-	page, err := os.ReadFile(filepath.Join("internal", "queryid", "testdata", "entry-inline.html"))
+	shell, err := os.ReadFile(filepath.Join("internal", "queryid", "testdata", "entry-inline.html"))
 	require.NoError(t, err)
 
-	r.ObservePage(page)
+	r.ObservePage([]byte(`<html><script src="https://abs.twimg.com/responsive-web/client-web/main.0123456789abcdefa.js"></script></html>`))
+	r.ObservePage(shell)
 	r.Run("first", noNetFetcher{}, cm.instruments())
 	r.Run("first", noNetFetcher{}, cm.instruments())
 
 	assert.Equal(t, map[string]int64{
-		"first/" + queryid.ResultFetchFailed + "/" + queryid.LayoutVite: 1,
-		"first/" + queryid.ResultSuppressed + "/" + queryid.LayoutVite:  1,
+		"first/" + queryid.ResultFetchFailed + "/" + queryid.LayoutWebpack: 1,
+		"first/" + queryid.ResultSuppressed + "/" + queryid.LayoutWebpack:  1,
 	}, qidLayoutSeries(t, reader))
 }

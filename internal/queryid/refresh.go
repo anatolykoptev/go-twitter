@@ -276,18 +276,21 @@ func (r *Refresher) ObservePage(page []byte) {
 	r.Mu.Lock()
 	r.page = wp
 	r.Mu.Unlock()
-	r.noteLayout(wp.Layout)
+	r.noteLayout(wp)
 }
 
 // noteLayout records the layout of a warm page parsed from either source (the
 // xtid hook via ObservePage, or the refresher's own fetch in pageFor) and fires
 // the queryid.layout_changed pool alert once per webpack -> vite transition.
 // The first observation after process start never fires: there is nothing to
-// have changed from. An unrecognised page (LayoutUnknown) says nothing about
-// the build, so it neither fires nor overwrites the last known layout.
-func (r *Refresher) noteLayout(layout string) {
-	if layout == LayoutUnknown || layout == "" {
-		return
+// have changed from. An unrecognised page (LayoutUnknown) and the logged-out
+// shell (served when an account's cookies are refused, so it is a dead session,
+// not the signed-in build) say nothing about the build: they neither fire nor
+// overwrite the last known layout.
+func (r *Refresher) noteLayout(wp *WarmPage) {
+	layout := wp.Layout
+	if layout == LayoutUnknown || layout == "" || bundle.IsLoggedOutShell(wp.Scripts) {
+		return // says nothing about the signed-in build
 	}
 	r.Mu.Lock()
 	from := r.layout
@@ -678,6 +681,9 @@ func (r *Refresher) Build(ctx context.Context, f bundle.Fetcher, seen *PageSeen)
 		return nil, err
 	}
 	seen.Layout, seen.Scripts = page.Layout, len(page.Scripts)
+	if bundle.IsLoggedOutShell(page.Scripts) {
+		seen.Layout = r.lastLayout() // a refused session, not the signed-in build
+	}
 	if len(page.Scripts) == 0 {
 		return nil, fmt.Errorf("queryid refresh: no x-web or responsive-web scripts on the warm page (layout=%s, page_bytes=%d)",
 			page.Layout, page.pageBytes)
@@ -804,7 +810,7 @@ func (r *Refresher) pageFor(ctx context.Context, f bundle.Fetcher) (*WarmPage, e
 		return nil, fmt.Errorf("queryid refresh: fetch warm page: %w", err)
 	}
 	wp := ParseWarmPage(body, r.Now())
-	r.noteLayout(wp.Layout)
+	r.noteLayout(wp)
 	return wp, nil
 }
 

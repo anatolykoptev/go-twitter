@@ -176,3 +176,30 @@ func TestParseWarmPage_RealInlineEntryScript(t *testing.T) {
 		t.Fatal("entry-client-<hash>.js must not be the logged-out shell")
 	}
 }
+
+// The logged-out shell reaches the xtid hook whenever an account's cookies are
+// refused. It is a dead session, not the signed-in build: it must not fire the
+// pool-wide alert, and must not overwrite the stored layout (else the next
+// healthy webpack page would reset the transition silently).
+//
+// Mutation: noteLayout, drop `|| bundle.IsLoggedOutShell(wp.Scripts)` => RED.
+func TestNoteLayout_LoggedOutShellIsIgnored(t *testing.T) {
+	shell := string(readQIDFixture(t, "entry-inline.html"))
+	for feeder, feed := range layoutFeeders {
+		t.Run(feeder, func(t *testing.T) {
+			r, log := newLayoutRefresher(t)
+			feed(t, r, layoutWebpackPage)
+			feed(t, r, shell)
+			if n := log.count("queryid.layout_changed"); n != 0 {
+				t.Fatalf("alerts after a logged-out shell = %d, want 0", n)
+			}
+			if got := r.lastLayout(); got != LayoutWebpack {
+				t.Fatalf("stored layout = %q, want %q", got, LayoutWebpack)
+			}
+			feed(t, r, layoutVitePage) // a real flip afterwards still alerts, once
+			if n := log.count("queryid.layout_changed"); n != 1 {
+				t.Fatalf("alerts after a real flip = %d, want 1", n)
+			}
+		})
+	}
+}

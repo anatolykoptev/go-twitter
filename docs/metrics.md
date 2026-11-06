@@ -295,7 +295,10 @@ recorded through whichever client triggered or observed the refresh, so the
     `to`), through the same hook as `queryid.refresh_failed`. It fires once per such
     transition, never for the first page a process sees, and is fed by both the xtid
     warm-page hook and the refresher's own page fetch (the only source when xtid does
-    not fetch the authenticated page). An unrecognised page changes nothing.
+    not fetch the authenticated page). An unrecognised page, and the logged-out shell (served when an account's cookies are
+    refused), change nothing: no alert, and the stored layout and the `twitter.layout` label
+    keep the last known value. The alert needs a previous layout, so a flip that happens while
+    the process is down raises no alert; the `twitter.layout` label still shows it.
 - `changed`: how many operation IDs differed from the compiled set on the last
   successful refresh (operations pinned by a `TWITTER_QID_*` override are not
   counted: the refreshed id is not applied to them). A non-zero value means the binary is behind X: rebuild with
