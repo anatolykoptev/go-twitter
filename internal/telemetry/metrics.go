@@ -57,6 +57,7 @@ const (
 	AttrResult       = "twitter.result"
 	AttrTrigger      = "twitter.trigger"
 	AttrReason       = "twitter.reason"
+	AttrLayout       = "twitter.layout"
 )
 
 // Request/relogin outcome values (twitter.outcome). Bounded: request outcomes
@@ -432,14 +433,35 @@ func (m *Metrics) RecordHold(endpoint string) {
 	m.rlHolds.Add(context.Background(), 1, metric.WithAttributes(attribute.String(AttrOperation, endpoint)))
 }
 
-// RecordQIDRefresh counts one refresh attempt (see docs/metrics.md).
-func (m *Metrics) RecordQIDRefresh(trigger, result string) {
+// Warm-page layouts reported on the refresh counter (twitter.layout). Bounded:
+// anything else is reported as layoutUnknown.
+const (
+	layoutWebpack = "webpack"
+	layoutVite    = "vite"
+	layoutBoth    = "vite+webpack"
+	layoutUnknown = "unknown"
+)
+
+// boundedLayout keeps the twitter.layout attribute to its four values.
+func boundedLayout(layout string) string {
+	switch layout {
+	case layoutWebpack, layoutVite, layoutBoth:
+		return layout
+	}
+	return layoutUnknown
+}
+
+// RecordQIDRefresh counts one refresh attempt (see docs/metrics.md). layout is
+// the warm-page layout the attempt saw, or the last known one for a suppressed
+// attempt.
+func (m *Metrics) RecordQIDRefresh(trigger, result, layout string) {
 	if m == nil {
 		return
 	}
 	m.qidRefreshes.Add(context.Background(), 1, metric.WithAttributes(
 		attribute.String(AttrTrigger, trigger),
 		attribute.String(AttrResult, result),
+		attribute.String(AttrLayout, boundedLayout(layout)),
 	))
 }
 
