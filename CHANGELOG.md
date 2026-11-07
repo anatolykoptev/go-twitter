@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.8.15](https://github.com/anatolykoptev/go-twitter/compare/v0.8.14...v0.8.15) (2026-11-07)
+
+
+### Features
+
+* CaptureRequest records the headers an identity sends ([#205](https://github.com/anatolykoptev/go-twitter/issues/205)) ([2884a79](https://github.com/anatolykoptev/go-twitter/commit/2884a795327f6316c712f78b054d19a1d1ca8558))
+
 ## [0.8.14](https://github.com/anatolykoptev/go-twitter/compare/v0.8.13...v0.8.14) (2026-11-06)
 
 
