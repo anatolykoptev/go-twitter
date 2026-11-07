@@ -11,10 +11,6 @@ import (
 	"golang.org/x/net/publicsuffix"
 )
 
-// sessionCookieNames are the cookies the Account owns: they are written into
-// the Account's cookie jar from the Account's values.
-var sessionCookieNames = []string{"auth_token", "ct0"}
-
 // defaultSessionOrigins are the sites a current identity's session cookies are
 // scoped to. x.com serves the web client (x.com and api.x.com); twitter.com is
 // the legacy host a current identity still reaches (upload.twitter.com, the
