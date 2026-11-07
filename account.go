@@ -771,3 +771,5 @@ func ParseAccounts(raw string) []*Account {
 	}
 	return accounts
 }
+
+// throwaway code proof, do not merge
