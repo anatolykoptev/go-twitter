@@ -10,7 +10,6 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -44,15 +43,7 @@ type metricsFixture struct {
 	reader *sdkmetric.ManualReader
 	acc    *Account
 	now    time.Time
-	hits   atomicCounter
 }
-
-type atomicCounter struct {
-	mu sync.Mutex
-	n  int
-}
-
-func (a *atomicCounter) inc() { a.mu.Lock(); a.n++; a.mu.Unlock() }
 
 // snowflakeAt builds a snowflake ID whose embedded time is t (ms precision).
 func snowflakeAt(t time.Time) string {

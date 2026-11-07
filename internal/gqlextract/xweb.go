@@ -248,21 +248,6 @@ func (r *resolver) lookup(ident string) string {
 	return out
 }
 
-func validIdent(s string) bool {
-	if s == "" {
-		return false
-	}
-	for i, c := range s {
-		switch {
-		case c == '_' || c == '$' || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'):
-		case i > 0 && c >= '0' && c <= '9':
-		default:
-			return false
-		}
-	}
-	return true
-}
-
 // literal returns el itself when it is an object/array literal, else the
 // literal the identifier el was assigned.
 func (r *resolver) literal(el string) string {
