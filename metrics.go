@@ -254,11 +254,6 @@ func (m *clientMetrics) recordProxyFailure() {
 // twitterEpochMs is the Twitter snowflake epoch (2010-11-04T01:42:54.657Z).
 const twitterEpochMs = parse.TwitterEpochMs
 
-// SnowflakeTime returns the creation time encoded in a Twitter/X snowflake ID
-// (a tweet ID): (id >> 22) + 1288834974657 ms. Consumers use it to compute
-// their own publication-to-first-seen lag.
-func SnowflakeTime(id string) (time.Time, error) { return parse.SnowflakeTime(id) }
-
 // attemptOutcome classifies (proxied: the attempt went through a per-account
 // proxy; only then can a transport failure be attributed to the proxy, the same
 // gate attributeTransportError uses for proxy.failures) one HTTP attempt into a bounded twitter.outcome

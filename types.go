@@ -1,6 +1,11 @@
 package twitter
 
-import "github.com/anatolykoptev/go-twitter/model"
+import (
+	"time"
+
+	"github.com/anatolykoptev/go-twitter/internal/parse"
+	"github.com/anatolykoptev/go-twitter/model"
+)
 
 // The response types live in package model so the internal parsers can return
 // them without importing this package; the aliases keep the names unchanged.
@@ -30,3 +35,8 @@ const (
 	SearchPeople SearchProduct = "People"
 	SearchMedia  SearchProduct = "Media"
 )
+
+// SnowflakeTime returns the creation time encoded in a Twitter/X snowflake ID
+// (a tweet ID): (id >> 22) + 1288834974657 ms. Consumers use it to compute
+// their own publication-to-first-seen lag.
+func SnowflakeTime(id string) (time.Time, error) { return parse.SnowflakeTime(id) }
