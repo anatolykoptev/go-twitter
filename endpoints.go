@@ -8,6 +8,7 @@ import (
 
 	"github.com/anatolykoptev/go-twitter/internal/operations"
 	"github.com/anatolykoptev/go-twitter/internal/queryid"
+	"github.com/anatolykoptev/go-twitter/internal/xtidprobe"
 )
 
 // twitterBase is the GraphQL root. A var (not const) only so tests can point the
@@ -156,3 +157,5 @@ func bookmarkFeatures() map[string]any {
 	f["graphql_timeline_v2_bookmark_timeline"] = true
 	return f
 }
+
+func init() { xtidprobe.GraphQLFeatures = gqlFeatures }
