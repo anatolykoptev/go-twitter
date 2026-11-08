@@ -102,8 +102,9 @@ The project is pre-1.0, so the API can change between minor versions. It relies 
 | [Request format](docs/request-format.md) | What the client sends and how to configure it |
 | [Metrics](docs/metrics.md) | OpenTelemetry instruments and attributes |
 | [Maintenance](docs/maintenance.md) | Keeping GraphQL IDs current, tools, CI |
+| [x-web migration](docs/xweb-migration.md) | Generated inventory of the operations on X's new web client |
 
-Release history is in the [changelog](CHANGELOG.md).
+Every document in the repository is listed in [docs/INDEX.md](docs/INDEX.md). Release history is in the [changelog](CHANGELOG.md).
 
 ## Contributing
 
