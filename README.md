@@ -3,7 +3,7 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/anatolykoptev/go-twitter.svg)](https://pkg.go.dev/github.com/anatolykoptev/go-twitter)
 [![CI](https://github.com/anatolykoptev/go-twitter/actions/workflows/preflight.yml/badge.svg)](https://github.com/anatolykoptev/go-twitter/actions/workflows/preflight.yml)
 [![Release](https://img.shields.io/github/v/release/anatolykoptev/go-twitter)](https://github.com/anatolykoptev/go-twitter/releases)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](LICENSE)
 
 An unofficial Go client for the X (Twitter) web API.
 
@@ -116,4 +116,4 @@ This is an independent project. It is not affiliated with, endorsed by or sponso
 
 ## License
 
-[MIT](LICENSE)
+[Apache-2.0](LICENSE)
