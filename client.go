@@ -24,7 +24,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 )
 
-// Client is the top-level Twitter scraping client.
+// Client is the top-level Twitter client.
 type Client struct {
 	client               *stealth.BrowserClient
 	pool                 *pool.Pool[*Account]
