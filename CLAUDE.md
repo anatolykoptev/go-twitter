@@ -1,0 +1,68 @@
+# CLAUDE.md
+
+Notes for coding agents working in go-twitter: an unofficial Go client for the X (Twitter) web API
+(`package twitter`, module `github.com/anatolykoptev/go-twitter`). It holds a pool of logged-in
+accounts, follows the rate limits X reports, refreshes GraphQL operation ids at runtime and exposes
+OpenTelemetry metrics. Other fleet services depend on it. Every document is indexed in
+[docs/INDEX.md](docs/INDEX.md).
+
+## Layout (as on `main` today)
+
+- Root package `twitter`, a flat set of files by concern: `client.go`, `config.go`, `options.go`
+  (client and configuration); `account.go`, `auth.go`, `cookies.go`, `ct0.go`, `session_store.go`,
+  `session_check.go`, `relogin_*.go`, `social*.go` (accounts, sessions, login, credential service);
+  `request.go`, `headers.go`, `wire.go`, `identity.go`, `xtid.go`, `warm_nav.go`, `capture.go`
+  (what a request looks like on the wire); `graphql.go`, `endpoints.go`, `queryid_refresh.go`,
+  `pagination.go` and the per-feature files `follow.go`, `dm.go`, `media.go`, `devicefollow.go`
+  (operations); `errors.go`, `ratelimit_*.go`, `metrics.go`, `trace.go`, `automated.go`
+  (failure handling and observability); `types.go` and `doc.go`.
+- `model/`: response types, aliased into the root package. `internal/parse` decodes API bodies into
+  them and holds no I/O.
+- `internal/operations`: GraphQL operation data; `queryids_gen.go` and `features_gen.go` are
+  generated, `endpoints.go` holds the committed literals. `internal/queryid`, `internal/gqlextract`
+  and `internal/bundle` fetch and read X's page and script bundles; `internal/xwebnative` lists the
+  operations issued against the newer web client.
+- `xtid/` (transaction-id generation, with a browser oracle under `xtid/testdata/browser`), `xpff/`,
+  `captcha/`, `social/`, `slogsample/`, `internal/telemetry`.
+- `cmd/gql-sync` (regenerates the operation data), `cmd/xtid-probe`, `cmd/xweb-report` (regenerates
+  `docs/xweb-migration.md`).
+
+## Gate
+
+CI (`.github/workflows/preflight.yml`, job `preflight`, `ubuntu-24.04-arm`, Go `stable`) runs
+`make preflight`: gofmt must print nothing, `go vet ./...`, `go build ./...`,
+`go test -count=1 ./...`, with `GOWORK=off`. A docs-only PR (Markdown, `docs/`, licence, issue and
+PR templates) skips the `preflight` job through the `docs-scope` job in the same workflow; that
+block is canonical across the fleet and compared byte for byte, so do not edit it here. A weekly
+workflow, `gql-sync-drift.yml`, regenerates the operation data from the live bundle and opens a PR
+for human review; it never auto-merges.
+
+## Invariants that are easy to break
+
+- **Tests run offline.** No request to X, no real account. Fixtures carry no cookies, tokens, proxy
+  credentials or private messages. `.gitleaksignore` lists the known benign matches.
+- **Never edit `internal/operations/queryids_gen.go` or `features_gen.go` by hand;** run
+  `cmd/gql-sync`. The effective id per operation is env override (`TWITTER_QID_*`), then
+  runtime-refreshed, then generated, then the committed literal. A wrong id is an HTTP 400 on every
+  call that uses it, so generated values are reviewed, not trusted.
+- **An account's wire identity is stable and generation-gated.** TLS profile, User-Agent, Client
+  Hints and the values derived from them are a function of the account key and survive restarts. A
+  request-shape change applies only to the generations that opt in (`wireGen`), so adding a profile
+  to go-stealth must not change what an existing account sends. Test wire changes against the
+  captures in `testdata/wire_loggedin_oracle.json` and the real-browser oracle in `xtid/testdata/browser`,
+  never against another library's behaviour.
+- **`ct0` is never rotated on a timer or replaced by a client-generated value on an established
+  session.** X validates it server-side; doing so causes error 353. Adopt the value from responses.
+  An extracted `ct0` is checked against the token alphabet before use, because it lands in a header.
+- **Cookies, tokens, passwords and proxy credentials never reach logs, errors, metrics or traces.**
+  `TWITTER_DUMP_DIR` writes response bodies to disk and is debugging-only.
+- **Automatic re-login is guarded.** A client that never calls `SetAutoReloginGate` gets the
+  built-in per-account breaker; do not make re-login unconditional.
+- **Pooled pagination must terminate.** `pageLoop` stops on a repeated cursor, X's terminal cursor
+  and a no-progress limit; keep every cursor reader on it.
+- **Usage reports to the credential service are bounded and detached from the caller's context,**
+  and are dropped, not queued without limit, when the service is slow.
+- **Versions come from release-please**, which reads Conventional Commits in PR titles. Never tag or
+  edit `CHANGELOG.md` or `.release-please-manifest.json` by hand.
+- **This repository is public.** No hostnames of private services, IP addresses, operator paths,
+  account names, tokens or personal data in any tracked file, tests and fixtures included.
