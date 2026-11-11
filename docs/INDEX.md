@@ -7,7 +7,7 @@
 | [CONTRIBUTING](../CONTRIBUTING.md) | Build, the preflight gate, pull-request rules, generated files, test data rules |
 | [SECURITY](../SECURITY.md) | How to report a vulnerability privately |
 | [CODE_OF_CONDUCT](../CODE_OF_CONDUCT.md) | Contributor Covenant code of conduct |
-| [LICENSE](../LICENSE) | MIT licence |
+| [LICENSE](../LICENSE) | Apache License 2.0 |
 | [api](api.md) | Every client method, whether the pool or the caller picks the account, and the types |
 | [configuration](configuration.md) | Accounts, every ClientConfig field with its default, environment variables |
 | [errors](errors.md) | Recovery per error class, predicates, the relogin breaker |
