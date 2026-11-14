@@ -112,7 +112,7 @@ func TestQueryIDCompleteness_GeneratedOrManualAllowed(t *testing.T) {
 // TestQueryIDCompleteness_AllowlistNotGrowing asserts a manual allowlist entry
 // must not also appear in GeneratedQueryIDs. If gql-sync starts extracting a
 // previously manual op, the allowlist entry must be removed so the gap stays
-// visible. This is cheap to run in the weekly gql-sync drift workflow.
+// visible. This is cheap to run after a manual gql-sync regeneration.
 func TestQueryIDCompleteness_AllowlistNotGrowing(t *testing.T) {
 	for name := range knownManualQueryIDs {
 		if id, ok := GeneratedQueryIDs[name]; ok && id != "" {
