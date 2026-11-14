@@ -1,5 +1,26 @@
 # Changelog
 
+## [0.8.16](https://github.com/anatolykoptev/go-twitter/compare/v0.8.15...v0.8.16) (2026-11-14)
+
+
+### Refactoring
+
+* merge five small root files into their natural homes ([#215](https://github.com/anatolykoptev/go-twitter/issues/215)) ([c3bbeec](https://github.com/anatolykoptev/go-twitter/commit/c3bbeecd52be4501d0bade7747e47fea1679f9f9))
+* remove three unused unexported leftovers ([#214](https://github.com/anatolykoptev/go-twitter/issues/214)) ([85d8978](https://github.com/anatolykoptev/go-twitter/commit/85d8978af31b96d2304c8cc8eebe20d934d3438e))
+
+
+### CI
+
+* docs gate treats code-referenced docs as code ([#220](https://github.com/anatolykoptev/go-twitter/issues/220)) ([a4f7f8a](https://github.com/anatolykoptev/go-twitter/commit/a4f7f8a0c2abf42433c1cf290b16dd9118f0c49b))
+* docs-only PRs skip the heavy gate ([#209](https://github.com/anatolykoptev/go-twitter/issues/209)) ([1e07459](https://github.com/anatolykoptev/go-twitter/commit/1e07459920aad9d5836a390929ed7a7cc14a4c51))
+* re-sync the docs-only gate with the canonical block ([#218](https://github.com/anatolykoptev/go-twitter/issues/218)) ([8371f7b](https://github.com/anatolykoptev/go-twitter/commit/8371f7bdb99aa033f071b0279ddfcb8ce844cb85))
+* remove the scheduled GraphQL drift check ([#221](https://github.com/anatolykoptev/go-twitter/issues/221)) ([2063992](https://github.com/anatolykoptev/go-twitter/commit/2063992b0f70a1d0383d6cce3499284c18c0c3b0))
+
+
+### Documentation
+
+* bring repository documents up to the repo-standards set ([#216](https://github.com/anatolykoptev/go-twitter/issues/216)) ([c9c7a39](https://github.com/anatolykoptev/go-twitter/commit/c9c7a3985c897e6f6ed93993d6c8806cdcf2bb72))
+
 ## [0.8.15](https://github.com/anatolykoptev/go-twitter/compare/v0.8.14...v0.8.15) (2026-11-07)
 
 
