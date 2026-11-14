@@ -11,7 +11,7 @@
 | [api](api.md) | Every client method, whether the pool or the caller picks the account, and the types |
 | [configuration](configuration.md) | Accounts, every ClientConfig field with its default, environment variables |
 | [errors](errors.md) | Recovery per error class, predicates, the relogin breaker |
-| [maintenance](maintenance.md) | Keeping GraphQL operation ids current with gql-sync and the weekly drift check, tools, CI |
+| [maintenance](maintenance.md) | Keeping GraphQL operation ids current with gql-sync, tools, CI |
 | [metrics](metrics.md) | OpenTelemetry instruments, their attributes and how to install a provider |
 | [rate-limits](rate-limits.md) | Per-account, per-endpoint windows, seeds, spend shares, holds, pacing and the request observer |
 | [request-format](request-format.md) | What the client sends: transaction id, headers, TLS profile, identities and wire generations |

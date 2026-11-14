@@ -13,6 +13,8 @@ go run ./cmd/gql-sync -proxy "$PROXY_URL" -fail-on-empty
 GQL_SYNC_COOKIES='auth_token=...; ct0=...' go run ./cmd/gql-sync -fail-on-empty
 ```
 
+Regeneration is run by hand; no scheduled CI job does it. Review the diff before committing: a wrong queryID or feature-flag default is an HTTP 400 on every call that uses it. If a known feature-flag value changed, `TestFeatureDrift_CommittedVsGenerated` fails until `committedFeatures()` in `internal/operations/endpoints.go` matches.
+
 Flags: `-out` (output directory, default `internal/operations`), `-proxy`, `-fixtures` (read from a directory instead of the network), `-date`, `-fail-on-empty` (exit non-zero instead of leaving the files untouched when nothing is extracted).
 
 ## Tools
@@ -21,15 +23,5 @@ Flags: `-out` (output directory, default `internal/operations`), `-proxy`, `-fix
 - `cmd/xweb-report` regenerates the [x-web migration inventory](xweb-migration.md).
 
 ## CI
-
-**gql-sync drift check** (`.github/workflows/gql-sync-drift.yml`) — runs weekly
-(Mon 06:00 UTC, plus manual `workflow_dispatch`). It runs gql-sync against x.com's **live** JS
-bundle and, if the generated files changed, opens a PR for human review (it never auto-merges
-generated values — a wrong queryID/flag default is an HTTP 400 on every call).
-
-Requires repo secret **`TWITTER_PROXY`**: a proxy URL that can reach x.com from
-GitHub's runners. The job runs with
-`-fail-on-empty`, so a missing proxy or a bundle break exits non-zero and fails
-closed instead of overwriting the committed IDs with nothing.
 
 **preflight** (`.github/workflows/preflight.yml`) — `make preflight` (gofmt, vet, build, test) on every PR and push to `main`.
